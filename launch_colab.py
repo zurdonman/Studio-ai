@@ -66,7 +66,17 @@ def ensure_dependencies() -> None:
         else "requirements.txt"
     )
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "-q", "--upgrade", "-r", str(req_file)]
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--upgrade-strategy",
+            "only-if-needed",
+            "-r",
+            str(req_file),
+        ]
     )
     _remove_incompatible_preinstalled_packages()
     print("✅ Dependencias listas.", flush=True)

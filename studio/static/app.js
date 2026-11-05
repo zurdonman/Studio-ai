@@ -5,6 +5,11 @@
   const state = {
     catalog: [],
     catalogFilter: "all",
+    gpuProfile: "auto",
+    activeGpuProfile: null,
+    vidOnlyCompat: true,
+    catOnlyCompat: false,
+    hfSearchResults: [],
     assets: { uploads: [], images: [], videos: [], audio: [], montages: [] },
     voices: [],
     jobs: [],
@@ -299,7 +304,7 @@
       // Barra inline directa en el panel de Vídeo
       const isVidRelated =
         topRunning.kind === "video" ||
-        (topRunning.title && /wan|ltx|vídeo|video/i.test(topRunning.title));
+        (topRunning.title && /wan|ltx|sana|skyreels|cogvideo|vace|vídeo|video/i.test(topRunning.title));
       if (isVidRelated && vidInline) {
         vidInline.hidden = false;
         const spd = topRunning.speed_text ? ` · ${topRunning.speed_text}` : "";
@@ -324,7 +329,7 @@
       if (btnQwen) btnQwen.disabled = false;
       if (btnVidPrep) {
         btnVidPrep.disabled = false;
-        btnVidPrep.textContent = "⚡ Preparar Modelo de Vídeo";
+        syncVideoPrepareButtonLabel();
       }
       if (!state.selectedJobId && state.jobs.length > 0) {
         state.selectedJobId = state.jobs[0].id;
@@ -427,47 +432,227 @@
   }
 
   // ==================== CATÁLOGO Y MEMORIA ====================
+  // ==================== CATÁLOGO, FILTRO GPU Y EXPLORADOR HF ====================
+  function formatVideoModes(modes) {
+    if (!Array.isArray(modes) || modes.length === 0) return [];
+    const map = {
+      i2v: "Imagen → Vídeo",
+      t2v: "Texto → Vídeo",
+      av: "🔊 Vídeo + Audio",
+    };
+    return modes.map((k) => map[k] || k);
+  }
+
+  function syncGpuPillsUI() {
+    document.querySelectorAll(".gpu-pill").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.gpu === state.gpuProfile);
+      if (btn.dataset.gpu === "auto" && state.activeGpuProfile && state.gpuProfile === "auto") {
+        btn.textContent = `⚡ Mi GPU: ${state.activeGpuProfile.short || "Auto"}`;
+      } else if (btn.dataset.gpu === "auto" && state.gpuProfile !== "auto") {
+        btn.textContent = "⚡ Mi GPU (Auto)";
+      }
+    });
+    const vidChk = $("chk-vid-only-compat");
+    if (vidChk) vidChk.checked = state.vidOnlyCompat;
+    const catChk = $("chk-cat-only-compat");
+    if (catChk) catChk.checked = state.catOnlyCompat;
+  }
+
+  function syncVideoPrepareButtonLabel() {
+    const btn = $("btn-prepare-video");
+    const sel = $("select-video-model");
+    if (!btn || !sel || btn.disabled) return;
+    const m = state.catalog.find((item) => item.id === sel.value);
+    if (!m) {
+      btn.textContent = "⚡ Descargar y Cargar Modelo";
+      return;
+    }
+    if (m.builtin_no_download) {
+      btn.textContent = "✅ Integrado (0 GB · Listo)";
+    } else if (m.loaded_in_memory) {
+      btn.textContent = "✅ Activo en RAM/VRAM";
+    } else if (m.downloaded) {
+      btn.textContent = "⚡ Cargar en RAM/VRAM";
+    } else {
+      btn.textContent = `⬇⚡ Descargar y Cargar (${m.estimated_gb} GB)`;
+    }
+  }
+
   async function loadCatalog() {
-    const data = await api("/api/catalog");
+    const data = await api(
+      `/api/catalog?gpu_profile=${encodeURIComponent(state.gpuProfile)}&only_compatible=false`
+    );
     state.catalog = data.models || [];
+    state.activeGpuProfile = data.active_gpu_profile || null;
+    syncGpuPillsUI();
     renderCatalog();
     populateVideoModelSelect();
+    populateTtsEngineSelect();
     if (state.lastHardware) {
       updateEngineBars(data.loaded_slots || []);
     }
   }
 
-  function populateVideoModelSelect() {
-    const sel = $("select-video-model");
+  function populateTtsEngineSelect() {
+    const sel = $("tts-engine-select");
+    if (!sel) return;
     const prev = sel.value;
-    const vModels = state.catalog.filter((m) => m.category === "video");
-    sel.innerHTML = vModels
+    const ttsModels = state.catalog.filter((m) => m.category === "tts");
+    if (ttsModels.length === 0) return;
+    sel.innerHTML = ttsModels
       .map((m) => {
-        const st = m.loaded_in_memory ? "🟢 En VRAM" : m.downloaded ? "🟡 En disco" : `⬇ ${m.estimated_gb} GB`;
-        return `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} [${st}]</option>`;
+        const tag = m.builtin_no_download
+          ? "0 GB · Instantáneo"
+          : m.downloaded
+          ? "En disco"
+          : `${m.estimated_gb} GB`;
+        return `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} [${tag}]</option>`;
       })
       .join("");
-    if (prev && vModels.some((m) => m.id === prev)) {
+    if (prev && ttsModels.some((m) => m.id === prev)) {
       sel.value = prev;
     }
+  }
+
+  function applyVideoModelDefaults(modelId) {
+    const m = state.catalog.find((x) => x.id === modelId);
+    if (!m) return;
+    if (m.engine === "ffmpeg_motion") {
+      state.videoMode = "ffmpeg_motion";
+      $("vmode-ai").classList.remove("active");
+      $("vmode-ffmpeg").classList.add("active");
+      $("vid-ai-fields").hidden = true;
+      $("vid-ai-steps-row").hidden = true;
+      $("vid-ffmpeg-fields").hidden = false;
+      $("vid-fps").value = 24;
+      return;
+    }
+    if (state.videoMode === "ffmpeg_motion") {
+      state.videoMode = "ai";
+      $("vmode-ai").classList.add("active");
+      $("vmode-ffmpeg").classList.remove("active");
+      $("vid-ai-fields").hidden = false;
+      $("vid-ai-steps-row").hidden = false;
+      $("vid-ffmpeg-fields").hidden = true;
+    }
+    if (m.default_fps) $("vid-fps").value = m.default_fps;
+    if (m.default_steps) $("vid-steps").value = m.default_steps;
+    syncVideoPrepareButtonLabel();
+  }
+
+  function populateVideoModelSelect() {
+    const sel = $("select-video-model");
+    const cardsBox = $("video-model-cards");
+    const prev = sel.value;
+    let vModels = state.catalog.filter((m) => m.category === "video");
+    if (state.vidOnlyCompat) {
+      const runnable = vModels.filter((m) => m.compatibility && m.compatibility.compatible);
+      if (runnable.length > 0) vModels = runnable;
+    }
+
+    sel.innerHTML = vModels
+      .map((m) => {
+        const st = m.loaded_in_memory
+          ? "🟢 En VRAM"
+          : m.builtin_no_download
+          ? "⚡ 0 GB"
+          : m.downloaded
+          ? "💾 En disco"
+          : `⬇ ${m.estimated_gb} GB`;
+        const stk = (m.compatibility && m.compatibility.sticker) || "";
+        return `<option value="${escapeHtml(m.id)}">${stk} · ${escapeHtml(m.name)} [${st}]</option>`;
+      })
+      .join("");
+
+    if (prev && vModels.some((m) => m.id === prev)) {
+      sel.value = prev;
+    } else if (vModels.length > 0) {
+      sel.value = vModels[0].id;
+    }
+
+    const activeId = sel.value;
+    if (cardsBox) {
+      cardsBox.innerHTML = vModels
+        .map((m) => {
+          const comp = m.compatibility || {};
+          const tier = comp.tier || "good";
+          const modes = formatVideoModes(m.video_modes)
+            .map((lbl) => `<span class="vm-mode-pill">${escapeHtml(lbl)}</span>`)
+            .join("");
+          const diskTxt = m.builtin_no_download
+            ? "0 GB (integrado)"
+            : m.loaded_in_memory
+            ? "🟢 Activo en VRAM"
+            : m.downloaded
+            ? `💾 En disco (${m.actual_disk_gb || m.estimated_gb} GB)`
+            : `☁️ ${m.estimated_gb} GB`;
+          return `
+            <div class="vm-card ${m.id === activeId ? "selected" : ""}" data-vmid="${escapeHtml(m.id)}">
+              <div class="vm-card-top">
+                <div class="vm-card-title">${escapeHtml(m.name)}</div>
+              </div>
+              <div class="vm-card-meta">
+                <span class="gpu-sticker ${escapeHtml(tier)}">${escapeHtml(comp.label || comp.sticker || "")}</span>
+              </div>
+              <div class="vm-card-meta">
+                ${modes}
+                <span>· ${escapeHtml(diskTxt)}</span>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+
+      cardsBox.querySelectorAll(".vm-card").forEach((card) => {
+        card.addEventListener("click", () => {
+          sel.value = card.dataset.vmid;
+          cardsBox.querySelectorAll(".vm-card").forEach((c) => c.classList.remove("selected"));
+          card.classList.add("selected");
+          applyVideoModelDefaults(sel.value);
+        });
+      });
+    }
+    syncVideoPrepareButtonLabel();
   }
 
   function renderCatalog() {
     const grid = $("catalog-grid");
     const filtered = state.catalog.filter((m) => {
+      if (state.catOnlyCompat && m.compatibility && !m.compatibility.compatible) return false;
       if (state.catalogFilter === "all") return true;
       if (state.catalogFilter === "image") return m.category === "image" || m.category === "lora";
       return m.category === state.catalogFilter;
     });
 
+    if (filtered.length === 0) {
+      grid.innerHTML = `<div class="muted" style="padding:14px;">No hay modelos en esta categoría para el filtro de GPU seleccionado. Desmarca «Ocultar los que no caben» o cambia de GPU arriba.</div>`;
+      return;
+    }
+
     grid.innerHTML = filtered
       .map((m) => {
-        const compatClass = m.compatibility.status === "ok" ? "ok" : "warn";
+        const comp = m.compatibility || {};
+        const tier = comp.tier || "good";
         const diskLabel = m.builtin_no_download
           ? "Integrado (0 GB)"
           : m.downloaded
           ? `En disco: ${m.actual_disk_gb || m.estimated_gb} GB`
-          : `Peso est.: ~${m.estimated_gb} GB (Libre: ${m.free_disk_gb} GB)`;
+          : `Peso descarga: ~${m.estimated_gb} GB (Libre: ${m.free_disk_gb} GB)`;
+
+        const modeTags = formatVideoModes(m.video_modes)
+          .map((lbl) => `<span class="mc-tag">${escapeHtml(lbl)}</span>`)
+          .join("");
+
+        const matrixHtml = Array.isArray(m.gpu_matrix)
+          ? `<div class="gpu-mini-matrix">` +
+            m.gpu_matrix
+              .map(
+                (gm) =>
+                  `<span class="gmm-chip ${escapeHtml(gm.tier)}" title="${escapeHtml(gm.gpu_short)}: ${escapeHtml(gm.sticker)}">${escapeHtml(gm.gpu_short)}: ${escapeHtml(gm.sticker)}</span>`
+              )
+              .join("") +
+            `</div>`
+          : "";
 
         let btns = "";
         if (!m.builtin_no_download) {
@@ -491,10 +676,14 @@
             <div>
               <div class="mc-badges">
                 <span class="mc-tag ${m.is_default ? "primary" : ""}">${escapeHtml(m.badge || m.category)}</span>
-                <span class="mc-tag ${compatClass}">${escapeHtml(m.compatibility.label)}</span>
+                ${modeTags}
+              </div>
+              <div style="margin:6px 0;">
+                <span class="gpu-sticker ${escapeHtml(tier)}">${escapeHtml(comp.label || comp.sticker || "")}</span>
               </div>
               <h4 class="mc-title">${escapeHtml(m.name)}</h4>
               <p class="mc-desc">${escapeHtml(m.description || "")}</p>
+              ${matrixHtml}
             </div>
             <div>
               <div class="mc-stats">
@@ -523,6 +712,100 @@
     grid.querySelectorAll("[data-del]").forEach((b) =>
       b.addEventListener("click", () => deleteModelFromDisk(b.dataset.del))
     );
+  }
+
+  async function runHfLiveSearch(customQuery = null, customCat = null) {
+    const qInput = $("hf-live-query");
+    const cSelect = $("hf-live-cat");
+    const box = $("hf-live-results");
+    const btn = $("btn-hf-live-search");
+    if (!box) return;
+
+    if (customQuery !== null && qInput) qInput.value = customQuery;
+    if (customCat !== null && cSelect) cSelect.value = customCat;
+
+    const q = (qInput && qInput.value.trim()) || "";
+    const cat = (cSelect && cSelect.value) || "video";
+
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "⏳ Consultando Hugging Face...";
+    }
+    box.innerHTML = `<div class="muted">Consultando repositorios abiertos en Hugging Face Hub...</div>`;
+
+    try {
+      const data = await api(
+        `/api/catalog/hf-search?query=${encodeURIComponent(q)}&category=${encodeURIComponent(cat)}&gpu_profile=${encodeURIComponent(state.gpuProfile)}&only_compatible=${state.catOnlyCompat}`
+      );
+      state.hfSearchResults = data.items || [];
+      if (state.hfSearchResults.length === 0) {
+        box.innerHTML = `<div class="muted">${escapeHtml(data.warning || "Sin resultados para esa búsqueda con el filtro actual.")}</div>`;
+        return;
+      }
+
+      box.innerHTML = state.hfSearchResults
+        .map((it, idx) => {
+          const comp = it.compatibility || {};
+          const already = state.catalog.some((m) =>
+            (m.artifacts || []).some((a) => a.repo_id === it.repo_id)
+          );
+          return `
+            <div class="hf-live-card">
+              <div>
+                <div style="display:flex;justify-content:space-between;gap:6px;align-items:flex-start;">
+                  <strong style="font-size:12.5px;word-break:break-word;">${escapeHtml(it.repo_id)}</strong>
+                  <span class="muted" style="white-space:nowrap;">⬇ ${(it.downloads || 0).toLocaleString()}</span>
+                </div>
+                <div style="margin-top:6px;">
+                  <span class="gpu-sticker ${escapeHtml(comp.tier || "good")}">${escapeHtml(comp.label || comp.sticker || "")}</span>
+                </div>
+                <div class="muted" style="margin-top:5px;">
+                  Descarga est.: ~${it.estimated_gb} GB · VRAM mín.: ~${it.min_vram_gb} GB
+                </div>
+              </div>
+              <div>
+                ${
+                  already
+                    ? `<span class="mc-tag ok">✓ Ya incluido en tu catálogo</span>`
+                    : `<button type="button" class="btn btn-secondary btn-sm" data-hf-import="${idx}">➕ Añadir a mi Catálogo</button>`
+                }
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+
+      box.querySelectorAll("[data-hf-import]").forEach((b) => {
+        b.addEventListener("click", async () => {
+          const item = state.hfSearchResults[Number(b.dataset.hfImport)];
+          if (!item) return;
+          try {
+            await api("/api/catalog/custom", {
+              method: "POST",
+              body: JSON.stringify({
+                name: item.name || item.repo_id,
+                repo_id: item.repo_id,
+                category: item.category,
+                estimated_gb: item.estimated_gb,
+                min_vram_gb: item.min_vram_gb,
+              }),
+            });
+            toast(`«${item.repo_id}» añadido a tu catálogo.`, "success");
+            await loadCatalog();
+            runHfLiveSearch();
+          } catch (e) {
+            toast(e.message, "error");
+          }
+        });
+      });
+    } catch (e) {
+      box.innerHTML = `<div class="muted">No se pudo conectar con Hugging Face (${escapeHtml(e.message)}).</div>`;
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "🔍 Buscar en HF";
+      }
+    }
   }
 
   async function downloadModel(modelId) {
@@ -890,13 +1173,13 @@
     const imgSel = $("vid-source-image");
     const prevImg = imgSel.value;
     imgSel.innerHTML =
-      `<option value="">-- Selecciona una imagen --</option>` +
+      `<option value="">-- Sin imagen inicial (modo Texto → Vídeo) --</option>` +
       allImgs
         .map((im) => `<option value="${escapeHtml(im.rel_path)}">${escapeHtml(im.filename)}</option>`)
         .join("");
     if (prevImg && allImgs.some((i) => i.rel_path === prevImg)) {
       imgSel.value = prevImg;
-    } else if (allImgs.length > 0 && !imgSel.value) {
+    } else if (allImgs.length > 0 && !imgSel.value && prevImg !== "") {
       imgSel.value = allImgs[0].rel_path;
     }
     updateVideoSourceThumb();
@@ -951,10 +1234,27 @@
     const rel = $("vid-source-image").value;
     const box = $("vid-source-preview-box");
     if (!rel) {
-      box.innerHTML = `<span class="muted">Selecciona o sube una imagen</span>`;
+      box.innerHTML = `<span class="muted">Sin imagen inicial · Se generará Vídeo desde tu Prompt (Texto → Vídeo)</span>`;
       return;
     }
-    box.innerHTML = `<img src="/media/${escapeHtml(rel)}" alt="Origen vídeo" />`;
+    box.innerHTML = `<img id="vid-src-thumb-img" src="/media/${escapeHtml(rel)}" alt="Origen vídeo" />`;
+    const thumbImg = $("vid-src-thumb-img");
+    if (thumbImg && state.videoMode === "ai") {
+      thumbImg.onload = () => {
+        const nw = thumbImg.naturalWidth || 832;
+        const nh = thumbImg.naturalHeight || 480;
+        if (nh > nw * 1.12) {
+          $("vid-width").value = 480;
+          $("vid-height").value = 832;
+        } else if (nw > nh * 1.12) {
+          $("vid-width").value = 832;
+          $("vid-height").value = 480;
+        } else {
+          $("vid-width").value = 640;
+          $("vid-height").value = 640;
+        }
+      };
+    }
   }
 
   function showVideoResult(meta) {
@@ -1413,12 +1713,54 @@
     });
 
     // Pestaña 2: Vídeo
+    $("select-video-model").addEventListener("change", (ev) => {
+      const mid = ev.target.value;
+      document.querySelectorAll(".vm-card").forEach((c) => {
+        c.classList.toggle("selected", c.dataset.vmid === mid);
+      });
+      applyVideoModelDefaults(mid);
+    });
+
     $("btn-prepare-video").addEventListener("click", () => {
       const mid = $("select-video-model").value || "wan22-ti2v-5b";
       loadModelIntoMemory(mid, true);
     });
     $("btn-unload-video").addEventListener("click", () => unloadFromMemory("video"));
     $("vid-source-image").addEventListener("change", updateVideoSourceThumb);
+
+    document.querySelectorAll(".vid-preset-chip").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        $("vid-width").value = chip.dataset.vw;
+        $("vid-height").value = chip.dataset.vh;
+      });
+    });
+
+    // Filtro por GPU de Colab sincronizado entre Vídeo y Catálogo HF
+    document.querySelectorAll(".gpu-pill").forEach((pill) => {
+      pill.addEventListener("click", async () => {
+        state.gpuProfile = pill.dataset.gpu || "auto";
+        await loadCatalog();
+        if (state.hfSearchResults.length > 0) {
+          runHfLiveSearch();
+        }
+      });
+    });
+
+    if ($("chk-vid-only-compat")) {
+      $("chk-vid-only-compat").addEventListener("change", (ev) => {
+        state.vidOnlyCompat = ev.target.checked;
+        populateVideoModelSelect();
+      });
+    }
+    if ($("chk-cat-only-compat")) {
+      $("chk-cat-only-compat").addEventListener("change", (ev) => {
+        state.catOnlyCompat = ev.target.checked;
+        renderCatalog();
+        if (state.hfSearchResults.length > 0) {
+          runHfLiveSearch();
+        }
+      });
+    }
 
     $("input-vid-upload-img").addEventListener("change", async (ev) => {
       const f = ev.target.files[0];
@@ -1455,10 +1797,13 @@
 
     $("btn-run-video").addEventListener("click", async () => {
       try {
+        const chosenVidModel = $("select-video-model").value;
+        const effectiveMode =
+          chosenVidModel === "ffmpeg-motion-cpu" ? "ffmpeg_motion" : state.videoMode;
         const res = await api("/api/video/generate", {
           method: "POST",
           body: JSON.stringify({
-            mode: state.videoMode,
+            mode: effectiveMode,
             prompt: $("vid-prompt").value,
             image_rel: $("vid-source-image").value || null,
             audio_rel: $("vid-source-audio").value || null,
@@ -1581,7 +1926,7 @@
       }
     });
 
-    // Pestaña 5: Catálogo y Añadir HF custom
+    // Pestaña 5: Catálogo, Explorador HF en vivo y Añadir HF custom
     document.querySelectorAll(".filter-chip").forEach((chip) => {
       chip.addEventListener("click", () => {
         state.catalogFilter = chip.dataset.cat;
@@ -1589,6 +1934,18 @@
         chip.classList.add("active");
         renderCatalog();
       });
+    });
+
+    if ($("btn-hf-live-search")) {
+      $("btn-hf-live-search").addEventListener("click", () => runHfLiveSearch());
+    }
+    if ($("hf-live-query")) {
+      $("hf-live-query").addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") runHfLiveSearch();
+      });
+    }
+    document.querySelectorAll(".hf-topic-chip").forEach((chip) => {
+      chip.addEventListener("click", () => runHfLiveSearch(chip.dataset.q, chip.dataset.c));
     });
 
     $("btn-add-custom-hf").addEventListener("click", async () => {

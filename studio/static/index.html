@@ -338,23 +338,45 @@
 
       <!-- ==================== PESTAÑA 2: ESTUDIO DE VÍDEO ==================== -->
       <section id="tab-video" class="view-panel">
-        <div class="engine-bar">
-          <div class="engine-bar-info">
-            <span class="status-dot" id="vid-engine-dot"></span>
-            <div class="row-gap">
-              <strong>Modelo de Vídeo IA:</strong>
-              <select id="select-video-model" class="inline-select"></select>
-              <span class="muted-inline" id="vid-engine-state">Sin cargar en VRAM</span>
+        <div class="engine-bar video-engine-panel">
+          <div class="vep-header-row">
+            <div class="engine-bar-info">
+              <span class="status-dot" id="vid-engine-dot"></span>
+              <div class="row-gap" style="flex-wrap:wrap;">
+                <strong>Modelo de Vídeo:</strong>
+                <select id="select-video-model" class="inline-select"></select>
+                <span class="muted-inline" id="vid-engine-state">Sin cargar en VRAM</span>
+              </div>
+            </div>
+            <div class="engine-bar-actions">
+              <button class="btn btn-primary btn-sm" id="btn-prepare-video">
+                ⚡ Descargar y Cargar Modelo
+              </button>
+              <button class="btn btn-ghost btn-sm" id="btn-unload-video">
+                🧹 Sacar de RAM/VRAM
+              </button>
             </div>
           </div>
-          <div class="engine-bar-actions">
-            <button class="btn btn-primary btn-sm" id="btn-prepare-video">
-              ⚡ Preparar Modelo de Vídeo
-            </button>
-            <button class="btn btn-ghost btn-sm" id="btn-unload-video">
-              🧹 Sacar de RAM/VRAM
-            </button>
+
+          <!-- Filtro rápido por GPU de Google Colab en la propia pestaña de Vídeo -->
+          <div class="gpu-filter-bar">
+            <span class="gpu-filter-label">🎛️ Filtrar por GPU de Colab:</span>
+            <div class="gpu-pills" id="vid-gpu-pills">
+              <button type="button" class="gpu-pill active" data-gpu="auto">⚡ Mi GPU (Auto)</button>
+              <button type="button" class="gpu-pill" data-gpu="T4">T4 · 15 GB</button>
+              <button type="button" class="gpu-pill" data-gpu="L4">L4 · 22.5 GB</button>
+              <button type="button" class="gpu-pill" data-gpu="A100_40">A100 · 40 GB</button>
+              <button type="button" class="gpu-pill" data-gpu="A100_80">A100 / H100 · 80 GB</button>
+            </div>
+            <label class="gpu-compat-toggle">
+              <input type="checkbox" id="chk-vid-only-compat" checked />
+              <span>Solo los que caben en esta GPU</span>
+            </label>
           </div>
+
+          <!-- Selector visual de modelos de vídeo con pegatina de rendimiento -->
+          <div id="video-model-cards" class="video-model-cards"></div>
+
           <div id="vid-inline-progress" class="inline-engine-progress" hidden>
             <div class="iep-top">
               <span id="vid-iep-step">Preparando...</span>
@@ -369,15 +391,22 @@
         <div class="two-col-studio">
           <div class="card">
             <div class="card-header">
-              <h3>Origen del Clip (Imagen + Voz opcional)</h3>
+              <h3>Origen del Clip y Ajustes</h3>
               <div class="mode-switch">
                 <button class="mode-pill active" data-vmode="ai" id="vmode-ai">🤖 Vídeo IA (GPU)</button>
-                <button class="mode-pill" data-vmode="ffmpeg_motion" id="vmode-ffmpeg">⚡ Clip Animado FFmpeg (CPU · 0 VRAM)</button>
+                <button class="mode-pill" data-vmode="ffmpeg_motion" id="vmode-ffmpeg">⚡ Animación FFmpeg (0 GB)</button>
               </div>
             </div>
 
             <div class="form-stack">
-              <label class="field-label">Imagen inicial del plano</label>
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
+                <label class="field-label" style="margin:0;">Imagen inicial (opcional en modelos Texto → Vídeo)</label>
+                <div class="preset-pills">
+                  <button type="button" class="vid-preset-chip" data-vw="832" data-vh="480">16:9 (832×480)</button>
+                  <button type="button" class="vid-preset-chip" data-vw="480" data-vh="832">9:16 Vertical (480×832)</button>
+                  <button type="button" class="vid-preset-chip" data-vw="640" data-vh="640">1:1 (640×640)</button>
+                </div>
+              </div>
               <div class="row-gap">
                 <select id="vid-source-image" class="flex-1"></select>
                 <label class="btn btn-secondary btn-sm file-btn">
@@ -386,15 +415,15 @@
                 </label>
               </div>
               <div class="selected-thumb-box" id="vid-source-preview-box">
-                <span class="muted">Selecciona una imagen arriba o súbela</span>
+                <span class="muted">Selecciona una imagen arriba (o «Sin imagen» para Texto → Vídeo)</span>
               </div>
 
-              <label class="field-label">Pista de voz / diálogo opcional (para Wan S2V o clip hablado)</label>
+              <label class="field-label">Pista de voz / música opcional (se une al MP4)</label>
               <select id="vid-source-audio"></select>
 
               <div id="vid-ai-fields">
-                <label class="field-label">Prompt de movimiento / acción</label>
-                <textarea id="vid-prompt" rows="2" placeholder="Ej: La cámara avanza suavemente mientras el personaje gira la cabeza con expresión natural..."></textarea>
+                <label class="field-label">Prompt de movimiento / escena</label>
+                <textarea id="vid-prompt" rows="2" placeholder="Ej: La cámara se acerca suavemente, brisa ligera en el cabello, iluminación cinematográfica natural..."></textarea>
               </div>
 
               <div id="vid-ffmpeg-fields" hidden>
@@ -410,19 +439,19 @@
               <div class="params-grid-4">
                 <div>
                   <label class="field-label">Ancho</label>
-                  <input type="number" id="vid-width" value="832" step="16" min="256" max="1920" />
+                  <input type="number" id="vid-width" value="832" step="32" min="256" max="1280" />
                 </div>
                 <div>
                   <label class="field-label">Alto</label>
-                  <input type="number" id="vid-height" value="480" step="16" min="256" max="1920" />
+                  <input type="number" id="vid-height" value="480" step="32" min="256" max="1280" />
                 </div>
                 <div>
                   <label class="field-label">Duración (s)</label>
-                  <input type="number" id="vid-duration" value="4.0" step="0.5" min="1" max="30" />
+                  <input type="number" id="vid-duration" value="4.0" step="0.5" min="1" max="12" />
                 </div>
                 <div>
                   <label class="field-label">FPS</label>
-                  <input type="number" id="vid-fps" value="16" step="1" min="8" max="30" />
+                  <input type="number" id="vid-fps" value="24" step="1" min="8" max="30" />
                 </div>
               </div>
 
@@ -483,8 +512,9 @@
               <label class="field-label">Motor de Voz</label>
               <select id="tts-engine-select">
                 <option value="edge-tts-cloud">Edge-TTS Neural (0 GB · Sin descarga · Español e idiomas)</option>
+                <option value="mms-tts-spa">Meta MMS-TTS Español (Local HF · 0.14 GB · Ultraligero)</option>
                 <option value="kokoro-82m-tts">Kokoro-82M Multilingüe (Local HF · 0.35 GB)</option>
-                <option value="qwen3-tts-1.7b">Qwen3-TTS 1.7B CustomVoice (Local HF · 3.6 GB)</option>
+                <option value="bark-small-tts">Suno Bark Small Expresivo (Local HF · 1.6 GB)</option>
               </select>
 
               <label class="field-label">Voz</label>
@@ -619,26 +649,70 @@
       <!-- ==================== PESTAÑA 5: CATÁLOGO HF Y MEMORIA ==================== -->
       <section id="tab-catalog" class="view-panel">
         <div class="catalog-top-note">
-          <div>
-            <strong>Gestor Bajo Demanda (Disco vs RAM/VRAM):</strong>
-            Nada se descarga solo al arrancar. Aquí eliges qué bajar de Hugging Face, qué cargar en memoria gráfica y qué liberar o borrar.
+          <div style="flex:1;min-width:260px;">
+            <strong>Catálogo Hugging Face Bajo Demanda y Filtro por GPU:</strong>
+            Elige tu GPU de Colab para ver qué modelos van fluidos (<span class="inline-badge-ok">🟢 Excelente</span>), normales (<span class="inline-badge-good">🟡 Normal</span>) o lentos (<span class="inline-badge-slow">🟠 Lento</span>).
             <span class="muted-block" id="ephemeral-note-text">Nota: el disco de sesión de Google Colab se reinicia al desconectar la máquina.</span>
           </div>
           <div class="filter-pills">
             <button class="filter-chip active" data-cat="all">Todos</button>
-            <button class="filter-chip" data-cat="image">Imagen + LoRAs</button>
-            <button class="filter-chip" data-cat="video">Vídeo</button>
-            <button class="filter-chip" data-cat="tts">Voz / TTS</button>
+            <button class="filter-chip" data-cat="video">🎬 Vídeo</button>
+            <button class="filter-chip" data-cat="image">🖼️ Imagen + LoRAs</button>
+            <button class="filter-chip" data-cat="tts">🎙️ Voz / TTS</button>
           </div>
+        </div>
+
+        <!-- Barra de filtro por GPU de Google Colab -->
+        <div class="gpu-filter-bar catalog-gpu-bar">
+          <span class="gpu-filter-label">🎛️ Simular / Filtrar para GPU Colab:</span>
+          <div class="gpu-pills" id="cat-gpu-pills">
+            <button type="button" class="gpu-pill active" data-gpu="auto">⚡ Mi GPU (Auto)</button>
+            <button type="button" class="gpu-pill" data-gpu="T4">T4 · 15 GB</button>
+            <button type="button" class="gpu-pill" data-gpu="L4">L4 · 22.5 GB</button>
+            <button type="button" class="gpu-pill" data-gpu="A100_40">A100 · 40 GB</button>
+            <button type="button" class="gpu-pill" data-gpu="A100_80">A100 / H100 · 80 GB</button>
+          </div>
+          <label class="gpu-compat-toggle">
+            <input type="checkbox" id="chk-cat-only-compat" />
+            <span>Ocultar los que no caben en esta GPU</span>
+          </label>
         </div>
 
         <div id="catalog-grid" class="catalog-grid"></div>
 
-        <!-- Añadir repositorio propio de Hugging Face -->
+        <!-- Explorador en vivo de Hugging Face (Lectura directa API HF sin token) -->
         <div class="card add-hf-card">
           <div class="card-header">
-            <h3>➕ Añadir otro Modelo o LoRA desde Hugging Face</h3>
-            <span class="muted">Quedará disponible en el catálogo sin tocar código</span>
+            <div>
+              <h3>🔍 Explorar más modelos en Hugging Face (en vivo)</h3>
+              <span class="muted">Consulta tamaños reales, descargas y compatibilidad con tu GPU directamente desde Hugging Face Hub</span>
+            </div>
+            <div class="preset-pills" id="hf-quick-topics">
+              <button type="button" class="hf-topic-chip" data-q="Wan" data-c="video">Wan Vídeo</button>
+              <button type="button" class="hf-topic-chip" data-q="LTX" data-c="video">LTX Vídeo</button>
+              <button type="button" class="hf-topic-chip" data-q="CogVideoX" data-c="video">CogVideoX</button>
+              <button type="button" class="hf-topic-chip" data-q="SkyReels" data-c="video">SkyReels</button>
+              <button type="button" class="hf-topic-chip" data-q="Qwen-Image" data-c="lora">LoRAs Qwen</button>
+            </div>
+          </div>
+          <div class="hf-search-bar">
+            <select id="hf-live-cat" class="hf-cat-select">
+              <option value="video">🎬 Modelos de Vídeo</option>
+              <option value="lora">🧩 LoRAs</option>
+              <option value="image">🖼️ Modelos de Imagen</option>
+              <option value="tts">🎙️ Modelos de Voz / TTS</option>
+            </select>
+            <input type="text" id="hf-live-query" class="flex-1" placeholder="Buscar en Hugging Face (ej: Wan, LTX, Hunyuan, Sana, Qwen, LoRA...)" />
+            <button type="button" class="btn btn-primary" id="btn-hf-live-search">🔍 Buscar en HF</button>
+          </div>
+          <div id="hf-live-results" class="hf-live-results"></div>
+        </div>
+
+        <!-- Añadir repositorio propio de Hugging Face manualmente -->
+        <div class="card add-hf-card">
+          <div class="card-header">
+            <h3>➕ Añadir otro Repositorio Exacto de Hugging Face</h3>
+            <span class="muted">Si ya tienes el nombre «autor/modelo», pégalo aquí</span>
           </div>
           <div class="params-grid-5">
             <div>

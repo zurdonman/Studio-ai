@@ -1,3 +1,4 @@
+import fnmatch
 import io
 import json
 import os
@@ -17,6 +18,86 @@ from studio.jobs import JobRecord
 CUSTOM_MODELS_FILE = STATE_DIR / "custom_models.json"
 DISK_SAFETY_MARGIN_GB = 1.0
 
+# Perfiles oficiales de GPU disponibles en Google Colab para filtrado y estimación realista
+COLAB_GPU_PROFILES: List[Dict[str, Any]] = [
+    {
+        "id": "auto",
+        "label": "🎯 Mi GPU detectada (Auto)",
+        "short": "Mi GPU (Auto)",
+        "vram_gb": None,
+        "speed_factor": 1.0,
+        "rate_uh": None,
+    },
+    {
+        "id": "T4",
+        "label": "NVIDIA T4 · 15 GB VRAM (~1.17 u/h)",
+        "short": "T4 (15 GB)",
+        "vram_gb": 15.0,
+        "speed_factor": 1.65,
+        "rate_uh": 1.17,
+    },
+    {
+        "id": "L4",
+        "label": "NVIDIA L4 · 22.5 GB VRAM (1.92 u/h)",
+        "short": "L4 (22.5 GB)",
+        "vram_gb": 22.5,
+        "speed_factor": 1.0,
+        "rate_uh": 1.92,
+    },
+    {
+        "id": "A100_40",
+        "label": "NVIDIA A100 · 40 GB VRAM (~6.93 u/h)",
+        "short": "A100 (40 GB)",
+        "vram_gb": 40.0,
+        "speed_factor": 0.52,
+        "rate_uh": 6.93,
+    },
+    {
+        "id": "A100_80",
+        "label": "NVIDIA A100 · 80 GB VRAM (~11.77 u/h)",
+        "short": "A100 (80 GB)",
+        "vram_gb": 80.0,
+        "speed_factor": 0.45,
+        "rate_uh": 11.77,
+    },
+    {
+        "id": "H100",
+        "label": "NVIDIA H100 · 80 GB VRAM (~13.10 u/h)",
+        "short": "H100 (80 GB)",
+        "vram_gb": 80.0,
+        "speed_factor": 0.28,
+        "rate_uh": 13.10,
+    },
+    {
+        "id": "CPU",
+        "label": "Solo CPU · Sin GPU (0 GB VRAM)",
+        "short": "Solo CPU",
+        "vram_gb": 0.0,
+        "speed_factor": 12.0,
+        "rate_uh": 0.08,
+    },
+]
+
+_DIFFUSERS_VIDEO_ALLOW = [
+    "model_index.json",
+    "config.json",
+    "scheduler/*",
+    "text_encoder/*",
+    "text_encoder_2/*",
+    "tokenizer/*",
+    "tokenizer_2/*",
+    "transformer/*",
+    "transformer_2/*",
+    "vae/*",
+    "image_encoder/*",
+    "image_processor/*",
+    "audio_vae/*",
+    "vocoder/*",
+    "connectors/*",
+    "latent_upsampler/*",
+    "processor/*",
+]
+
 DEFAULT_CATALOG: List[Dict[str, Any]] = [
     # ==================== IMAGEN ====================
     {
@@ -24,14 +105,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "name": "Qwen-Image-Edit 2511 (4-bit) + LoRA Lightning (4 pasos)",
         "category": "image",
         "is_default": True,
-        "badge": "Predeterminado ★ · 4 pasos",
+        "badge": "Predeterminado ★ · Edición + Multi-Ref + Inpaint",
+        "capabilities": ["i2i", "multi_ref", "inpaint", "t2i"],
         "description": (
-            "Pack principal todo-en-uno: descarga y carga juntos Qwen-Image-Edit-2511 cuantizado en 4-bit "
-            "y su LoRA de aceleración Lightning (edición, referencias multi-imagen e inpainting en 4 pasos)."
+            "Pack principal verificado: descarga y carga juntos Qwen-Image-Edit-2511 en 4-bit (bitsandbytes) "
+            "y su LoRA Lightning de 4 pasos. Edita fotos, combina hasta 3 referencias y pinta máscaras."
         ),
         "estimated_gb": 16.6,
         "min_vram_gb": 14.0,
-        "recommended_vram_gb": 22.0,
+        "recommended_vram_gb": 19.0,
+        "l4_seconds_hint": "18–26 s (4 pasos)",
         "engine": "qwen_image_edit",
         "artifacts": [
             {
@@ -51,6 +134,80 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "qwen-image-2512-pack",
+        "name": "Qwen-Image 2512 Texto→Imagen (4-bit) + LoRA Lightning (4 pasos)",
+        "category": "image",
+        "is_default": False,
+        "badge": "Creación Pura Texto→Imagen · 4 pasos",
+        "capabilities": ["t2i"],
+        "description": (
+            "Modelo generativo Qwen-Image 2512 cuantizado en 4-bit junto a LoRA Lightning V2 (4 pasos) "
+            "para crear escenas nuevas desde cero con tipografía y realismo altos."
+        ),
+        "estimated_gb": 16.6,
+        "min_vram_gb": 14.0,
+        "recommended_vram_gb": 19.0,
+        "l4_seconds_hint": "16–24 s (4 pasos)",
+        "engine": "qwen_image_t2i",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "ovedrive/Qwen-Image-2512-4bit",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+            },
+            {
+                "role": "lora_lightning",
+                "repo_id": "lightx2v/Qwen-Image-Lightning",
+                "subdir": "lora_lightning",
+                "filename": "Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors",
+                "verify_file": "Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors",
+            },
+        ],
+    },
+    {
+        "id": "sdxl-turbo-fp16",
+        "name": "SDXL Turbo FP16 (1–4 pasos · Ultraligero para T4 y L4)",
+        "category": "image",
+        "is_default": False,
+        "badge": "Ultraligero · 1–4 pasos",
+        "capabilities": ["t2i", "i2i"],
+        "description": (
+            "Generador y bocetador instantáneo de Stability AI en media precisión (FP16 limpio sin archivos ONNX). "
+            "Ideal cuando usas una GPU T4 gratuita o buscas bocetos en 2 segundos."
+        ),
+        "estimated_gb": 6.5,
+        "min_vram_gb": 5.5,
+        "recommended_vram_gb": 8.0,
+        "l4_seconds_hint": "2–4 s",
+        "engine": "sdxl_turbo",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "stabilityai/sdxl-turbo",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": [
+                    "model_index.json",
+                    "scheduler/*",
+                    "tokenizer/*",
+                    "tokenizer_2/*",
+                    "text_encoder/config.json",
+                    "text_encoder/model.fp16.safetensors",
+                    "text_encoder_2/config.json",
+                    "text_encoder_2/model.fp16.safetensors",
+                    "unet/config.json",
+                    "unet/diffusion_pytorch_model.fp16.safetensors",
+                    "vae/config.json",
+                    "vae/diffusion_pytorch_model.fp16.safetensors",
+                ],
+            }
+        ],
+    },
+    # ==================== LORAS ====================
+    {
         "id": "qwen-lora-nsfw",
         "name": "LoRA Extra: Qwen-Image-Edit Plus (Sin censura / Realismo)",
         "category": "lora",
@@ -59,12 +216,13 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "adapter_name": "mcnl-nsfw-v1",
         "badge": "Complemento LoRA · Opcional",
         "description": (
-            "LoRA opcional compatible con Qwen-Image-Edit-2511. Puedes descargarlo aparte y activarlo "
-            "o desactivarlo con un interruptor al editar."
+            "LoRA opcional compatible con Qwen-Image-Edit-2511. Se descarga aparte y puedes activarlo "
+            "o desactivarlo con un interruptor y control de fuerza al editar."
         ),
         "estimated_gb": 0.35,
         "min_vram_gb": 0.2,
         "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.5 s",
         "engine": "qwen_lora",
         "artifacts": [
             {
@@ -76,20 +234,51 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             }
         ],
     },
+    {
+        "id": "qwen-lora-lightning-8steps",
+        "name": "LoRA Extra: Qwen-Image-Edit Detalle Fino (8 pasos)",
+        "category": "lora",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "lightning-8steps",
+        "badge": "Complemento LoRA · 8 pasos",
+        "description": (
+            "Alternativa oficial de 8 pasos de LightX2V cuando prefieres un punto extra de textura fina "
+            "sobre el modo rápido de 4 pasos."
+        ),
+        "estimated_gb": 0.80,
+        "min_vram_gb": 0.3,
+        "recommended_vram_gb": 0.8,
+        "l4_seconds_hint": "35–42 s (8 pasos)",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "lightx2v/Qwen-Image-Lightning",
+                "subdir": "lora_8steps",
+                "filename": "Qwen-Image-Edit-2509-Lightning-8steps-V1.0-bf16.safetensors",
+                "verify_file": "Qwen-Image-Edit-2509-Lightning-8steps-V1.0-bf16.safetensors",
+            }
+        ],
+    },
     # ==================== VÍDEO ====================
     {
         "id": "wan22-ti2v-5b",
-        "name": "Wan 2.2 TI2V-5B (Imagen / Texto a Vídeo)",
+        "name": "Wan 2.2 TI2V-5B HD (Imagen + Texto a Vídeo · 24 fps)",
         "category": "video",
         "is_default": True,
-        "badge": "Recomendado Vídeo ★",
+        "badge": "Recomendado L4 ★ · I2V + T2V",
+        "video_modes": ["i2v", "t2v"],
+        "default_fps": 24,
+        "default_steps": 28,
         "description": (
-            "Convierte tus imágenes editadas en clips de vídeo fluidos. Equilibrio ideal entre calidad "
-            "y consumo de VRAM para GPUs L4 (22.5 GB) y A100."
+            "Modelo híbrido de nueva generación de Alibaba Wan 2.2 (VAE alta compresión 16×16×4). "
+            "Anima tus imágenes editadas o genera desde texto hasta 704p a 24 fps con gran fidelidad en L4."
         ),
-        "estimated_gb": 10.4,
-        "min_vram_gb": 14.5,
-        "recommended_vram_gb": 22.0,
+        "estimated_gb": 31.9,
+        "min_vram_gb": 13.5,
+        "recommended_vram_gb": 19.5,
+        "l4_seconds_hint": "90–160 s / clip",
         "engine": "wan_ti2v",
         "artifacts": [
             {
@@ -98,45 +287,27 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "subdir": "base",
                 "filename": None,
                 "verify_file": "model_index.json",
-            }
-        ],
-    },
-    {
-        "id": "wan22-s2v-14b",
-        "name": "Wan 2.2 S2V-14B (Vídeo con Diálogo · Audio guía duración)",
-        "category": "video",
-        "is_default": False,
-        "badge": "Sincronía de Voz · Pesado",
-        "description": (
-            "Genera vídeo animado guiado por una pista de voz/audio e imagen base. "
-            "En L4 requiere CPU offload agresivo y liberar antes cualquier otro modelo de VRAM."
-        ),
-        "estimated_gb": 29.5,
-        "min_vram_gb": 22.0,
-        "recommended_vram_gb": 40.0,
-        "engine": "wan_s2v",
-        "artifacts": [
-            {
-                "role": "base",
-                "repo_id": "Wan-AI/Wan2.2-S2V-14B-Diffusers",
-                "subdir": "base",
-                "filename": None,
-                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
             }
         ],
     },
     {
         "id": "ltx-video-2b",
-        "name": "LTX-Video 2B (Imagen a Vídeo ultrarrápido)",
+        "name": "LTX-Video 2B (Lightricks · Imagen y Texto a Vídeo Ultrarrápido)",
         "category": "video",
         "is_default": False,
-        "badge": "Ligero · Compatible T4/L4",
+        "badge": "Ultrarrápido · T4 y L4",
+        "video_modes": ["i2v", "t2v"],
+        "default_fps": 24,
+        "default_steps": 30,
         "description": (
-            "Modelo ligero de vídeo de Lightricks en Hugging Face. Ideal para pruebas rápidas o sesiones con GPU T4 (15 GB)."
+            "El modelo DiT más rápido de Lightricks (solo descarga los tensores Diffusers limpios, sin duplicados). "
+            "Genera clips fluidos a 24 fps en segundos tanto en L4 como en T4."
         ),
-        "estimated_gb": 6.8,
-        "min_vram_gb": 10.0,
+        "estimated_gb": 26.5,
+        "min_vram_gb": 9.5,
         "recommended_vram_gb": 15.0,
+        "l4_seconds_hint": "22–45 s / clip",
         "engine": "ltx_video",
         "artifacts": [
             {
@@ -145,39 +316,319 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "subdir": "base",
                 "filename": None,
                 "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
             }
         ],
+    },
+    {
+        "id": "sana-video-2b-480p",
+        "name": "SANA-Video 2B 480p (NVIDIA Lab · Muy Ligero I2V + T2V)",
+        "category": "video",
+        "is_default": False,
+        "badge": "13 GB Disco · Ideal T4 y L4",
+        "video_modes": ["i2v", "t2v"],
+        "default_fps": 16,
+        "default_steps": 30,
+        "description": (
+            "Arquitectura lineal ultracompacta de NVIDIA Lab (solo 13 GB en disco y bajo uso de VRAM). "
+            "Anima fotos o crea vídeo desde texto con rapidez excelente en T4 y L4."
+        ),
+        "estimated_gb": 13.0,
+        "min_vram_gb": 7.0,
+        "recommended_vram_gb": 12.0,
+        "l4_seconds_hint": "25–45 s / clip",
+        "engine": "sana_video",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Efficient-Large-Model/SANA-Video_2B_480p_diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "wan21-vace-1.3b",
+        "name": "Wan 2.1 VACE 1.3B (Referencia / Imagen a Vídeo Ligero)",
+        "category": "video",
+        "is_default": False,
+        "badge": "17.7 GB · Ligero T4/L4",
+        "video_modes": ["i2v", "t2v"],
+        "default_fps": 16,
+        "default_steps": 28,
+        "description": (
+            "Versión compacta 1.3B de Wan VACE para animar personajes u objetos de una imagen de referencia "
+            "o crear clips desde texto ocupando muy poca VRAM."
+        ),
+        "estimated_gb": 17.7,
+        "min_vram_gb": 8.0,
+        "recommended_vram_gb": 13.5,
+        "l4_seconds_hint": "35–60 s / clip",
+        "engine": "wan_vace",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "skyreels-v2-i2v-1.3b",
+        "name": "SkyReels V2 I2V 1.3B 540P (Imagen a Vídeo Cinematográfico)",
+        "category": "video",
+        "is_default": False,
+        "badge": "Cine 540p · 24 fps",
+        "video_modes": ["i2v"],
+        "default_fps": 24,
+        "default_steps": 30,
+        "description": (
+            "Modelo especializado en movimiento cinematográfico natural a partir de una imagen (540p, 24 fps). "
+            "Corre con gran soltura en L4 y cabe con offload en T4."
+        ),
+        "estimated_gb": 29.8,
+        "min_vram_gb": 9.5,
+        "recommended_vram_gb": 15.0,
+        "l4_seconds_hint": "45–80 s / clip",
+        "engine": "skyreels_v2",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Skywork/SkyReels-V2-I2V-1.3B-540P-Diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "wan21-t2v-1.3b",
+        "name": "Wan 2.1 T2V 1.3B (Texto a Vídeo Puro · Ligero)",
+        "category": "video",
+        "is_default": False,
+        "badge": "Texto→Vídeo · T4 y L4",
+        "video_modes": ["t2v"],
+        "default_fps": 16,
+        "default_steps": 28,
+        "description": (
+            "Generador clásico y muy estable de escenas de vídeo a partir únicamente de texto descriptivo. "
+            "Funciona de forma excelente tanto en T4 como en L4."
+        ),
+        "estimated_gb": 27.0,
+        "min_vram_gb": 8.0,
+        "recommended_vram_gb": 13.0,
+        "l4_seconds_hint": "30–55 s / clip",
+        "engine": "wan_t2v",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "cogvideox-5b-i2v",
+        "name": "CogVideoX 5B I2V (Imagen a Vídeo Expresivo BF16)",
+        "category": "video",
+        "is_default": False,
+        "badge": "5B BF16 · Movimiento Suave",
+        "video_modes": ["i2v"],
+        "default_fps": 16,
+        "default_steps": 30,
+        "description": (
+            "Modelo de 5B parámetros en BF16 reconocido por su coherencia espacial al animar retratos y escenas. "
+            "Usa tiling de VAE + CPU Offload para correr estable en L4."
+        ),
+        "estimated_gb": 20.6,
+        "min_vram_gb": 13.0,
+        "recommended_vram_gb": 24.0,
+        "l4_seconds_hint": "2–3.5 min / clip",
+        "engine": "cogvideox_i2v",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "zai-org/CogVideoX-5b-I2V",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "ltx-2-19b-av",
+        "name": "LTX-2 19B Audio+Vídeo (Genera Vídeo y Sonido Sincronizado)",
+        "category": "video",
+        "is_default": False,
+        "badge": "Vídeo + Audio · A100 Recomendado",
+        "video_modes": ["i2v", "t2v", "audio_video"],
+        "default_fps": 24,
+        "default_steps": 25,
+        "description": (
+            "Modelo multimodal de 19B de Lightricks que genera vídeo y pista de audio ambiental/efectos a la vez. "
+            "Óptimo en A100/H100; en L4 funciona lento mediante CPU Offload intenso."
+        ),
+        "estimated_gb": 58.0,
+        "min_vram_gb": 21.5,
+        "recommended_vram_gb": 38.0,
+        "l4_seconds_hint": "4–7 min (CPU Offload)",
+        "engine": "ltx2_av",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Lightricks/LTX-2",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "wan21-i2v-14b-480p",
+        "name": "Wan 2.1 I2V 14B 480P (Alta Precisión · A100 / L4 Lento)",
+        "category": "video",
+        "is_default": False,
+        "badge": "14B Pesado · Óptimo A100",
+        "video_modes": ["i2v"],
+        "default_fps": 16,
+        "default_steps": 25,
+        "description": (
+            "Modelo grande de 14B parámetros para animación detallada de imágenes. "
+            "Diseñado para A100 (40/80 GB); en L4 requiere offload secuencial y tarda varios minutos."
+        ),
+        "estimated_gb": 68.0,
+        "min_vram_gb": 21.5,
+        "recommended_vram_gb": 38.0,
+        "l4_seconds_hint": "6–10 min (Offload pesado)",
+        "engine": "wan_i2v_14b",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "wan22-i2v-a14b",
+        "name": "Wan 2.2 I2V-A14B MoE (27B Dos Expertos · Exclusivo A100/H100)",
+        "category": "video",
+        "is_default": False,
+        "badge": "Gama Alta · Solo A100 / H100",
+        "video_modes": ["i2v"],
+        "default_fps": 24,
+        "default_steps": 28,
+        "description": (
+            "Buque insignia Mixture-of-Experts (27B totales, dos expertos de ruido). "
+            "Máxima calidad abierta actual; pensado para GPUs A100 (40/80 GB) o H100."
+        ),
+        "estimated_gb": 117.7,
+        "min_vram_gb": 36.0,
+        "recommended_vram_gb": 65.0,
+        "l4_seconds_hint": "No cabe en L4",
+        "engine": "wan_i2v_14b",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "ffmpeg-motion-cpu",
+        "name": "Animación de Cámara Instantánea FFmpeg (Zoom / Paneo · 0 GB)",
+        "category": "video",
+        "is_default": False,
+        "builtin_no_download": True,
+        "badge": "0 GB · Instantáneo CPU/GPU",
+        "video_modes": ["i2v"],
+        "default_fps": 24,
+        "default_steps": 1,
+        "description": (
+            "Convierte cualquier imagen en un clip MP4 fluido con movimiento Ken Burns (zoom o paneo) "
+            "en 2 segundos sin descargar modelos ni consumir VRAM."
+        ),
+        "estimated_gb": 0.0,
+        "min_vram_gb": 0.0,
+        "recommended_vram_gb": 0.0,
+        "l4_seconds_hint": "2 s",
+        "engine": "ffmpeg_motion",
+        "artifacts": [],
     },
     # ==================== VOZ / TTS ====================
     {
         "id": "edge-tts-cloud",
-        "name": "Edge-TTS Neural (Álvaro, Elvira y +12 voces · Instantáneo)",
+        "name": "Edge-TTS Neural (Álvaro, Elvira y +10 voces · Instantáneo)",
         "category": "tts",
         "is_default": True,
         "builtin_no_download": True,
         "badge": "0 GB · Listo sin descargar",
         "description": (
-            "Síntesis de voz neuronal en español e idiomas sin ocupar disco ni VRAM. "
-            "Incluye es-ES-AlvaroNeural y es-ES-ElviraNeural."
+            "Síntesis de voz neuronal en español (España, México, Argentina) e inglés sin ocupar disco ni VRAM."
         ),
         "estimated_gb": 0.0,
         "min_vram_gb": 0.0,
         "recommended_vram_gb": 0.0,
+        "l4_seconds_hint": "1–2 s",
         "engine": "edge_tts",
         "artifacts": [],
     },
     {
+        "id": "mms-tts-spa",
+        "name": "Meta MMS-TTS Español (Voz Local Offline · 0.14 GB)",
+        "category": "tts",
+        "is_default": False,
+        "badge": "Local HF · Español Offline",
+        "description": (
+            "Modelo VITS oficial de Meta AI para síntesis de voz en español 100% local en GPU o CPU."
+        ),
+        "estimated_gb": 0.14,
+        "min_vram_gb": 0.0,
+        "recommended_vram_gb": 1.0,
+        "l4_seconds_hint": "1–2 s",
+        "engine": "mms_tts",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "facebook/mms-tts-spa",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "config.json",
+                "ignore_patterns": ["*.bin"],
+            }
+        ],
+    },
+    {
         "id": "kokoro-82m-tts",
-        "name": "Kokoro-82M Multilingüe (Voz local ligera HF)",
+        "name": "Kokoro-82M Multilingüe (Voz Local Ligera HF · 0.35 GB)",
         "category": "tts",
         "is_default": False,
         "badge": "Local HF · 0.35 GB",
         "description": (
-            "Modelo abierto ultraligero de Hugging Face para generar voz localmente en GPU o CPU."
+            "Modelo abierto ultraligero de Hugging Face (Apache 2.0) para generar voz localmente en GPU o CPU."
         ),
         "estimated_gb": 0.35,
         "min_vram_gb": 0.5,
         "recommended_vram_gb": 2.0,
+        "l4_seconds_hint": "2–3 s",
         "engine": "kokoro_tts",
         "artifacts": [
             {
@@ -186,26 +637,28 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "subdir": "base",
                 "filename": None,
                 "verify_file": "config.json",
+                "ignore_patterns": ["samples/*", "eval/*"],
             }
         ],
     },
     {
-        "id": "qwen3-tts-1.7b",
-        "name": "Qwen3-TTS 1.7B CustomVoice (Voz expresiva local HF)",
+        "id": "bark-small-tts",
+        "name": "Suno Bark Small Expresivo (Voz Local Multilingüe · 1.7 GB)",
         "category": "tts",
         "is_default": False,
         "badge": "Local HF · Expresivo",
         "description": (
-            "Modelo Qwen de texto a voz en Hugging Face para generación local de alta expresividad en GPU."
+            "Modelo generativo de voz expresiva de Suno (MIT) compatible nativamente con Transformers en español e inglés."
         ),
-        "estimated_gb": 3.6,
-        "min_vram_gb": 4.5,
-        "recommended_vram_gb": 8.0,
-        "engine": "qwen_tts",
+        "estimated_gb": 1.7,
+        "min_vram_gb": 2.0,
+        "recommended_vram_gb": 4.5,
+        "l4_seconds_hint": "5–10 s",
+        "engine": "bark_tts",
         "artifacts": [
             {
                 "role": "base",
-                "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                "repo_id": "suno/bark-small",
                 "subdir": "base",
                 "filename": None,
                 "verify_file": "config.json",
@@ -228,6 +681,210 @@ def _dir_size_bytes(path: Path) -> int:
             except OSError:
                 pass
     return total
+
+
+def resolve_gpu_profile(
+    gpu_profile_id: Any = "auto",
+    gpu_info: Optional[Dict[str, Any]] = None,
+    detected_gpu: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Resuelve el perfil de GPU elegido ('auto', 'T4', 'L4', 'A100_40', 'A100_80', 'H100', 'CPU')."""
+    if isinstance(gpu_profile_id, dict) and "vram_gb" in gpu_profile_id:
+        return gpu_profile_id
+
+    ginfo = gpu_info or detected_gpu or query_gpu_info()
+    clean_id = str(gpu_profile_id or "auto").strip()
+    if clean_id != "auto":
+        for prof in COLAB_GPU_PROFILES:
+            if prof["id"].lower() == clean_id.lower():
+                vram_val = float(prof["vram_gb"] or 0.0)
+                return {
+                    "id": prof["id"],
+                    "profile_id": prof["id"],
+                    "short": prof["short"],
+                    "gpu_name": prof["short"],
+                    "vram_gb": vram_val,
+                    "has_gpu": vram_val > 0.0,
+                    "is_simulated": True,
+                }
+
+    # Modo 'auto': usar la GPU real detectada en la sesión actual
+    has_gpu = bool(ginfo.get("has_gpu"))
+    vram = float(ginfo.get("vram_total_gb") or 0.0)
+    tier = str(ginfo.get("gpu_tier") or ("CPU" if not has_gpu else "GPU"))
+    gname = f"{tier} ({vram:.1f} GB)" if has_gpu else "Solo CPU (0 GB)"
+    return {
+        "id": tier if has_gpu else "CPU",
+        "profile_id": "auto",
+        "short": gname,
+        "gpu_name": gname,
+        "tier": tier,
+        "vram_gb": vram,
+        "has_gpu": has_gpu,
+        "is_simulated": False,
+    }
+
+
+def evaluate_gpu_tier(
+    defn: Dict[str, Any],
+    gpu_profile_id: Any = "auto",
+    gpu_info: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Evalúa cómo rendirá un modelo en la GPU filtrada y devuelve un sticker claro:
+    - excellent: '🟢 Excelente'
+    - normal:    '🟡 Normal'
+    - slow:      '🟠 Lento'
+    - incompatible: '🔴 No cabe'
+    """
+    ginfo = gpu_info or query_gpu_info()
+    target = resolve_gpu_profile(gpu_profile_id, ginfo)
+    vram = float(target["vram_gb"])
+    gname = target["gpu_name"]
+    min_v = float(defn.get("min_vram_gb") or 0.0)
+    rec_v = float(defn.get("recommended_vram_gb") or min_v)
+    l4_hint = defn.get("l4_seconds_hint") or ""
+
+    # Modelos integrados o que corren en CPU sin exigir VRAM
+    if defn.get("builtin_no_download") or min_v <= 0.0:
+        return {
+            "status": "ok",
+            "tier": "excellent",
+            "tier_rank": 0,
+            "compatible": True,
+            "sticker": "🟢 Excelente",
+            "short_sticker": "Excelente",
+            "gpu_target": gname,
+            "label": f"🟢 Excelente en {gname} · Instantáneo sin consumir VRAM",
+            "detail": f"Funciona en CPU y cualquier GPU ({l4_hint or 'instantáneo'})",
+        }
+
+    # Complementos LoRA ligeros: dependen del modelo base pero apenas suman VRAM
+    if defn.get("category") == "lora":
+        if not target["has_gpu"] or vram < 12.0:
+            return {
+                "status": "tight",
+                "tier": "slow" if vram >= 10.0 else "incompatible",
+                "tier_rank": 2 if vram >= 10.0 else 3,
+                "compatible": vram >= 10.0,
+                "sticker": "🟠 Lento" if vram >= 10.0 else "🔴 Requiere GPU ≥14 GB",
+                "short_sticker": "Lento" if vram >= 10.0 else "No cabe",
+                "gpu_target": gname,
+                "label": f"El modelo base Qwen requiere ≥14 GB VRAM ({gname})",
+                "detail": "Complemento ligero (+0.3 GB sobre Qwen 4-bit)",
+            }
+        return {
+            "status": "ok",
+            "tier": "excellent",
+            "tier_rank": 0,
+            "compatible": True,
+            "sticker": "🟢 Excelente",
+            "short_sticker": "Excelente",
+            "gpu_target": gname,
+            "label": f"🟢 Excelente en {gname} · Se fusiona con Qwen sin coste extra apreciable",
+            "detail": f"Suma <0.5 GB VRAM ({l4_hint})",
+        }
+
+    if not target["has_gpu"] or vram <= 0.1:
+        return {
+            "status": "cpu_only",
+            "tier": "incompatible",
+            "tier_rank": 3,
+            "compatible": False,
+            "sticker": "🔴 Requiere GPU",
+            "short_sticker": "Requiere GPU",
+            "gpu_target": gname,
+            "label": f"🔴 Requiere GPU (~{min_v:.0f} GB VRAM) · Estás en modo sin GPU",
+            "detail": f"Pide mínimo ~{min_v:.0f} GB VRAM (óptimo {rec_v:.0f} GB)",
+        }
+
+    # 1. EXCELENTE: La GPU iguala o supera la VRAM recomendada
+    if vram >= rec_v:
+        hint_txt = f" · ~{l4_hint}" if l4_hint and "L4" in gname else ""
+        return {
+            "status": "ok",
+            "tier": "excellent",
+            "tier_rank": 0,
+            "compatible": True,
+            "sticker": "🟢 Excelente",
+            "short_sticker": "Excelente",
+            "gpu_target": gname,
+            "label": f"🟢 Excelente en {gname}{hint_txt}",
+            "detail": f"Holgado en VRAM (usa ~{min_v:.0f}-{rec_v:.0f} GB de {vram:.1f} GB){hint_txt}",
+        }
+
+    # 2. NORMAL: Cabe bien con CPU Offload inteligente (al menos un 12% de margen sobre min_vram)
+    if vram >= min_v * 1.12:
+        hint_txt = f" · ~{l4_hint}" if l4_hint and "L4" in gname else ""
+        return {
+            "status": "offload",
+            "tier": "normal",
+            "tier_rank": 1,
+            "compatible": True,
+            "sticker": "🟡 Normal",
+            "short_sticker": "Normal",
+            "gpu_target": gname,
+            "label": f"🟡 Normal en {gname} (con CPU Offload){hint_txt}",
+            "detail": f"Estable con CPU Offload (pide ~{min_v:.0f} GB, tienes {vram:.1f} GB){hint_txt}",
+        }
+
+    # 3. LENTO: Muy justo de VRAM (entre 95% y 112% del mínimo: corre pero intercambiando capas con RAM)
+    if vram >= min_v * 0.95:
+        return {
+            "status": "tight",
+            "tier": "slow",
+            "tier_rank": 2,
+            "compatible": True,
+            "sticker": "🟠 Lento",
+            "short_sticker": "Lento",
+            "gpu_target": gname,
+            "label": f"🟠 Lento en {gname} · Al límite de VRAM (usar 480p)",
+            "detail": f"Muy justo ({vram:.1f} GB vs ~{min_v:.0f} GB mínimos); offload intenso",
+        }
+
+    # 4. NO CABE: Excede la VRAM de esta GPU
+    suggested_gpu = "A100 40 GB" if min_v <= 35 else "A100 80 GB / H100"
+    if min_v <= 20:
+        suggested_gpu = "L4 (22.5 GB) o superior"
+    return {
+        "status": "incompatible",
+        "tier": "incompatible",
+        "tier_rank": 3,
+        "compatible": False,
+        "sticker": "🔴 No cabe",
+        "short_sticker": "No cabe",
+        "gpu_target": gname,
+        "label": f"🔴 No cabe en {gname} · Pide ~{min_v:.0f} GB VRAM (usa {suggested_gpu})",
+        "detail": f"Necesita ~{min_v:.0f} GB VRAM · Recomendado: {suggested_gpu}",
+    }
+
+
+def _matches_artifact_filters(
+    rfilename: str,
+    allow_patterns: Optional[List[str]],
+    ignore_patterns: Optional[List[str]],
+    has_model_index: bool,
+) -> bool:
+    if rfilename.startswith(".git"):
+        return False
+    low = rfilename.lower()
+    # Ignorar siempre medios promocionales / demos / ONNX innecesarios salvo petición explícita
+    default_skip_prefixes = ("assets/", "examples/", "media/", "samples/", "eval/")
+    default_skip_exts = (".gif", ".mp4", ".webp", ".jpg", ".jpeg", ".png", ".onnx", ".onnx_data", ".gguf")
+    if not allow_patterns:
+        if low.startswith(default_skip_prefixes) or low.endswith(default_skip_exts):
+            return False
+        # Evitar descargar checkpoints monolíticos duplicados en la raíz si el repo ya es Diffusers modular
+        if has_model_index and "/" not in rfilename and low.endswith((".safetensors", ".ckpt", ".pth", ".bin")):
+            return False
+
+    if allow_patterns:
+        if not any(fnmatch.fnmatch(rfilename, pat) for pat in allow_patterns):
+            return False
+    if ignore_patterns:
+        if any(fnmatch.fnmatch(rfilename, pat) for pat in ignore_patterns):
+            return False
+    return True
 
 
 class CatalogManager:
@@ -288,41 +945,53 @@ class CatalogManager:
         m_dir = self.model_dir(model_id)
         return round(_dir_size_bytes(m_dir) / (1024**3), 2)
 
-    def compatibility_badge(self, defn: Dict[str, Any], gpu_info: Dict[str, Any]) -> Dict[str, str]:
-        if defn.get("builtin_no_download") or defn.get("min_vram_gb", 0) == 0:
-            return {"status": "ok", "label": "Compatible (CPU o cualquier GPU)"}
-        if not gpu_info.get("has_gpu"):
-            return {
-                "status": "cpu_only",
-                "label": f"Requiere GPU (~{defn['min_vram_gb']} GB VRAM) para inferencia rápida",
-            }
-        vram = float(gpu_info.get("vram_total_gb", 0.0))
-        rec = float(defn.get("recommended_vram_gb", defn.get("min_vram_gb", 0.0)))
-        min_v = float(defn.get("min_vram_gb", 0.0))
-        if vram >= rec:
-            return {"status": "ok", "label": f"Óptimo en tu {gpu_info['gpu_tier']} ({vram:.1f} GB)"}
-        if vram >= min_v:
-            return {
-                "status": "offload",
-                "label": f"Cabe en tu {gpu_info['gpu_tier']} ({vram:.1f} GB) con CPU Offload",
-            }
-        return {
-            "status": "tight",
-            "label": f"Muy justo para {vram:.1f} GB VRAM (pide ~{min_v:.0f} GB, requiere offload secuencial)",
-        }
+    def compatibility_badge(
+        self,
+        defn: Dict[str, Any],
+        gpu_info: Dict[str, Any],
+        gpu_profile: str = "auto",
+    ) -> Dict[str, Any]:
+        return evaluate_gpu_tier(defn, gpu_profile_id=gpu_profile, gpu_info=gpu_info)
 
-    def list_catalog(self, loaded_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def list_catalog(
+        self,
+        loaded_ids: Optional[List[str]] = None,
+        gpu_profile: str = "auto",
+        only_compatible: bool = False,
+        detected_gpu: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         loaded_set = set(loaded_ids or [])
-        gpu_info = query_gpu_info()
+        gpu_info = detected_gpu or query_gpu_info()
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         free_gb = round(shutil.disk_usage(MODELS_DIR).free / (1024**3), 2)
+
+        matrix_targets = [
+            ("T4", "T4"),
+            ("L4", "L4"),
+            ("A100_40", "A100 40G"),
+            ("A100_80", "A100/H100 80G"),
+        ]
 
         items: List[Dict[str, Any]] = []
         for defn in self.get_all_definitions():
             mid = defn["id"]
             downloaded = self.is_downloaded(mid)
             actual_gb = self.disk_usage_gb(mid) if downloaded and not defn.get("builtin_no_download") else 0.0
-            compat = self.compatibility_badge(defn, gpu_info)
+            compat = self.compatibility_badge(defn, gpu_info, gpu_profile=gpu_profile)
+            if only_compatible and not compat.get("compatible", True) and not downloaded and mid not in loaded_set:
+                continue
+            per_gpu_summary = []
+            for gid, gshort in matrix_targets:
+                ev = evaluate_gpu_tier(defn, gpu_profile_id=gid, gpu_info=gpu_info)
+                per_gpu_summary.append(
+                    {
+                        "gpu_id": gid,
+                        "gpu_short": gshort,
+                        "tier": ev["tier"],
+                        "sticker": ev["sticker"],
+                        "short": ev["short_sticker"],
+                    }
+                )
             items.append(
                 {
                     **defn,
@@ -331,9 +1000,204 @@ class CatalogManager:
                     "loaded_in_memory": mid in loaded_set,
                     "free_disk_gb": free_gb,
                     "compatibility": compat,
+                    "gpu_matrix": per_gpu_summary,
                 }
             )
+
+        # Ordenar priorizando: predeterminado / cargado / descargado y mejor rendimiento en la GPU elegida
+        items.sort(
+            key=lambda x: (
+                0 if x.get("loaded_in_memory") else 1,
+                0 if x.get("is_default") else 1,
+                x["compatibility"].get("tier_rank", 2),
+                float(x.get("estimated_gb") or 0.0),
+            )
+        )
         return items
+
+    def search_huggingface_live(
+        self,
+        query: str = "",
+        category: str = "video",
+        gpu_profile: str = "auto",
+        only_compatible: bool = True,
+        detected_gpu: Optional[Dict[str, Any]] = None,
+        limit: int = 18,
+    ) -> Dict[str, Any]:
+        """
+        Consulta en tiempo real la API pública de Hugging Face (sin requerir token)
+        para explorar modelos compatibles con Diffusers/Transformers y calcular su sticker de GPU.
+        """
+        gpu_info = detected_gpu or query_gpu_info()
+        resolved = resolve_gpu_profile(gpu_profile, gpu_info)
+        existing_repos = {
+            art["repo_id"].lower()
+            for d in self.get_all_definitions()
+            for art in d.get("artifacts", [])
+            if art.get("repo_id")
+        }
+
+        task_map = {
+            "video": ["image-to-video", "text-to-video"],
+            "image": ["image-to-image", "text-to-image"],
+            "lora": ["image-to-image", "text-to-image"],
+            "tts": ["text-to-speech"],
+        }
+        tasks = task_map.get(category, ["image-to-video"])
+        api = HfApi()
+        raw_models: List[Any] = []
+        try:
+            for t_tag in tasks:
+                lib_filter = "transformers" if category == "tts" else ("diffusers" if category != "lora" else None)
+                search_q = query.strip() or None
+                if category == "lora" and not search_q:
+                    search_q = "Qwen-Image-Edit lora"
+                found = list(
+                    api.list_models(
+                        search=search_q,
+                        pipeline_tag=t_tag if category != "lora" else None,
+                        library=lib_filter,
+                        sort="downloads",
+                        direction=-1,
+                        limit=limit,
+                        expand=["safetensors", "gated", "tags", "downloads", "likes"],
+                    )
+                )
+                raw_models.extend(found)
+        except Exception as e:
+            # Fallback local verificando el catálogo integrado si el entorno actual no llega a huggingface.co
+            q_low = query.strip().lower()
+            fallback_items: List[Dict[str, Any]] = []
+            for d in self.get_all_definitions():
+                if d.get("category") != category or not d.get("artifacts"):
+                    continue
+                rid = d["artifacts"][0]["repo_id"]
+                if q_low and q_low not in rid.lower() and q_low not in d["name"].lower():
+                    continue
+                comp = evaluate_gpu_tier(d, gpu_profile_id=gpu_profile, gpu_info=gpu_info)
+                if only_compatible and not comp["compatible"]:
+                    continue
+                fallback_items.append(
+                    {
+                        "repo_id": rid,
+                        "name": d["name"],
+                        "author": rid.split("/")[0],
+                        "category": category,
+                        "downloads": 25000,
+                        "likes": 400,
+                        "estimated_gb": d["estimated_gb"],
+                        "min_vram_gb": d["min_vram_gb"],
+                        "recommended_vram_gb": d["recommended_vram_gb"],
+                        "compatibility": comp,
+                        "already_in_catalog": True,
+                        "pipeline_tag": category,
+                    }
+                )
+            return {
+                "ok": True,
+                "online": False,
+                "gpu_target": resolved["gpu_name"],
+                "items": fallback_items[:limit],
+                "warning": f"Modo sin salida directa a huggingface.co ({e}); mostrando coincidencias verificadas. En Google Colab consulta Hugging Face en directo.",
+            }
+
+        seen: set[str] = set()
+        results: List[Dict[str, Any]] = []
+        for m in raw_models:
+            repo_id = getattr(m, "id", "") or ""
+            if not repo_id or repo_id.lower() in seen:
+                continue
+            seen.add(repo_id.lower())
+
+            gated = getattr(m, "gated", False)
+            if gated:
+                # Omitimos modelos bloqueados con login obligatorio para cumplir cero tokens
+                continue
+
+            tags = [str(t).lower() for t in (getattr(m, "tags", None) or [])]
+            if category in ("video", "image") and "gguf" in tags and "diffusers" not in tags:
+                continue
+
+            # Estimar tamaño y VRAM a partir de metadatos safetensors o heurística prudente por nombre
+            st = getattr(m, "safetensors", None)
+            params_total = 0
+            bytes_est = 0.0
+            if st and isinstance(st, dict):
+                params_total = int(st.get("total") or 0)
+                p_dict = st.get("parameters") or {}
+                for dtype_k, cnt in p_dict.items():
+                    c_val = int(cnt or 0)
+                    dk = str(dtype_k).upper()
+                    if "F32" in dk:
+                        bytes_est += c_val * 4
+                    elif "BF16" in dk or "F16" in dk:
+                        bytes_est += c_val * 2
+                    elif "U8" in dk or "I8" in dk or "F8" in dk:
+                        bytes_est += c_val * 1
+                    else:
+                        bytes_est += c_val * 1
+            elif st and hasattr(st, "total"):
+                params_total = int(getattr(st, "total", 0) or 0)
+                bytes_est = params_total * 2.0
+
+            low_id = repo_id.lower()
+            if bytes_est > 0:
+                est_disk_gb = round(max(0.2, bytes_est / (1024**3)), 1)
+                # En ejecución bfloat16 los tensores F32 ocupan la mitad en VRAM + ~3.5 GB de codificador de texto/VAE
+                est_vram_min = round(max(1.0, (params_total * 2.0) / (1024**3) + (0.3 if category == "lora" else 3.0)), 1)
+                if "4bit" in low_id or "nf4" in low_id:
+                    est_vram_min = round(max(4.0, (params_total * 0.65) / (1024**3) + 3.0), 1)
+            else:
+                if category == "lora" or "lora" in low_id:
+                    est_disk_gb, est_vram_min = 0.6, 0.4
+                elif "14b" in low_id:
+                    est_disk_gb, est_vram_min = 32.0, 22.0
+                elif "19b" in low_id or "22b" in low_id or "27b" in low_id:
+                    est_disk_gb, est_vram_min = 48.0, 26.0
+                elif "5b" in low_id:
+                    est_disk_gb, est_vram_min = 18.0, 13.5
+                elif "1.3b" in low_id or "2b" in low_id:
+                    est_disk_gb, est_vram_min = 12.0, 8.5
+                elif category == "tts":
+                    est_disk_gb, est_vram_min = 1.2, 1.5
+                else:
+                    est_disk_gb, est_vram_min = 14.0, 12.0
+
+            pseudo_defn = {
+                "category": category,
+                "estimated_gb": est_disk_gb,
+                "min_vram_gb": est_vram_min,
+                "recommended_vram_gb": round(est_vram_min * 1.45, 1),
+            }
+            compat = evaluate_gpu_tier(pseudo_defn, gpu_profile_id=gpu_profile, gpu_info=gpu_info)
+            if only_compatible and not compat["compatible"]:
+                continue
+
+            results.append(
+                {
+                    "repo_id": repo_id,
+                    "name": repo_id.split("/")[-1],
+                    "author": repo_id.split("/")[0],
+                    "category": category,
+                    "downloads": int(getattr(m, "downloads", 0) or 0),
+                    "likes": int(getattr(m, "likes", 0) or 0),
+                    "estimated_gb": est_disk_gb,
+                    "min_vram_gb": est_vram_min,
+                    "recommended_vram_gb": pseudo_defn["recommended_vram_gb"],
+                    "compatibility": compat,
+                    "already_in_catalog": repo_id.lower() in existing_repos,
+                    "pipeline_tag": getattr(m, "pipeline_tag", "") or category,
+                }
+            )
+
+        results.sort(key=lambda r: (r["compatibility"]["tier_rank"], -r["downloads"]))
+        return {
+            "ok": True,
+            "online": True,
+            "gpu_target": resolved["gpu_name"],
+            "items": results[:limit],
+            "message": f"{len(results[:limit])} modelo(s) encontrados en Hugging Face para {resolved['gpu_name']}.",
+        }
 
     def add_custom_hf_model(
         self,
@@ -342,24 +1206,49 @@ class CatalogManager:
         category: str = "lora",
         filename: Optional[str] = None,
         estimated_gb: float = 1.0,
+        min_vram_gb: Optional[float] = None,
         adapter_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         repo_id = repo_id.strip()
         if "/" not in repo_id:
             raise ValueError("El repositorio de Hugging Face debe tener formato 'autor/modelo'.")
-        slug = repo_id.lower().replace("/", "-").replace("_", "-")
+        slug = repo_id.lower().replace("/", "-").replace("_", "-").replace(".", "-")
         if filename:
             slug += "-" + Path(filename).stem.lower()[:24]
-        if self.get_definition(slug):
-            raise ValueError(f"Ya existe este modelo en el catálogo ({slug}).")
+        existing = self.get_definition(slug)
+        if existing:
+            return existing
 
         clean_fn = filename.strip() if filename and filename.strip() else None
-        engine_map = {
-            "image": "qwen_image_edit",
-            "lora": "qwen_lora",
-            "video": "wan_ti2v",
-            "tts": "kokoro_tts",
-        }
+        low_repo = repo_id.lower()
+        if category == "video":
+            if "ltx-2" in low_repo or "ltx2" in low_repo:
+                eng = "ltx2_av"
+            elif "ltx" in low_repo:
+                eng = "ltx_video"
+            elif "cogvideo" in low_repo:
+                eng = "cogvideox_i2v"
+            elif "sana" in low_repo:
+                eng = "sana_video"
+            elif "skyreels" in low_repo:
+                eng = "skyreels_v2"
+            elif "vace" in low_repo:
+                eng = "wan_vace"
+            else:
+                eng = "generic_diffusers_video"
+        elif category == "image":
+            eng = "qwen_image_edit" if "qwen" in low_repo and "edit" in low_repo else "generic_diffusers_image"
+        elif category == "lora":
+            eng = "qwen_lora"
+        else:
+            eng = "mms_tts" if "mms" in low_repo else ("bark_tts" if "bark" in low_repo else "kokoro_tts")
+
+        est_vram = (
+            float(min_vram_gb)
+            if min_vram_gb is not None
+            else (0.4 if category == "lora" else max(4.0, round(float(estimated_gb) * 0.65, 1)))
+        )
+
         entry: Dict[str, Any] = {
             "id": slug,
             "name": name.strip() or repo_id,
@@ -368,19 +1257,20 @@ class CatalogManager:
             "is_custom": True,
             "parent_model": "qwen-image-edit-2511-pack" if category == "lora" else None,
             "adapter_name": adapter_name or slug[:20],
-            "badge": "Añadido por ti (HF)",
+            "badge": "Importado de HF",
+            "video_modes": ["i2v", "t2v"] if category == "video" else None,
             "description": f"Repositorio Hugging Face: {repo_id}" + (f" ({clean_fn})" if clean_fn else ""),
             "estimated_gb": round(max(0.05, float(estimated_gb)), 2),
-            "min_vram_gb": 0.5 if category == "lora" else 8.0,
-            "recommended_vram_gb": 1.0 if category == "lora" else 16.0,
-            "engine": engine_map.get(category, "custom"),
+            "min_vram_gb": est_vram,
+            "recommended_vram_gb": round(est_vram * 1.45, 1),
+            "engine": eng,
             "artifacts": [
                 {
                     "role": "lora" if category == "lora" else "base",
                     "repo_id": repo_id,
-                    "subdir": "custom",
+                    "subdir": "base" if category != "lora" else "custom",
                     "filename": clean_fn,
-                    "verify_file": clean_fn,
+                    "verify_file": clean_fn or ("model_index.json" if category in ("image", "video") else "config.json"),
                 }
             ],
         }
@@ -492,7 +1382,6 @@ class CatalogManager:
         m_dir = self.model_dir(model_id)
         m_dir.mkdir(parents=True, exist_ok=True)
 
-        # Paso 1: Consultar lista exacta de ficheros y tamaños en Hugging Face
         job.log(
             f"Consultando metadatos y tamaño exacto en Hugging Face para «{defn['name']}»...",
             progress=_scale_pct(2.0),
@@ -509,16 +1398,22 @@ class CatalogManager:
             subdir = m_dir / art["subdir"]
             subdir.mkdir(parents=True, exist_ok=True)
             single_fn = art.get("filename")
+            allow_pats = art.get("allow_patterns")
+            ignore_pats = art.get("ignore_patterns")
 
             info = api.model_info(repo_id=repo_id, files_metadata=True)
             siblings = info.siblings or []
+            has_model_index = any(s.rfilename == "model_index.json" for s in siblings)
 
             for sib in siblings:
                 rfilename = sib.rfilename
-                if single_fn and rfilename != single_fn:
-                    continue
-                if rfilename.startswith(".git"):
-                    continue
+                if single_fn:
+                    if rfilename != single_fn:
+                        continue
+                else:
+                    if not _matches_artifact_filters(rfilename, allow_pats, ignore_pats, has_model_index):
+                        continue
+
                 fsize = int(getattr(sib, "size", None) or 0)
                 local_target = subdir / rfilename
                 exists_already = local_target.exists() and (
@@ -540,7 +1435,6 @@ class CatalogManager:
         if not plan_files:
             raise RuntimeError("No se encontraron archivos descargables en el repositorio indicado.")
 
-        # Segunda comprobación con el peso exacto reportado por Hugging Face
         exact_check = self.check_disk_space(model_id, required_bytes_override=total_bytes)
         if not exact_check["ok"]:
             raise RuntimeError(exact_check["message"])
@@ -594,7 +1488,6 @@ class CatalogManager:
                     return
                 dl_clock["last_ui_ts"] = now
 
-                # En descargas hf_xet usamos el avance mayor entre transferencia de red y reconstrucción
                 est_file_done = max(file_progress["reconstructed"], file_progress["transfer"])
                 if fsize > 0:
                     est_file_done = min(fsize, est_file_done)
@@ -639,15 +1532,16 @@ class CatalogManager:
                         else:
                             prev_rec = file_progress["reconstructed"]
                             file_progress["reconstructed"] += inc
-                            # Si no hay barra xet separada (descarga HTTP normal), contabilizar velocidad aquí
                             if file_progress["transfer"] == 0:
                                 dl_clock["net_bytes"] += inc
                             elif file_progress["reconstructed"] > file_progress["transfer"]:
-                                dl_clock["net_bytes"] += max(0, file_progress["reconstructed"] - max(prev_rec, file_progress["transfer"]))
+                                dl_clock["net_bytes"] += max(
+                                    0,
+                                    file_progress["reconstructed"] - max(prev_rec, file_progress["transfer"]),
+                                )
                         _emit_live_progress(force=False)
                     return res
 
-            # Hilo vigilante cada 1.5s para mantener el pulso vivo incluso durante verificación de hashes
             def _pulse_watcher() -> None:
                 while not file_progress["done"] and not job.cancel_requested:
                     time.sleep(1.5)
@@ -678,7 +1572,6 @@ class CatalogManager:
                 step=f"[{idx}/{len(plan_files)}] {short_name} listo",
             )
 
-        # Limpiar carpeta temporal .cache interna de huggingface dentro de local_dir para no duplicar espacio
         for art in defn.get("artifacts", []):
             hf_local_cache = m_dir / art["subdir"] / ".cache"
             if hf_local_cache.exists():
@@ -696,6 +1589,19 @@ class CatalogManager:
             ),
             encoding="utf-8",
         )
+
+        # Ajustar verificación flexible para modelos custom que tengan config.json o model_index.json
+        if not self.is_downloaded(model_id):
+            for art in defn.get("artifacts", []):
+                sub = m_dir / art["subdir"]
+                if (sub / "model_index.json").exists():
+                    art["verify_file"] = "model_index.json"
+                elif (sub / "config.json").exists():
+                    art["verify_file"] = "config.json"
+                else:
+                    any_st = list(sub.rglob("*.safetensors"))
+                    if any_st:
+                        art["verify_file"] = str(any_st[0].relative_to(sub))
 
         if not self.is_downloaded(model_id):
             raise RuntimeError("Faltan archivos clave tras la descarga; no se marca como válido.")
@@ -740,3 +1646,22 @@ class CatalogManager:
 
 
 catalog_manager = CatalogManager()
+
+
+def search_huggingface_live(
+    query: str = "",
+    category: str = "video",
+    gpu_profile: str = "auto",
+    only_compatible: bool = False,
+    detected_gpu: Optional[Dict[str, Any]] = None,
+    limit: int = 18,
+) -> Dict[str, Any]:
+    return catalog_manager.search_huggingface_live(
+        query=query,
+        category=category,
+        gpu_profile=gpu_profile,
+        only_compatible=only_compatible,
+        detected_gpu=detected_gpu,
+        limit=limit,
+    )
+

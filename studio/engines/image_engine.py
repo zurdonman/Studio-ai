@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import random
@@ -32,20 +33,74 @@ def _safe_load_lora(pipe: Any, lora_dir: Path, filename: Optional[str], adapter_
     pipe.load_lora_weights(str(lora_dir), adapter_name=adapter_name)
 
 
+def _instantiate_image_pipeline(engine: str, base_dir: Path) -> Any:
+    import torch  # type: ignore
+    import diffusers  # type: ignore
+
+    bdir = str(base_dir)
+    if engine == "qwen_image_edit":
+        from diffusers import QwenImageEditPlusPipeline  # type: ignore
+
+        return QwenImageEditPlusPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+
+    if engine == "qwen_image_t2i":
+        from diffusers import QwenImagePipeline  # type: ignore
+
+        return QwenImagePipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+
+    if engine == "sdxl_turbo":
+        from diffusers import AutoPipelineForText2Image  # type: ignore
+
+        try:
+            return AutoPipelineForText2Image.from_pretrained(bdir, torch_dtype=torch.float16, variant="fp16")
+        except Exception:
+            return AutoPipelineForText2Image.from_pretrained(bdir, torch_dtype=torch.float16)
+
+    return diffusers.DiffusionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+
+
 def load_image_model_into_memory(
     model_id: str = "qwen-image-edit-2511-pack",
     extra_lora_ids: Optional[List[str]] = None,
     auto_download: bool = False,
     job: Optional[JobRecord] = None,
 ) -> Dict[str, Any]:
-    """Carga Qwen-Image-Edit 2511 (4-bit) + LoRA Lightning 4 pasos (+ LoRAs opcionales) con progreso continuo 0-100%."""
+    """Carga un modelo de imagen del catálogo (+ LoRAs opcionales) con progreso continuo 0-100%."""
     defn = catalog_manager.get_definition(model_id)
     if not defn:
         raise ValueError(f"Modelo de imagen no encontrado: {model_id}")
 
+    # Comprobar qué LoRAs están hoy descargados en disco
+    downloaded_loras = {
+        item["id"]
+        for item in catalog_manager.get_all_definitions()
+        if item["category"] == "lora" and catalog_manager.is_downloaded(item["id"])
+    }
+    if extra_lora_ids:
+        downloaded_loras.update(lid for lid in extra_lora_ids if catalog_manager.is_downloaded(lid))
+
+    cur_img = memory_manager.get_slot("image")
+    if cur_img and cur_img.get("model_id") == model_id:
+        already_loaded_ids = set(cur_img.get("adapters", []))
+        if downloaded_loras.issubset(already_loaded_ids):
+            vram_now = query_gpu_info()["vram_used_gb"]
+            avail = list(cur_img["handle"].get("adapters", {}).keys())
+            if job:
+                job.log(
+                    f"«{defn['name']}» ya está cargado y listo en RAM/VRAM ({vram_now} GB).",
+                    level="success",
+                    progress=100.0,
+                    step="Modelo ya activo en memoria",
+                )
+            return {
+                "model_id": model_id,
+                "adapters_available": avail,
+                "vram_allocated_gb": vram_now,
+            }
+
     try:
         import torch  # type: ignore
-        from diffusers import QwenImageEditPlusPipeline  # type: ignore
+        import diffusers  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
             f"Faltan librerías de GPU/inferencia ({exc}). "
@@ -55,14 +110,14 @@ def load_image_model_into_memory(
     if not torch.cuda.is_available():
         raise RuntimeError(
             "No se detectó GPU NVIDIA activa en este entorno (estás en modo CPU). "
-            "Activa una GPU en Google Colab (T4, L4 o A100) para cargar Qwen 4-bit."
+            "Activa una GPU en Google Colab (T4, L4 o A100) para cargar el modelo de imagen."
         )
 
     was_downloaded = catalog_manager.is_downloaded(model_id)
     if not was_downloaded:
         if auto_download and job is not None:
             job.log(
-                "Fase 1/2: El pack aún no está en disco. Descargando de Hugging Face (0% → 70%)...",
+                f"Fase 1/2: Descargando «{defn['name']}» de Hugging Face (0% → 70%)...",
                 progress=1.0,
                 step="Fase 1/2: Iniciando descarga HF...",
             )
@@ -71,7 +126,7 @@ def load_image_model_into_memory(
         else:
             raise RuntimeError(
                 f"«{defn['name']}» aún no está descargado en disco. "
-                "Pulsa «Preparar Qwen + Lightning» o «Descargar + Cargar»."
+                "Pulsa «Preparar Modelo» o «Descargar + Cargar»."
             )
     else:
         load_p_start = 4.0
@@ -87,16 +142,17 @@ def load_image_model_into_memory(
 
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    # Si hay un modelo pesado de vídeo ocupando VRAM, liberarlo automáticamente primero
-    vid_slot = memory_manager.get_slot("video")
-    if vid_slot:
-        if job:
-            job.log(
-                f"Liberando modelo de vídeo «{vid_slot['name']}» de VRAM antes de cargar imagen...",
-                progress=_map_load_pct(0.06),
-                step="Liberando VRAM previa...",
-            )
-        memory_manager.unload_slot("video")
+    # Liberar cualquier modelo previo (vídeo o imagen anterior) antes de alojar el nuevo
+    for prev_slot in ("video", "image"):
+        ps = memory_manager.get_slot(prev_slot)
+        if ps:
+            if job:
+                job.log(
+                    f"Liberando «{ps['name']}» de RAM/VRAM antes de cargar «{defn['name']}»...",
+                    progress=_map_load_pct(0.06),
+                    step=f"Liberando VRAM previa ({prev_slot})...",
+                )
+            memory_manager.unload_slot(prev_slot)
 
     flush_ram_and_vram()
 
@@ -104,14 +160,15 @@ def load_image_model_into_memory(
     base_dir = m_dir / "base"
     if not base_dir.exists():
         base_dir = m_dir / defn["artifacts"][0]["subdir"]
+    engine = defn.get("engine", "qwen_image_edit")
 
     p_pre_start = _map_load_pct(0.10)
     p_pre_end = _map_load_pct(0.68)
     if job:
         job.log(
-            f"Cargando pesos 4-bit de QwenImageEditPlusPipeline desde disco a RAM/VRAM...",
+            f"Cargando pesos de «{defn['name']}» desde disco a RAM/VRAM...",
             progress=p_pre_start,
-            step="Cargando pesos 4-bit en memoria...",
+            step="Cargando pesos en memoria...",
         )
 
     pipe: Any = None
@@ -120,12 +177,9 @@ def load_image_model_into_memory(
             job=job,
             start_pct=p_pre_start,
             end_pct=p_pre_end,
-            step_label="Cargando tensores Qwen 4-bit",
-            fn=lambda: QwenImageEditPlusPipeline.from_pretrained(
-                str(base_dir),
-                torch_dtype=torch.bfloat16,
-            ),
-            expected_seconds=50.0,
+            step_label=f"Cargando tensores {defn['name']}",
+            fn=lambda: _instantiate_image_pipeline(engine, base_dir),
+            expected_seconds=45.0,
         )
 
         if job:
@@ -134,15 +188,21 @@ def load_image_model_into_memory(
                 progress=_map_load_pct(0.72),
                 step="Activando CPU Offload...",
             )
-        pipe.enable_model_cpu_offload()
+        if hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to("cuda")
 
         loaded_adapters: Dict[str, str] = {}
 
-        # Cargar LoRA Lightning 4 pasos incluido en el pack
+        # Cargar LoRA Lightning 4 pasos incluido en packs Qwen (Edit 2511 o T2I 2512)
         lightning_dir = m_dir / "lora_lightning"
-        lightning_name = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
-        lightning_file = lightning_dir / lightning_name
-        if lightning_file.exists():
+        lightning_candidates = [
+            "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+            "Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors",
+        ]
+        lightning_name = next((fn for fn in lightning_candidates if (lightning_dir / fn).exists()), None)
+        if lightning_name:
             p_l_start = _map_load_pct(0.76)
             p_l_end = _map_load_pct(0.90)
             if job:
@@ -161,34 +221,30 @@ def load_image_model_into_memory(
             )
             loaded_adapters["lightning"] = model_id
 
-        # Cargar LoRAs adicionales descargados (ej. qwen-lora-nsfw o LoRAs custom de HF)
-        candidate_loras = set(extra_lora_ids or [])
-        for item in catalog_manager.get_all_definitions():
-            if item["category"] == "lora" and catalog_manager.is_downloaded(item["id"]):
-                candidate_loras.add(item["id"])
+        # Cargar LoRAs adicionales compatibles con Qwen
+        if engine in ("qwen_image_edit", "qwen_image_t2i"):
+            for lid in sorted(downloaded_loras):
+                ldef = catalog_manager.get_definition(lid)
+                if not ldef or not catalog_manager.is_downloaded(lid):
+                    continue
+                art = ldef["artifacts"][0]
+                l_sub = catalog_manager.model_dir(lid) / art["subdir"]
+                l_fn = art.get("filename")
+                adapter_name = ldef.get("adapter_name") or lid
+                try:
+                    if job:
+                        job.log(
+                            f"Cargando LoRA opcional «{ldef['name']}»...",
+                            progress=_map_load_pct(0.93),
+                            step=f"Cargando {adapter_name}...",
+                        )
+                    _safe_load_lora(pipe, l_sub, l_fn, adapter_name)
+                    loaded_adapters[adapter_name] = lid
+                except Exception as e:
+                    if job:
+                        job.log(f"Aviso al cargar LoRA opcional {lid}: {e}", level="warning")
 
-        for lid in sorted(candidate_loras):
-            ldef = catalog_manager.get_definition(lid)
-            if not ldef or not catalog_manager.is_downloaded(lid):
-                continue
-            art = ldef["artifacts"][0]
-            l_sub = catalog_manager.model_dir(lid) / art["subdir"]
-            l_fn = art.get("filename")
-            adapter_name = ldef.get("adapter_name") or lid
-            try:
-                if job:
-                    job.log(
-                        f"Cargando LoRA opcional «{ldef['name']}»...",
-                        progress=_map_load_pct(0.93),
-                        step=f"Cargando {adapter_name}...",
-                    )
-                _safe_load_lora(pipe, l_sub, l_fn, adapter_name)
-                loaded_adapters[adapter_name] = lid
-            except Exception as e:
-                if job:
-                    job.log(f"Aviso al cargar LoRA opcional {lid}: {e}", level="warning")
-
-        if loaded_adapters:
+        if loaded_adapters and hasattr(pipe, "set_adapters"):
             default_active = ["lightning"] if "lightning" in loaded_adapters else list(loaded_adapters.keys())[:1]
             pipe.set_adapters(default_active, adapter_weights=[1.0] * len(default_active))
 
@@ -198,7 +254,7 @@ def load_image_model_into_memory(
             slot="image",
             model_id=model_id,
             name=defn["name"],
-            handle={"pipe": pipe, "adapters": loaded_adapters},
+            handle={"pipe": pipe, "adapters": loaded_adapters, "engine": engine},
             adapters=list(loaded_adapters.values()),
         )
     except Exception:
@@ -209,7 +265,7 @@ def load_image_model_into_memory(
 
     if job:
         job.log(
-            f"Qwen + LoRAs listos ({', '.join(loaded_adapters.keys()) or 'base'}). VRAM en uso: {vram_gb} GB.",
+            f"«{defn['name']}» listo ({', '.join(loaded_adapters.keys()) or 'base'}). VRAM en uso: {vram_gb} GB.",
             level="success",
             progress=100.0,
             step="Modelo listo en RAM/VRAM (100%)",
@@ -249,12 +305,13 @@ def generate_or_edit_image(
     if not slot:
         raise RuntimeError(
             "No hay ningún modelo de imagen cargado en RAM/VRAM. "
-            "Pulsa «Preparar Qwen + Lightning» arriba para cargarlo antes de generar."
+            "Pulsa «Preparar Modelo» arriba para cargarlo antes de generar."
         )
 
     import torch  # type: ignore
 
     pipe = slot["handle"]["pipe"]
+    engine = slot["handle"].get("engine", "qwen_image_edit")
     available_adapters: Dict[str, str] = slot["handle"].get("adapters", {})
 
     t0 = time.time()
@@ -293,12 +350,11 @@ def generate_or_edit_image(
 
     if job:
         job.log(
-            f"LoRAs activos: {', '.join(active_names) if active_names else 'ninguno'} · Semilla: {actual_seed}",
+            f"Modelo: {slot['name']} · LoRAs: {', '.join(active_names) if active_names else 'ninguno'} · Semilla: {actual_seed}",
             progress=10.0,
             step="Preparando imágenes de entrada...",
         )
 
-    # Preparar imagen principal (o lienzo limpio si es generación desde cero)
     original_for_inpaint: Optional[Image.Image] = None
     if base_image_path and base_image_path.exists():
         base_pil = (
@@ -313,7 +369,6 @@ def generate_or_edit_image(
     if base_pil.size[0] > 1024 or base_pil.size[1] > 1024:
         base_pil.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
 
-    # Preparar referencias multi-imagen si las hay
     refs_pil: List[Image.Image] = []
     for rpath in reference_paths or []:
         if rpath and rpath.exists():
@@ -322,7 +377,6 @@ def generate_or_edit_image(
                 r_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
             refs_pil.append(r_img)
 
-    # Determinar modo de operación para trazabilidad
     has_mask = bool(mask_image_path and mask_image_path.exists() and original_for_inpaint is not None)
     if has_mask:
         mode_name = "inpainting_mascara"
@@ -361,34 +415,39 @@ def generate_or_edit_image(
             step=f"Paso 0/{steps}...",
         )
 
-    # Con LoRA Lightning 4 pasos sin prompt negativo usamos true_cfg_scale=1.0 (máxima velocidad);
-    # si el usuario escribe prompt negativo o desactiva Lightning, usamos su escala de guía.
+    call_sig = inspect.signature(pipe.__call__).parameters
     effective_true_cfg = 1.0 if ("lightning" in active_names and not negative_prompt.strip()) else float(guidance_scale)
     effective_neg = (negative_prompt.strip() or " ") if effective_true_cfg > 1.0 else None
 
     call_kwargs: Dict[str, Any] = {
-        "image": pipe_images,
         "prompt": prompt,
-        "negative_prompt": effective_neg,
-        "true_cfg_scale": effective_true_cfg,
         "num_inference_steps": steps,
         "generator": generator,
         "output_type": "pil",
         "height": height,
         "width": width,
-        "callback_on_step_end": _on_step_end,
     }
+    if "image" in call_sig:
+        call_kwargs["image"] = pipe_images
+    if "true_cfg_scale" in call_sig:
+        call_kwargs["true_cfg_scale"] = effective_true_cfg
+        call_kwargs["negative_prompt"] = effective_neg
+    else:
+        if "guidance_scale" in call_sig:
+            call_kwargs["guidance_scale"] = 0.0 if engine == "sdxl_turbo" else float(guidance_scale)
+        if "negative_prompt" in call_sig and negative_prompt.strip():
+            call_kwargs["negative_prompt"] = negative_prompt.strip()
+    if "callback_on_step_end" in call_sig:
+        call_kwargs["callback_on_step_end"] = _on_step_end
 
     try:
         out = pipe(**call_kwargs)
     except TypeError:
-        # Compatibilidad si una versión concreta de pipeline no acepta callback_on_step_end
         call_kwargs.pop("callback_on_step_end", None)
         out = pipe(**call_kwargs)
 
     result_pil: Image.Image = out.images[0].convert("RGB")
 
-    # Si había máscara de inpainting pintada, componer sobre la imagen original preservando el exterior
     if has_mask and mask_image_path and original_for_inpaint is not None:
         if job:
             job.log(

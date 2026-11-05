@@ -1364,3 +1364,240 @@ select:focus {
   font-size: 13px;
   color: var(--text-muted);
 }
+
+/* ==================== FILTRO GPU COLAB, PEGATINAS Y EXPLORADOR HF ==================== */
+.video-engine-panel {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.vep-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.gpu-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  background: rgba(11, 15, 23, 0.72);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.catalog-gpu-bar {
+  margin-bottom: 12px;
+}
+
+.gpu-filter-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.gpu-pills {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.gpu-pill,
+.vid-preset-chip,
+.hf-topic-chip {
+  background: #172033;
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  border-radius: 16px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.gpu-pill:hover,
+.vid-preset-chip:hover,
+.hf-topic-chip:hover {
+  border-color: var(--accent);
+}
+
+.gpu-pill.active {
+  background: rgba(76, 139, 245, 0.22);
+  border-color: var(--accent);
+  color: #bfdbfe;
+  font-weight: 600;
+}
+
+.gpu-compat-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+/* Cuadrícula compacta de tarjetas seleccionables de Vídeo */
+.video-model-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(245px, 1fr));
+  gap: 8px;
+  max-height: 255px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.vm-card {
+  background: #111827;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.vm-card:hover {
+  border-color: #3b4f73;
+  background: #151e30;
+}
+
+.vm-card.selected {
+  border-color: var(--accent);
+  background: rgba(76, 139, 245, 0.11);
+  box-shadow: 0 0 0 1px rgba(76, 139, 245, 0.35);
+}
+
+.vm-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.vm-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #f1f5f9;
+  line-height: 1.25;
+}
+
+.vm-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.vm-mode-pill {
+  background: rgba(148, 163, 184, 0.13);
+  color: #cbd5e1;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10.5px;
+}
+
+/* Pegatinas (Stickers) de rendimiento por GPU */
+.gpu-sticker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 12px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.gpu-sticker.excellent {
+  background: rgba(34, 197, 94, 0.17);
+  border: 1px solid rgba(34, 197, 94, 0.42);
+  color: #86efac;
+}
+
+.gpu-sticker.good,
+.gpu-sticker.normal {
+  background: rgba(234, 179, 8, 0.17);
+  border: 1px solid rgba(234, 179, 8, 0.42);
+  color: #fde047;
+}
+
+.gpu-sticker.slow {
+  background: rgba(249, 115, 22, 0.18);
+  border: 1px solid rgba(249, 115, 22, 0.45);
+  color: #fdba74;
+}
+
+.gpu-sticker.incompatible {
+  background: rgba(239, 68, 68, 0.17);
+  border: 1px solid rgba(239, 68, 68, 0.42);
+  color: #fca5a5;
+}
+
+.inline-badge-ok { color: #86efac; font-weight: 600; }
+.inline-badge-good { color: #fde047; font-weight: 600; }
+.inline-badge-slow { color: #fdba74; font-weight: 600; }
+
+/* Mini matriz comparativa T4 / L4 / A100 dentro de cada tarjeta del catálogo */
+.gpu-mini-matrix {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.gmm-chip {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #0f1623;
+  border: 1px solid var(--border);
+  color: #cbd5e1;
+}
+
+.gmm-chip.excellent { border-color: rgba(34, 197, 94, 0.4); color: #86efac; }
+.gmm-chip.good, .gmm-chip.normal { border-color: rgba(234, 179, 8, 0.4); color: #fde047; }
+.gmm-chip.slow { border-color: rgba(249, 115, 22, 0.4); color: #fdba74; }
+.gmm-chip.incompatible { border-color: rgba(239, 68, 68, 0.35); color: #f87171; opacity: 0.78; }
+
+/* Explorador en vivo de Hugging Face */
+.hf-search-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.hf-cat-select {
+  width: auto;
+  min-width: 175px;
+}
+
+.hf-live-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.hf-live-card {
+  background: #101726;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+}
+

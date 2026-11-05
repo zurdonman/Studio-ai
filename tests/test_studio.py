@@ -67,7 +67,9 @@ def test_index_status_and_default_qwen_catalog(temp_studio_env):
     assert ids["qwen-image-edit-2511-pack"]["category"] == "image"
 
     assert "wan22-ti2v-5b" in ids
-    assert "wan22-s2v-14b" in ids
+    assert "ltx-video-2b" in ids
+    assert "sana-video-2b-480p" in ids
+    assert "ltx-2-19b-av" in ids
     assert "edge-tts-cloud" in ids
 
 
@@ -296,5 +298,78 @@ def test_monotonic_progress_and_colab_torchao_cleanup():
     assert rec.progress == 45.5
 
     launch_colab._remove_incompatible_preinstalled_packages()
+
+
+def test_gpu_filter_stickers_artifact_patterns_and_hf_search(temp_studio_env):
+    client, _ = temp_studio_env
+    from studio.catalog import (
+        DEFAULT_CATALOG,
+        _DIFFUSERS_VIDEO_ALLOW,
+        _matches_artifact_filters,
+        evaluate_gpu_tier,
+        resolve_gpu_profile,
+    )
+
+    video_defs = [m for m in DEFAULT_CATALOG if m["category"] == "video"]
+    assert len(video_defs) >= 10
+    assert len(DEFAULT_CATALOG) >= 19
+
+    # Verificar filtro de archivos que evita bajar 280 GB de checkpoints raíz duplicados en LTX-Video / LTX-2
+    assert _matches_artifact_filters(
+        "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+        _DIFFUSERS_VIDEO_ALLOW,
+        None,
+        True,
+    )
+    assert _matches_artifact_filters("model_index.json", _DIFFUSERS_VIDEO_ALLOW, None, True)
+    assert not _matches_artifact_filters("ltx-video-2b-v0.9.5.safetensors", _DIFFUSERS_VIDEO_ALLOW, None, True)
+    assert not _matches_artifact_filters("media/demo.gif", _DIFFUSERS_VIDEO_ALLOW, None, True)
+
+    # Verificar pegatinas en NVIDIA L4 (22.5 GB) vs T4 (15 GB) vs A100 80 GB
+    prof_l4 = resolve_gpu_profile("L4")
+    prof_t4 = resolve_gpu_profile("T4")
+    prof_a100_80 = resolve_gpu_profile("A100_80")
+
+    ltx_2b = next(m for m in video_defs if m["id"] == "ltx-video-2b")
+    wan_27b = next(m for m in video_defs if m["id"] == "wan22-i2v-a14b")
+    cog_5b = next(m for m in video_defs if m["id"] == "cogvideox-5b-i2v")
+
+    c_ltx_l4 = evaluate_gpu_tier(ltx_2b, prof_l4)
+    assert c_ltx_l4["compatible"] is True
+    assert c_ltx_l4["tier"] == "excellent"
+    assert "Excelente" in c_ltx_l4["sticker"]
+
+    c_cog_t4 = evaluate_gpu_tier(cog_5b, prof_t4)
+    assert c_cog_t4["compatible"] is True
+    assert c_cog_t4["tier"] in ("normal", "good", "slow")
+
+    c_wan27_l4 = evaluate_gpu_tier(wan_27b, prof_l4)
+    assert c_wan27_l4["compatible"] is False
+    assert c_wan27_l4["tier"] == "incompatible"
+    assert "No cabe" in c_wan27_l4["sticker"]
+
+    c_wan27_a100 = evaluate_gpu_tier(wan_27b, prof_a100_80)
+    assert c_wan27_a100["compatible"] is True
+    assert c_wan27_a100["tier"] == "excellent"
+
+    r_l4 = client.get("/api/catalog?gpu_profile=L4&only_compatible=true")
+    assert r_l4.status_code == 200
+    data_l4 = r_l4.json()
+    assert data_l4["active_gpu_profile"]["id"] == "L4"
+    l4_ids = {m["id"] for m in data_l4["models"]}
+    assert "ltx-video-2b" in l4_ids
+    assert "wan22-ti2v-5b" in l4_ids
+    assert "sana-video-2b-480p" in l4_ids
+    assert "wan22-i2v-a14b" not in l4_ids
+    assert all(m["compatibility"]["compatible"] for m in data_l4["models"])
+    assert all(len(m["gpu_matrix"]) == 4 for m in data_l4["models"])
+
+    r_hf = client.get("/api/catalog/hf-search?query=Wan&category=video&gpu_profile=L4&only_compatible=true")
+    assert r_hf.status_code == 200
+    hf_json = r_hf.json()
+    assert hf_json["ok"] is True
+    assert len(hf_json["items"]) >= 1
+    assert all("sticker" in it["compatibility"] for it in hf_json["items"])
+
 
 

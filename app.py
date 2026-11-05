@@ -16,7 +16,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from studio.catalog import catalog_manager
+from studio.catalog import (
+    COLAB_GPU_PROFILES,
+    catalog_manager,
+    resolve_gpu_profile,
+    search_huggingface_live,
+)
 from studio.config import (
     AUDIO_OUT_DIR,
     DATA_ROOT,
@@ -46,7 +51,12 @@ from studio.engines.video_engine import (
     generate_video_clip,
     load_video_model_into_memory,
 )
-from studio.hardware import colab_console_log, hardware_tracker, request_colab_shutdown
+from studio.hardware import (
+    colab_console_log,
+    hardware_tracker,
+    query_gpu_info,
+    request_colab_shutdown,
+)
 from studio.jobs import job_manager
 from studio.memory_manager import memory_manager
 
@@ -91,6 +101,7 @@ class CustomModelReq(BaseModel):
     category: str = "lora"
     filename: Optional[str] = None
     estimated_gb: float = 1.0
+    min_vram_gb: Optional[float] = None
     adapter_name: Optional[str] = None
 
 
@@ -316,12 +327,40 @@ def api_update_credits(req: CreditsConfigReq) -> Dict[str, Any]:
 
 
 @app.get("/api/catalog")
-def api_get_catalog() -> Dict[str, Any]:
+def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) -> Dict[str, Any]:
     loaded_ids = memory_manager.loaded_model_ids()
+    hw_gpu = query_gpu_info()
+    resolved_prof = resolve_gpu_profile(gpu_profile, detected_gpu=hw_gpu)
     return {
-        "models": catalog_manager.list_catalog(loaded_ids=loaded_ids),
+        "models": catalog_manager.list_catalog(
+            loaded_ids=loaded_ids,
+            gpu_profile=gpu_profile,
+            only_compatible=only_compatible,
+            detected_gpu=hw_gpu,
+        ),
+        "gpu_profiles": COLAB_GPU_PROFILES,
+        "active_gpu_profile": resolved_prof,
         "loaded_slots": memory_manager.status_summary(),
     }
+
+
+@app.get("/api/catalog/hf-search")
+def api_hf_live_search(
+    query: str = "",
+    category: str = "video",
+    gpu_profile: str = "auto",
+    only_compatible: bool = False,
+    limit: int = 12,
+) -> Dict[str, Any]:
+    hw_gpu = query_gpu_info()
+    return search_huggingface_live(
+        query=query,
+        category=category,
+        gpu_profile=gpu_profile,
+        only_compatible=only_compatible,
+        detected_gpu=hw_gpu,
+        limit=max(1, min(24, limit)),
+    )
 
 
 @app.post("/api/catalog/custom")
@@ -333,6 +372,7 @@ def api_add_custom_model(req: CustomModelReq) -> Dict[str, Any]:
             category=req.category,
             filename=req.filename,
             estimated_gb=req.estimated_gb,
+            min_vram_gb=req.min_vram_gb,
             adapter_name=req.adapter_name,
         )
         colab_console_log(f"Añadido al catálogo desde HF: {entry['name']} ({req.repo_id})", icon="➕")
