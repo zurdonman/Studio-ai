@@ -202,7 +202,7 @@
       if (!btnQwen.disabled) btnQwen.textContent = "⚡ Cargar Qwen + Lightning en VRAM";
     } else {
       imgDot.className = "status-dot";
-      $("img-engine-state").textContent = "No descargado todavía (~12.2 GB)";
+      $("img-engine-state").textContent = "No descargado todavía (~16.6 GB)";
       if (!btnQwen.disabled) btnQwen.textContent = "⬇⚡ Descargar y Cargar Qwen + Lightning (1 clic)";
     }
 
@@ -620,11 +620,19 @@
     }
     const imgEl = $("base-preview-img");
     imgEl.onload = () => {
+      const nw = imgEl.naturalWidth || 1024;
+      const nh = imgEl.naturalHeight || 1024;
       const cvs = $("mask-canvas");
-      cvs.width = imgEl.naturalWidth || 1024;
-      cvs.height = imgEl.naturalHeight || 1024;
+      cvs.width = nw;
+      cvs.height = nh;
       state.mask.history = [];
       state.mask.dirty = false;
+
+      // Ajustar automáticamente Ancho × Alto a la proporción real de la foto subida (múltiplos de 64, máx 1024)
+      const scale = 1024 / Math.max(nw, nh);
+      const snap64 = (v) => Math.max(512, Math.min(1280, Math.round((v * scale) / 64) * 64));
+      $("img-width").value = snap64(nw);
+      $("img-height").value = snap64(nh);
     };
     imgEl.src = asset.media_url;
     $("canvas-empty-hint").hidden = true;

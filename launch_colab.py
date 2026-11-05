@@ -32,6 +32,28 @@ def _print_box(lines: list[str]) -> None:
     print("═" * width + "\n", flush=True)
 
 
+def _remove_incompatible_preinstalled_packages() -> None:
+    """
+    Google Colab trae preinstalado torchao==0.10.0 sin usar, y peft>=0.20 lanza ImportError
+    al cargar cualquier LoRA si detecta torchao < 0.16.0. Como nuestros modelos 4-bit usan
+    bitsandbytes (no torchao), desinstalar un torchao obsoleto evita ese choque en 0.2s.
+    """
+    check_code = (
+        "import importlib.metadata as m\n"
+        "try:\n"
+        "    v = m.version('torchao')\n"
+        "    parts = [int(x) for x in v.split('.')[:2] if x.isdigit()]\n"
+        "    print(v if tuple(parts) < (0, 16) else 'OK')\n"
+        "except Exception:\n"
+        "    print('NONE')\n"
+    )
+    res = subprocess.run([sys.executable, "-c", check_code], capture_output=True, text=True)
+    out = (res.stdout or "").strip()
+    if out and out not in ("OK", "NONE"):
+        print(f"🔧 Quitando paquete antiguo preinstalado de Colab (torchao {out}) incompatible con LoRAs...", flush=True)
+        subprocess.call([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchao"])
+
+
 def ensure_dependencies() -> None:
     print("📦 [1/3] Verificando dependencias de Studio IA...", flush=True)
     if not shutil.which("ffmpeg") and Path("/usr/bin/apt-get").exists():
@@ -46,6 +68,7 @@ def ensure_dependencies() -> None:
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", "-q", "--upgrade", "-r", str(req_file)]
     )
+    _remove_incompatible_preinstalled_packages()
     print("✅ Dependencias listas.", flush=True)
 
 

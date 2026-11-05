@@ -280,3 +280,21 @@ def test_l4_rate_is_192_and_realtime_colab_stdout_logs(capsys):
     assert "32.5%" in captured
     assert "120.4 MB/s" in captured
 
+
+def test_monotonic_progress_and_colab_torchao_cleanup():
+    import launch_colab
+    from studio.jobs import JobRecord
+
+    rec = JobRecord(kind="model_download", title="Test Monotonic")
+    rec.status = "running"
+    rec.log("Inicio", progress=3.8)
+    rec.log("Archivo pequeño", progress=1.0)
+    assert rec.progress == 3.8
+    rec.heartbeat(progress=2.0)
+    assert rec.progress == 3.8
+    rec.log("Avance real", progress=45.5)
+    assert rec.progress == 45.5
+
+    launch_colab._remove_incompatible_preinstalled_packages()
+
+

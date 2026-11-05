@@ -52,7 +52,8 @@ class JobRecord:
         with self._lock:
             self.last_heartbeat_ts = now
             if progress is not None:
-                self.progress = max(0.0, min(100.0, float(progress)))
+                clamped = max(0.0, min(100.0, float(progress)))
+                self.progress = max(self.progress, clamped) if self.status == "running" else clamped
             if step is not None:
                 self.current_step = step
             if speed_text is not None:
@@ -94,7 +95,8 @@ class JobRecord:
         with self._lock:
             self.last_heartbeat_ts = now
             if progress is not None:
-                self.progress = max(0.0, min(100.0, float(progress)))
+                clamped = max(0.0, min(100.0, float(progress)))
+                self.progress = max(self.progress, clamped) if self.status == "running" else clamped
             if step is not None:
                 self.current_step = step
             if speed_text is not None:

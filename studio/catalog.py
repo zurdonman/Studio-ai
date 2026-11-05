@@ -29,7 +29,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "Pack principal todo-en-uno: descarga y carga juntos Qwen-Image-Edit-2511 cuantizado en 4-bit "
             "y su LoRA de aceleración Lightning (edición, referencias multi-imagen e inpainting en 4 pasos)."
         ),
-        "estimated_gb": 12.2,
+        "estimated_gb": 16.6,
         "min_vram_gb": 14.0,
         "recommended_vram_gb": 22.0,
         "engine": "qwen_image_edit",
@@ -674,7 +674,7 @@ class CatalogManager:
             pct_done = (completed_files_bytes / total_bytes * 100.0) if total_bytes > 0 else (idx / len(plan_files) * 100.0)
             job.log(
                 f"[{idx}/{len(plan_files)}] Completado: {short_name} ({completed_files_bytes / (1024**3):.2f} / {total_gb:.2f} GB)",
-                progress=_scale_pct(min(99.5, pct_done)),
+                progress=_scale_pct(min(99.5, max(4.0, pct_done))),
                 step=f"[{idx}/{len(plan_files)}] {short_name} listo",
             )
 

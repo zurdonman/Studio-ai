@@ -27,13 +27,8 @@ from studio.memory_manager import (
 
 def _safe_load_lora(pipe: Any, lora_dir: Path, filename: Optional[str], adapter_name: str) -> None:
     if filename:
-        file_path = lora_dir / filename
-        try:
-            pipe.load_lora_weights(str(lora_dir), weight_name=filename, adapter_name=adapter_name)
-            return
-        except Exception:
-            pipe.load_lora_weights(str(file_path), adapter_name=adapter_name)
-            return
+        pipe.load_lora_weights(str(lora_dir), weight_name=filename, adapter_name=adapter_name)
+        return
     pipe.load_lora_weights(str(lora_dir), adapter_name=adapter_name)
 
 
@@ -119,91 +114,98 @@ def load_image_model_into_memory(
             step="Cargando pesos 4-bit en memoria...",
         )
 
-    pipe = run_with_live_memory_progress(
-        job=job,
-        start_pct=p_pre_start,
-        end_pct=p_pre_end,
-        step_label="Cargando tensores Qwen 4-bit",
-        fn=lambda: QwenImageEditPlusPipeline.from_pretrained(
-            str(base_dir),
-            torch_dtype=torch.bfloat16,
-        ),
-        expected_seconds=50.0,
-    )
-
-    if job:
-        job.log(
-            "Activando CPU Offload inteligente para optimizar VRAM...",
-            progress=_map_load_pct(0.72),
-            step="Activando CPU Offload...",
+    pipe: Any = None
+    try:
+        pipe = run_with_live_memory_progress(
+            job=job,
+            start_pct=p_pre_start,
+            end_pct=p_pre_end,
+            step_label="Cargando tensores Qwen 4-bit",
+            fn=lambda: QwenImageEditPlusPipeline.from_pretrained(
+                str(base_dir),
+                torch_dtype=torch.bfloat16,
+            ),
+            expected_seconds=50.0,
         )
-    pipe.enable_model_cpu_offload()
 
-    loaded_adapters: Dict[str, str] = {}
-
-    # Cargar LoRA Lightning 4 pasos incluido en el pack
-    lightning_dir = m_dir / "lora_lightning"
-    lightning_name = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
-    lightning_file = lightning_dir / lightning_name
-    if lightning_file.exists():
-        p_l_start = _map_load_pct(0.76)
-        p_l_end = _map_load_pct(0.90)
         if job:
             job.log(
-                "Integrando LoRA Lightning (aceleración 4 pasos)...",
-                progress=p_l_start,
-                step="Cargando LoRA Lightning...",
+                "Activando CPU Offload inteligente para optimizar VRAM...",
+                progress=_map_load_pct(0.72),
+                step="Activando CPU Offload...",
             )
-        run_with_live_memory_progress(
-            job=job,
-            start_pct=p_l_start,
-            end_pct=p_l_end,
-            step_label="Fusionando LoRA Lightning",
-            fn=lambda: _safe_load_lora(pipe, lightning_dir, lightning_name, "lightning"),
-            expected_seconds=12.0,
-        )
-        loaded_adapters["lightning"] = model_id
+        pipe.enable_model_cpu_offload()
 
-    # Cargar LoRAs adicionales descargados (ej. qwen-lora-nsfw o LoRAs custom de HF)
-    candidate_loras = set(extra_lora_ids or [])
-    for item in catalog_manager.get_all_definitions():
-        if item["category"] == "lora" and catalog_manager.is_downloaded(item["id"]):
-            candidate_loras.add(item["id"])
+        loaded_adapters: Dict[str, str] = {}
 
-    for lid in sorted(candidate_loras):
-        ldef = catalog_manager.get_definition(lid)
-        if not ldef or not catalog_manager.is_downloaded(lid):
-            continue
-        art = ldef["artifacts"][0]
-        l_sub = catalog_manager.model_dir(lid) / art["subdir"]
-        l_fn = art.get("filename")
-        adapter_name = ldef.get("adapter_name") or lid
-        try:
+        # Cargar LoRA Lightning 4 pasos incluido en el pack
+        lightning_dir = m_dir / "lora_lightning"
+        lightning_name = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+        lightning_file = lightning_dir / lightning_name
+        if lightning_file.exists():
+            p_l_start = _map_load_pct(0.76)
+            p_l_end = _map_load_pct(0.90)
             if job:
                 job.log(
-                    f"Cargando LoRA opcional «{ldef['name']}»...",
-                    progress=_map_load_pct(0.93),
-                    step=f"Cargando {adapter_name}...",
+                    "Integrando LoRA Lightning (aceleración 4 pasos)...",
+                    progress=p_l_start,
+                    step="Cargando LoRA Lightning...",
                 )
-            _safe_load_lora(pipe, l_sub, l_fn, adapter_name)
-            loaded_adapters[adapter_name] = lid
-        except Exception as e:
-            if job:
-                job.log(f"Aviso al cargar LoRA opcional {lid}: {e}", level="warning")
+            run_with_live_memory_progress(
+                job=job,
+                start_pct=p_l_start,
+                end_pct=p_l_end,
+                step_label="Fusionando LoRA Lightning",
+                fn=lambda: _safe_load_lora(pipe, lightning_dir, lightning_name, "lightning"),
+                expected_seconds=12.0,
+            )
+            loaded_adapters["lightning"] = model_id
 
-    if loaded_adapters:
-        default_active = ["lightning"] if "lightning" in loaded_adapters else list(loaded_adapters.keys())[:1]
-        pipe.set_adapters(default_active, adapter_weights=[1.0] * len(default_active))
+        # Cargar LoRAs adicionales descargados (ej. qwen-lora-nsfw o LoRAs custom de HF)
+        candidate_loras = set(extra_lora_ids or [])
+        for item in catalog_manager.get_all_definitions():
+            if item["category"] == "lora" and catalog_manager.is_downloaded(item["id"]):
+                candidate_loras.add(item["id"])
 
-    gpu_now = query_gpu_info()
-    vram_gb = gpu_now["vram_used_gb"]
-    memory_manager.register_loaded(
-        slot="image",
-        model_id=model_id,
-        name=defn["name"],
-        handle={"pipe": pipe, "adapters": loaded_adapters},
-        adapters=list(loaded_adapters.values()),
-    )
+        for lid in sorted(candidate_loras):
+            ldef = catalog_manager.get_definition(lid)
+            if not ldef or not catalog_manager.is_downloaded(lid):
+                continue
+            art = ldef["artifacts"][0]
+            l_sub = catalog_manager.model_dir(lid) / art["subdir"]
+            l_fn = art.get("filename")
+            adapter_name = ldef.get("adapter_name") or lid
+            try:
+                if job:
+                    job.log(
+                        f"Cargando LoRA opcional «{ldef['name']}»...",
+                        progress=_map_load_pct(0.93),
+                        step=f"Cargando {adapter_name}...",
+                    )
+                _safe_load_lora(pipe, l_sub, l_fn, adapter_name)
+                loaded_adapters[adapter_name] = lid
+            except Exception as e:
+                if job:
+                    job.log(f"Aviso al cargar LoRA opcional {lid}: {e}", level="warning")
+
+        if loaded_adapters:
+            default_active = ["lightning"] if "lightning" in loaded_adapters else list(loaded_adapters.keys())[:1]
+            pipe.set_adapters(default_active, adapter_weights=[1.0] * len(default_active))
+
+        gpu_now = query_gpu_info()
+        vram_gb = gpu_now["vram_used_gb"]
+        memory_manager.register_loaded(
+            slot="image",
+            model_id=model_id,
+            name=defn["name"],
+            handle={"pipe": pipe, "adapters": loaded_adapters},
+            adapters=list(loaded_adapters.values()),
+        )
+    except Exception:
+        if pipe is not None:
+            del pipe
+        flush_ram_and_vram()
+        raise
 
     if job:
         job.log(
@@ -359,11 +361,16 @@ def generate_or_edit_image(
             step=f"Paso 0/{steps}...",
         )
 
+    # Con LoRA Lightning 4 pasos sin prompt negativo usamos true_cfg_scale=1.0 (máxima velocidad);
+    # si el usuario escribe prompt negativo o desactiva Lightning, usamos su escala de guía.
+    effective_true_cfg = 1.0 if ("lightning" in active_names and not negative_prompt.strip()) else float(guidance_scale)
+    effective_neg = (negative_prompt.strip() or " ") if effective_true_cfg > 1.0 else None
+
     call_kwargs: Dict[str, Any] = {
         "image": pipe_images,
         "prompt": prompt,
-        "negative_prompt": negative_prompt.strip() or None,
-        "guidance_scale": float(guidance_scale),
+        "negative_prompt": effective_neg,
+        "true_cfg_scale": effective_true_cfg,
         "num_inference_steps": steps,
         "generator": generator,
         "output_type": "pil",
