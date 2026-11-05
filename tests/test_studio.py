@@ -587,6 +587,130 @@ def test_video_three_modes_t2v_i2v_and_frame_to_frame(temp_studio_env):
     assert final_job["result"]["duration_seconds"] >= 1.5
 
 
+def test_official_model_specs_prevent_hallucination_and_incompatible_flf2v(temp_studio_env):
+    from PIL import Image
+    from studio.catalog import DEFAULT_CATALOG
+    from studio.engines.video_engine import _fit_and_crop_rgb, compute_official_video_params
+
+    client, _ = temp_studio_env
+    vdefs = {m["id"]: m for m in DEFAULT_CATALOG if m["category"] == "video"}
+
+    # 1) Wan 2.2 TI2V-5B exige 720P (704×1280 / 1280×704) y 121 frames @ 5s/24fps (4k+1), NUNCA 480×832
+    wan22 = vdefs["wan22-ti2v-5b"]
+    p_wan22 = compute_official_video_params(
+        defn=wan22,
+        req_width=480,
+        req_height=832,
+        req_duration_sec=5.0,
+        req_fps=24,
+        req_steps=45,
+        req_cfg=None,
+        img_size=(1080, 1920),
+    )
+    assert (p_wan22["width"], p_wan22["height"]) == (704, 1280)
+    assert p_wan22["num_frames"] == 121
+    assert p_wan22["guidance_scale"] == 5.0
+
+    # También en T2V sin imagen, si llegan 480×832 sube a 704×1280 por min_area
+    p_wan22_t2v = compute_official_video_params(
+        defn=wan22,
+        req_width=480,
+        req_height=832,
+        req_duration_sec=5.0,
+        req_fps=24,
+        req_steps=50,
+        req_cfg=None,
+        img_size=None,
+    )
+    assert (p_wan22_t2v["width"], p_wan22_t2v["height"]) == (704, 1280)
+
+    # 2) Wan 2.1 VACE 1.3B usa 480P (480×832 / 832×480), 81 frames @ 5s/16fps, CFG 5.0
+    vace = vdefs["wan21-vace-1.3b"]
+    p_vace = compute_official_video_params(
+        defn=vace,
+        req_width=480,
+        req_height=832,
+        req_duration_sec=5.0,
+        req_fps=16,
+        req_steps=40,
+        req_cfg=None,
+        img_size=(900, 1600),
+    )
+    assert (p_vace["width"], p_vace["height"]) == (480, 832)
+    assert p_vace["num_frames"] == 81
+
+    # 3) SkyReels V2 1.3B 540P usa 544×960 / 960×544, 97 frames @ 4s/24fps
+    sky = vdefs["skyreels-v2-i2v-1.3b"]
+    p_sky = compute_official_video_params(
+        defn=sky,
+        req_width=832,
+        req_height=480,
+        req_duration_sec=4.0,
+        req_fps=24,
+        req_steps=45,
+        req_cfg=None,
+        img_size=(1080, 1920),
+    )
+    assert (p_sky["width"], p_sky["height"]) == (544, 960)
+    assert p_sky["num_frames"] == 97
+
+    # 4) LTX-Video 0.9.5 usa CFG 3.0 por defecto y regla 8k+1 (97 frames @ 4s/24fps)
+    ltx = vdefs["ltx-video-2b"]
+    p_ltx = compute_official_video_params(
+        defn=ltx,
+        req_width=768,
+        req_height=512,
+        req_duration_sec=4.0,
+        req_fps=24,
+        req_steps=40,
+        req_cfg=None,
+        img_size=None,
+    )
+    assert p_ltx["guidance_scale"] == 3.0
+    assert p_ltx["num_frames"] == 97
+
+    # 5) CogVideoX-5B-I2V fuerza estrictamente 720×480 @ 8 fps y 49 frames
+    cog = vdefs["cogvideox-5b-i2v"]
+    p_cog = compute_official_video_params(
+        defn=cog,
+        req_width=480,
+        req_height=832,
+        req_duration_sec=4.0,
+        req_fps=24,
+        req_steps=50,
+        req_cfg=None,
+        img_size=(800, 1200),
+    )
+    assert (p_cog["width"], p_cog["height"]) == (720, 480)
+    assert p_cog["fps"] == 8
+    assert p_cog["num_frames"] == 49
+
+    # 6) Center-crop conserva el tamaño exacto sin aplastar imagen 3:4
+    cropped = _fit_and_crop_rgb(Image.new("RGB", (900, 1200), (80, 90, 100)), 704, 1280)
+    assert cropped.size == (704, 1280)
+
+    # 7) Rechazar con HTTP 400 inmediato si intentan flf2v contra wan22-ti2v-5b
+    buf = io.BytesIO()
+    Image.new("RGB", (640, 360), (20, 40, 60)).save(buf, format="PNG")
+    raw = buf.getvalue()
+    u1 = client.post("/api/assets/upload", files={"file": ("a.png", raw, "image/png")}).json()["asset"]
+    u2 = client.post("/api/assets/upload", files={"file": ("b.png", raw, "image/png")}).json()["asset"]
+    r_bad_flf = client.post(
+        "/api/video/generate",
+        json={
+            "mode": "ai",
+            "video_submode": "flf2v",
+            "model_id": "wan22-ti2v-5b",
+            "image_rel": u1["rel_path"],
+            "end_image_rel": u2["rel_path"],
+            "prompt": "transición",
+        },
+    )
+    assert r_bad_flf.status_code == 400
+    assert "Wan 2.1 VACE" in r_bad_flf.json()["detail"]
+
+
+
 
 
 

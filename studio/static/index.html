@@ -398,10 +398,10 @@
           <div class="card">
             <div class="card-header" style="flex-wrap:wrap;gap:8px;">
               <h3>Modo de Creación de Vídeo</h3>
-              <div class="preset-pills">
-                <button type="button" class="vid-preset-chip" data-vw="832" data-vh="480">16:9 (832×480)</button>
-                <button type="button" class="vid-preset-chip" data-vw="480" data-vh="832">9:16 Vertical (480×832)</button>
-                <button type="button" class="vid-preset-chip" data-vw="640" data-vh="640">1:1 (640×640)</button>
+              <div class="preset-pills" id="vid-preset-pills">
+                <button type="button" class="vid-preset-chip" id="vid-preset-16-9" data-vw="1280" data-vh="704">16:9 (1280×704)</button>
+                <button type="button" class="vid-preset-chip" id="vid-preset-9-16" data-vw="704" data-vh="1280">9:16 Vertical (704×1280)</button>
+                <button type="button" class="vid-preset-chip" id="vid-preset-1-1" data-vw="960" data-vh="960">1:1 (960×960)</button>
               </div>
             </div>
 
@@ -481,6 +481,20 @@
               <div id="vid-ai-fields">
                 <label class="field-label" id="vid-prompt-label">Prompt de movimiento / escena</label>
                 <textarea id="vid-prompt" rows="2" placeholder="Ej: La cámara se acerca suavemente, brisa ligera en el cabello, iluminación cinematográfica natural..."></textarea>
+                <details class="compact-details" style="margin-top:6px;">
+                  <summary>Prompt negativo (por defecto usa el anti-alucinaciones oficial del modelo)</summary>
+                  <div class="details-body">
+                    <input type="text" id="vid-neg-prompt" placeholder="Déjalo vacío para aplicar automáticamente el prompt negativo oficial de Wan / LTX / SANA..." />
+                  </div>
+                </details>
+              </div>
+
+              <!-- Ficha oficial del modelo activo (resolución nativa, segundos, pasos y CFG) -->
+              <div id="vid-official-spec-bar" class="vid-official-spec-bar">
+                <span id="vid-official-spec-text">📘 Ajustes oficiales cargados automáticamente según el modelo.</span>
+                <button type="button" class="btn btn-ghost btn-xs" id="btn-restore-official-vid" title="Volver a poner la resolución, segundos, FPS, pasos y CFG recomendados por los autores del modelo">
+                  🎯 Restaurar Oficiales
+                </button>
               </div>
 
               <div id="vid-ffmpeg-fields" hidden>
@@ -500,15 +514,15 @@
               <div class="params-grid-4">
                 <div>
                   <label class="field-label">Ancho</label>
-                  <input type="number" id="vid-width" value="832" step="32" min="256" max="1280" />
+                  <input type="number" id="vid-width" value="1280" step="16" min="256" max="1280" />
                 </div>
                 <div>
                   <label class="field-label">Alto</label>
-                  <input type="number" id="vid-height" value="480" step="32" min="256" max="1280" />
+                  <input type="number" id="vid-height" value="704" step="16" min="256" max="1280" />
                 </div>
                 <div>
                   <label class="field-label">Duración (s)</label>
-                  <input type="number" id="vid-duration" value="4.0" step="0.5" min="1" max="12" />
+                  <input type="number" id="vid-duration" value="5.0" step="0.5" min="1" max="10" />
                 </div>
                 <div>
                   <label class="field-label">FPS</label>
@@ -516,13 +530,17 @@
                 </div>
               </div>
 
-              <div class="params-grid-2" id="vid-ai-steps-row">
+              <div class="params-grid-3" id="vid-ai-steps-row" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">
                 <div>
                   <label class="field-label">Pasos IA</label>
-                  <input type="number" id="vid-steps" value="20" min="4" max="50" />
+                  <input type="number" id="vid-steps" value="45" min="4" max="60" />
                 </div>
                 <div>
-                  <label class="field-label">Semilla (0 = aleatoria)</label>
+                  <label class="field-label">Guía (CFG)</label>
+                  <input type="number" id="vid-cfg" value="5.0" min="1.0" max="12.0" step="0.5" />
+                </div>
+                <div>
+                  <label class="field-label">Semilla (0 = azar)</label>
                   <input type="number" id="vid-seed" value="0" min="0" />
                 </div>
               </div>

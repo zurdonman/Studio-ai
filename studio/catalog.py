@@ -264,21 +264,40 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     # ==================== VÍDEO ====================
     {
         "id": "wan22-ti2v-5b",
-        "name": "Wan 2.2 TI2V-5B HD (Imagen + Texto a Vídeo · 24 fps)",
+        "name": "Wan 2.2 TI2V-5B HD 720P (Imagen + Texto a Vídeo · 24 fps)",
         "category": "video",
         "is_default": True,
-        "badge": "Recomendado L4 ★ · I2V + T2V",
+        "badge": "Calidad HD 720P ★ · I2V + T2V",
         "video_modes": ["i2v", "t2v"],
         "default_fps": 24,
-        "default_steps": 28,
+        "default_steps": 45,
+        "default_cfg": 5.0,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [1280, 704],
+            "portrait": [704, 1280],
+            "square": [960, 960],
+            "max_area": 704 * 1280,
+            "min_area": 640 * 960,
+            "mod_value": 32,
+            "frame_rule": "4k+1",
+            "default_frames": 121,
+            "default_duration_sec": 5.0,
+            "default_fps": 24,
+            "default_steps": 45,
+            "default_cfg": 5.0,
+            "flow_shift": 5.0,
+            "prompt_lang": "es_en",
+            "official_note": "720P obligatorio (1280×704 / 704×1280, VAE 16×16) · 5 s (121 frames @ 24 fps) · 45–50 pasos · CFG 5.0 · Entiende Español e Inglés",
+        },
         "description": (
-            "Modelo híbrido de nueva generación de Alibaba Wan 2.2 (VAE alta compresión 16×16×4). "
-            "Anima tus imágenes editadas o genera desde texto hasta 704p a 24 fps con gran fidelidad en L4."
+            "Modelo híbrido 720P@24fps de Alibaba Wan 2.2 (VAE alta compresión 16×16×4). "
+            "IMPORTANTE: trabaja en su resolución nativa 1280×704 / 704×1280, 5 s (121 fotogramas) y 45–50 pasos para máxima nitidez sin alucinaciones."
         ),
         "estimated_gb": 31.9,
         "min_vram_gb": 13.5,
         "recommended_vram_gb": 19.5,
-        "l4_seconds_hint": "90–160 s / clip",
+        "l4_seconds_hint": "3.5–5 min / clip 720p",
         "engine": "wan_ti2v",
         "artifacts": [
             {
@@ -292,17 +311,128 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "wan21-vace-1.3b",
+        "name": "Wan 2.1 VACE 1.3B (Frame a Frame + Imagen + Texto · Español/Inglés)",
+        "category": "video",
+        "is_default": False,
+        "badge": "Recomendado Frame a Frame ★ · 3 en 1",
+        "video_modes": ["flf2v", "i2v", "t2v"],
+        "default_fps": 16,
+        "default_steps": 40,
+        "default_cfg": 5.0,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [832, 480],
+            "portrait": [480, 832],
+            "square": [640, 640],
+            "max_area": 480 * 832,
+            "mod_value": 16,
+            "frame_rule": "4k+1",
+            "default_frames": 81,
+            "default_duration_sec": 5.0,
+            "default_fps": 16,
+            "default_steps": 40,
+            "default_cfg": 5.0,
+            "flow_shift": 3.0,
+            "prompt_lang": "es_en",
+            "official_note": "480P nativo (832×480 / 480×832) · 5 s (81 frames @ 16 fps) · 35–45 pasos · CFG 5.0 · Entiende Español e Inglés",
+        },
+        "description": (
+            "Modelo todoterreno 1.3B de Alibaba Wan VACE entrenado para Frame a Frame (Inicio → Fin), Imagen a Vídeo y Texto a Vídeo. "
+            "Entiende prompts en español, gasta solo 17.7 GB y usa 480P (832×480 / 480×832) @ 16 fps, 81 fotogramas y 40 pasos."
+        ),
+        "estimated_gb": 17.7,
+        "min_vram_gb": 8.0,
+        "recommended_vram_gb": 13.5,
+        "l4_seconds_hint": "45–75 s / clip",
+        "engine": "wan_vace",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "skyreels-v2-i2v-1.3b",
+        "name": "SkyReels V2 1.3B 540P (Frame a Frame + Imagen a Vídeo · 24 fps)",
+        "category": "video",
+        "is_default": False,
+        "badge": "Cine 540p · Frame a Frame + I2V",
+        "video_modes": ["flf2v", "i2v"],
+        "default_fps": 24,
+        "default_steps": 45,
+        "default_cfg": 5.0,
+        "default_duration_sec": 4.0,
+        "official_spec": {
+            "landscape": [960, 544],
+            "portrait": [544, 960],
+            "square": [720, 720],
+            "max_area": 544 * 960,
+            "mod_value": 16,
+            "frame_rule": "4k+1",
+            "default_frames": 97,
+            "default_duration_sec": 4.0,
+            "default_fps": 24,
+            "default_steps": 45,
+            "default_cfg": 5.0,
+            "flow_shift": 5.0,
+            "prompt_lang": "es_en",
+            "official_note": "540P nativo (960×544 / 544×960) · 4 s (97 frames @ 24 fps) · 45–50 pasos · CFG 5.0 · Entiende Español e Inglés",
+        },
+        "description": (
+            "Especialista cinematográfico 540p@24fps con condicionamiento nativo de primer y último fotograma (Frame a Frame) "
+            "e Imagen a Vídeo. Resolución oficial 960×544 / 544×960, 97 fotogramas (4 s) y 45–50 pasos."
+        ),
+        "estimated_gb": 29.8,
+        "min_vram_gb": 9.5,
+        "recommended_vram_gb": 15.0,
+        "l4_seconds_hint": "60–110 s / clip",
+        "engine": "skyreels_v2",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Skywork/SkyReels-V2-I2V-1.3B-540P-Diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
         "id": "ltx-video-2b",
         "name": "LTX-Video 0.9.5 2B (Texto, Imagen y Frame a Frame · Ultrarrápido)",
         "category": "video",
         "is_default": False,
-        "badge": "3 en 1 ★ · T2V + I2V + Frame a Frame",
+        "badge": "Ultrarrápido · 3 en 1 (Prompt Inglés)",
         "video_modes": ["t2v", "i2v", "flf2v"],
         "default_fps": 24,
-        "default_steps": 30,
+        "default_steps": 40,
+        "default_cfg": 3.0,
+        "default_duration_sec": 4.0,
+        "official_spec": {
+            "landscape": [768, 512],
+            "portrait": [512, 768],
+            "square": [640, 640],
+            "max_area": 512 * 768,
+            "mod_value": 32,
+            "frame_rule": "8k+1",
+            "default_frames": 97,
+            "default_duration_sec": 4.0,
+            "default_fps": 24,
+            "default_steps": 40,
+            "default_cfg": 3.0,
+            "prompt_lang": "en",
+            "official_note": "Resolución óptima 768×512 / 512×768 · 4–6 s (97–161 frames @ 24 fps) · 40 pasos · CFG 3.0 · Mejor prompt en Inglés",
+        },
         "description": (
-            "Versión 0.9.5 de Lightricks con soporte nativo de Texto a Vídeo, Imagen a Vídeo y Frame a Frame (Inicio → Fin). "
-            "Descarga limpia (23.6 GB) y velocidad sobresaliente en L4 y T4."
+            "Versión 0.9.5 de Lightricks con soporte nativo de Texto a Vídeo, Imagen a Vídeo y Frame a Frame. "
+            "Usa guía baja oficial (CFG 3.0), 40 pasos y resolución 768×512 / 512×768; rinde mejor con prompts detallados en inglés."
         ),
         "estimated_gb": 23.6,
         "min_vram_gb": 9.5,
@@ -328,15 +458,33 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "badge": "13 GB Disco · Ideal T4 y L4",
         "video_modes": ["i2v", "t2v"],
         "default_fps": 16,
-        "default_steps": 30,
+        "default_steps": 50,
+        "default_cfg": 6.0,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [832, 480],
+            "portrait": [480, 832],
+            "square": [640, 640],
+            "max_area": 480 * 832,
+            "mod_value": 32,
+            "frame_rule": "4k+1",
+            "default_frames": 81,
+            "default_duration_sec": 5.0,
+            "default_fps": 16,
+            "default_steps": 50,
+            "default_cfg": 6.0,
+            "motion_score": 30,
+            "prompt_lang": "en",
+            "official_note": "480P nativo (832×480 / 480×832) · 5 s (81 frames @ 16 fps) · 50 pasos · CFG 6.0 · Añade motion score automático",
+        },
         "description": (
-            "Arquitectura lineal ultracompacta de NVIDIA Lab (solo 13 GB en disco y bajo uso de VRAM). "
-            "Anima fotos o crea vídeo desde texto con rapidez excelente en T4 y L4."
+            "Arquitectura lineal ultracompacta de NVIDIA Lab (13 GB en disco). "
+            "Ajustado con sus parámetros oficiales: 832×480 / 480×832, 81 fotogramas @ 16 fps, 50 pasos, CFG 6.0 y motion score 30."
         ),
         "estimated_gb": 13.0,
         "min_vram_gb": 7.0,
         "recommended_vram_gb": 12.0,
-        "l4_seconds_hint": "25–45 s / clip",
+        "l4_seconds_hint": "30–50 s / clip",
         "engine": "sana_video",
         "artifacts": [
             {
@@ -350,80 +498,40 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         ],
     },
     {
-        "id": "wan21-vace-1.3b",
-        "name": "Wan 2.1 VACE 1.3B (Frame a Frame + Imagen + Texto a Vídeo)",
-        "category": "video",
-        "is_default": False,
-        "badge": "17.7 GB · 3 en 1 Ligero T4/L4",
-        "video_modes": ["t2v", "i2v", "flf2v"],
-        "default_fps": 16,
-        "default_steps": 28,
-        "description": (
-            "Modelo todoterreno 1.3B de Wan VACE: hace Frame a Frame (transición exacta de imagen inicial a imagen final), "
-            "Imagen a Vídeo simple y Texto a Vídeo ocupando muy poca VRAM."
-        ),
-        "estimated_gb": 17.7,
-        "min_vram_gb": 8.0,
-        "recommended_vram_gb": 13.5,
-        "l4_seconds_hint": "35–60 s / clip",
-        "engine": "wan_vace",
-        "artifacts": [
-            {
-                "role": "base",
-                "repo_id": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
-                "subdir": "base",
-                "filename": None,
-                "verify_file": "model_index.json",
-                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
-            }
-        ],
-    },
-    {
-        "id": "skyreels-v2-i2v-1.3b",
-        "name": "SkyReels V2 1.3B 540P (Imagen a Vídeo y Frame a Frame)",
-        "category": "video",
-        "is_default": False,
-        "badge": "Cine 540p · I2V + Frame a Frame",
-        "video_modes": ["i2v", "flf2v"],
-        "default_fps": 24,
-        "default_steps": 30,
-        "description": (
-            "Modelo especializado en movimiento cinematográfico natural a 540p y 24 fps, con soporte tanto de "
-            "Imagen a Vídeo simple como de Frame a Frame (fotograma inicial y final)."
-        ),
-        "estimated_gb": 29.8,
-        "min_vram_gb": 9.5,
-        "recommended_vram_gb": 15.0,
-        "l4_seconds_hint": "45–80 s / clip",
-        "engine": "skyreels_v2",
-        "artifacts": [
-            {
-                "role": "base",
-                "repo_id": "Skywork/SkyReels-V2-I2V-1.3B-540P-Diffusers",
-                "subdir": "base",
-                "filename": None,
-                "verify_file": "model_index.json",
-                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
-            }
-        ],
-    },
-    {
         "id": "wan21-t2v-1.3b",
-        "name": "Wan 2.1 T2V 1.3B (Texto a Vídeo Puro · Ligero)",
+        "name": "Wan 2.1 T2V 1.3B (Texto a Vídeo Puro · Ligero Español/Inglés)",
         "category": "video",
         "is_default": False,
         "badge": "Texto→Vídeo · T4 y L4",
         "video_modes": ["t2v"],
         "default_fps": 16,
-        "default_steps": 28,
+        "default_steps": 40,
+        "default_cfg": 5.0,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [832, 480],
+            "portrait": [480, 832],
+            "square": [640, 640],
+            "max_area": 480 * 832,
+            "mod_value": 16,
+            "frame_rule": "4k+1",
+            "default_frames": 81,
+            "default_duration_sec": 5.0,
+            "default_fps": 16,
+            "default_steps": 40,
+            "default_cfg": 5.0,
+            "flow_shift": 3.0,
+            "prompt_lang": "es_en",
+            "official_note": "480P nativo (832×480 / 480×832) · 5 s (81 frames @ 16 fps) · 40–50 pasos · CFG 5.0 · Entiende Español e Inglés",
+        },
         "description": (
-            "Generador clásico y muy estable de escenas de vídeo a partir únicamente de texto descriptivo. "
+            "Generador clásico y muy estable de escenas de vídeo desde texto (832×480 / 480×832 @ 16 fps, 81 fotogramas). "
             "Funciona de forma excelente tanto en T4 como en L4."
         ),
         "estimated_gb": 27.0,
         "min_vram_gb": 8.0,
         "recommended_vram_gb": 13.0,
-        "l4_seconds_hint": "30–55 s / clip",
+        "l4_seconds_hint": "40–65 s / clip",
         "engine": "wan_t2v",
         "artifacts": [
             {
@@ -438,16 +546,35 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "cogvideox-5b-i2v",
-        "name": "CogVideoX 5B I2V (Imagen a Vídeo Expresivo BF16)",
+        "name": "CogVideoX 5B I2V (Imagen a Vídeo Expresivo · 720×480 Fijo)",
         "category": "video",
         "is_default": False,
-        "badge": "5B BF16 · Movimiento Suave",
+        "badge": "5B BF16 · 720×480 @ 8 fps",
         "video_modes": ["i2v"],
-        "default_fps": 16,
-        "default_steps": 30,
+        "default_fps": 8,
+        "default_steps": 50,
+        "default_cfg": 6.0,
+        "default_duration_sec": 6.0,
+        "official_spec": {
+            "landscape": [720, 480],
+            "portrait": [720, 480],
+            "square": [720, 480],
+            "fixed_resolution": [720, 480],
+            "max_area": 720 * 480,
+            "mod_value": 16,
+            "frame_rule": "cogvideo49",
+            "default_frames": 49,
+            "default_duration_sec": 6.0,
+            "default_fps": 8,
+            "default_steps": 50,
+            "default_cfg": 6.0,
+            "use_dynamic_cfg": True,
+            "prompt_lang": "en",
+            "official_note": "Resolución fija obligatoria 720×480 · 6 s (49 frames @ 8 fps) · 50 pasos · CFG 6.0 dinámico · Prompt en Inglés",
+        },
         "description": (
-            "Modelo de 5B parámetros en BF16 reconocido por su coherencia espacial al animar retratos y escenas. "
-            "Usa tiling de VAE + CPU Offload para correr estable en L4."
+            "Modelo de 5B parámetros en BF16. Su arquitectura exige estrictamente 720×480 píxeles, 49 fotogramas (6 s a 8 fps) "
+            "y 50 pasos con dynamic CFG (Studio IA los fija automáticamente)."
         ),
         "estimated_gb": 20.6,
         "min_vram_gb": 13.0,
@@ -473,7 +600,24 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "badge": "Vídeo + Audio + Frame a Frame · A100",
         "video_modes": ["t2v", "i2v", "flf2v", "av"],
         "default_fps": 24,
-        "default_steps": 25,
+        "default_steps": 40,
+        "default_cfg": 4.0,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [768, 512],
+            "portrait": [512, 768],
+            "square": [640, 640],
+            "max_area": 512 * 768,
+            "mod_value": 32,
+            "frame_rule": "8k+1",
+            "default_frames": 121,
+            "default_duration_sec": 5.0,
+            "default_fps": 24,
+            "default_steps": 40,
+            "default_cfg": 4.0,
+            "prompt_lang": "es_en",
+            "official_note": "768×512 / 512×768 · 5 s (121 frames @ 24 fps) · 40 pasos · CFG 4.0 · Genera pista de audio sincronizada",
+        },
         "description": (
             "Modelo multimodal de 19B de Lightricks que genera vídeo (desde texto, 1 imagen o Frame a Frame) "
             "y pista de audio sincronizada a la vez. Óptimo en A100/H100."
@@ -502,7 +646,25 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "badge": "14B · I2V + Frame a Frame",
         "video_modes": ["i2v", "flf2v"],
         "default_fps": 16,
-        "default_steps": 25,
+        "default_steps": 40,
+        "default_cfg": 5.0,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [832, 480],
+            "portrait": [480, 832],
+            "square": [640, 640],
+            "max_area": 480 * 832,
+            "mod_value": 16,
+            "frame_rule": "4k+1",
+            "default_frames": 81,
+            "default_duration_sec": 5.0,
+            "default_fps": 16,
+            "default_steps": 40,
+            "default_cfg": 5.0,
+            "flow_shift": 3.0,
+            "prompt_lang": "es_en",
+            "official_note": "480P (832×480 / 480×832) · 5 s (81 frames @ 16 fps) · 40 pasos · CFG 5.0 · Entiende Español e Inglés",
+        },
         "description": (
             "Modelo grande de 14B parámetros para animación detallada de 1 imagen o transición Frame a Frame. "
             "Diseñado para A100 (40/80 GB); en L4 usa offload secuencial."
@@ -531,7 +693,25 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "badge": "Especialista Frame a Frame 720p · A100",
         "video_modes": ["flf2v", "i2v"],
         "default_fps": 16,
-        "default_steps": 28,
+        "default_steps": 40,
+        "default_cfg": 5.0,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [1280, 720],
+            "portrait": [720, 1280],
+            "square": [960, 960],
+            "max_area": 720 * 1280,
+            "mod_value": 16,
+            "frame_rule": "4k+1",
+            "default_frames": 81,
+            "default_duration_sec": 5.0,
+            "default_fps": 16,
+            "default_steps": 40,
+            "default_cfg": 5.0,
+            "flow_shift": 5.0,
+            "prompt_lang": "es_en",
+            "official_note": "720P obligatorio (1280×720 / 720×1280) · 5 s (81 frames @ 16 fps) · 40 pasos · CFG 5.0 · Entiende Español e Inglés",
+        },
         "description": (
             "Entrenado específicamente por Alibaba Wan-AI para interpolar la escena completa entre un Fotograma Inicial "
             "y un Fotograma Final en alta definición 720p. Recomendado en A100/H100."
@@ -559,8 +739,26 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "is_default": False,
         "badge": "Gama Alta · Solo A100 / H100",
         "video_modes": ["i2v", "flf2v"],
-        "default_fps": 24,
-        "default_steps": 28,
+        "default_fps": 16,
+        "default_steps": 40,
+        "default_cfg": 3.5,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [1280, 720],
+            "portrait": [720, 1280],
+            "square": [960, 960],
+            "max_area": 720 * 1280,
+            "mod_value": 16,
+            "frame_rule": "4k+1",
+            "default_frames": 81,
+            "default_duration_sec": 5.0,
+            "default_fps": 16,
+            "default_steps": 40,
+            "default_cfg": 3.5,
+            "flow_shift": 5.0,
+            "prompt_lang": "es_en",
+            "official_note": "720P (1280×720 / 720×1280) · 5 s (81 frames @ 16 fps) · 40 pasos · CFG 3.5 (MoE 2 expertos)",
+        },
         "description": (
             "Buque insignia Mixture-of-Experts (27B totales, dos expertos de ruido). "
             "Máxima calidad abierta actual; pensado para GPUs A100 (40/80 GB) o H100."

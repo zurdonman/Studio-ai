@@ -520,12 +520,59 @@
     }
   }
 
+  function computeClientModelDimensions(modelObj, natW, natH) {
+    const spec = (modelObj && modelObj.official_spec) || {};
+    if (Array.isArray(spec.fixed_resolution) && spec.fixed_resolution.length === 2) {
+      return { w: spec.fixed_resolution[0], h: spec.fixed_resolution[1] };
+    }
+    let ar = Number(natH || 704) / Math.max(1, Number(natW || 1280));
+    if (ar >= 1.62 && Array.isArray(spec.portrait)) {
+      return { w: spec.portrait[0], h: spec.portrait[1] };
+    }
+    if (ar <= 1 / 1.62 && Array.isArray(spec.landscape)) {
+      return { w: spec.landscape[0], h: spec.landscape[1] };
+    }
+    if (ar >= 0.9 && ar <= 1.11 && Array.isArray(spec.square)) {
+      return { w: spec.square[0], h: spec.square[1] };
+    }
+    const mod = Number(spec.mod_value || 32);
+    const maxArea = Number(spec.max_area || 704 * 1280);
+    ar = Math.max(9 / 16, Math.min(16 / 9, ar));
+    const h = Math.max(mod * 8, Math.floor(Math.round(Math.sqrt(maxArea * ar)) / mod) * mod);
+    const w = Math.max(mod * 8, Math.floor(Math.round(Math.sqrt(maxArea / ar)) / mod) * mod);
+    return { w, h };
+  }
+
   function setVideoSubmode(submode) {
     state.videoSubmode = submode;
     if (submode === "ffmpeg") {
       state.videoMode = "ffmpeg_motion";
     } else {
       state.videoMode = "ai";
+      // Si el modelo actual no admite el submodo pulsado (ej. Wan 2.2 TI2V al pulsar Frame a Frame),
+      // seleccionar automáticamente el mejor modelo compatible para evitar que el usuario lance el modo equivocado.
+      const sel = $("select-video-model");
+      const curModel = sel ? state.catalog.find((m) => m.id === sel.value) : null;
+      const curModes = (curModel && curModel.video_modes) || [];
+      if (!curModel || curModel.engine === "ffmpeg_motion" || !curModes.includes(submode)) {
+        const bestCompat = state.catalog.find(
+          (m) =>
+            m.category === "video" &&
+            m.engine !== "ffmpeg_motion" &&
+            Array.isArray(m.video_modes) &&
+            m.video_modes.includes(submode) &&
+            (!m.compatibility || m.compatibility.compatible)
+        );
+        if (bestCompat && sel) {
+          sel.value = bestCompat.id;
+          applyVideoModelDefaults(bestCompat.id);
+          populateVideoModelSelect();
+          toast(
+            `Seleccionado automáticamente «${bestCompat.name.split("(")[0].trim()}» (compatible con este modo). Si no está en VRAM se cargará al pulsar Generar.`
+          );
+          return;
+        }
+      }
     }
     syncVideoSubmodeUI();
     populateVideoModelSelect();
@@ -552,6 +599,7 @@
     }
 
     if ($("vid-ai-fields")) $("vid-ai-fields").hidden = isFfmpeg;
+    if ($("vid-official-spec-bar")) $("vid-official-spec-bar").hidden = isFfmpeg;
     if ($("vid-ai-steps-row")) $("vid-ai-steps-row").hidden = isFfmpeg;
     if ($("vid-ffmpeg-fields")) $("vid-ffmpeg-fields").hidden = !isFfmpeg;
 
@@ -666,12 +714,49 @@
     });
   }
 
+  function updateModelPresetsAndSpecBar(m) {
+    const spec = (m && m.official_spec) || {};
+    const land = spec.landscape || [1280, 704];
+    const port = spec.portrait || [704, 1280];
+    const sq = spec.square || [960, 960];
+
+    const b169 = $("vid-preset-16-9");
+    const b916 = $("vid-preset-9-16");
+    const b11 = $("vid-preset-1-1");
+    if (b169) {
+      b169.dataset.vw = String(land[0]);
+      b169.dataset.vh = String(land[1]);
+      b169.textContent = `Horizontal (${land[0]}×${land[1]})`;
+    }
+    if (b916) {
+      b916.dataset.vw = String(port[0]);
+      b916.dataset.vh = String(port[1]);
+      b916.textContent =
+        spec.fixed_resolution ? `Fijo (${port[0]}×${port[1]})` : `Vertical (${port[0]}×${port[1]})`;
+    }
+    if (b11) {
+      b11.dataset.vw = String(sq[0]);
+      b11.dataset.vh = String(sq[1]);
+      b11.textContent = spec.fixed_resolution ? `Nativo (${sq[0]}×${sq[1]})` : `1:1 (${sq[0]}×${sq[1]})`;
+    }
+
+    const barTxt = $("vid-official-spec-text");
+    if (barTxt) {
+      barTxt.textContent = spec.official_note
+        ? `📘 Oficial ${m.name.split("(")[0].trim()}: ${spec.official_note}`
+        : `📘 Ajustes cargados para ${m ? m.name : "Vídeo IA"}`;
+    }
+  }
+
   function applyVideoModelDefaults(modelId) {
     const m = state.catalog.find((x) => x.id === modelId);
     if (!m) return;
     if (m.engine === "ffmpeg_motion") {
       setVideoSubmode("ffmpeg");
+      $("vid-width").value = 1280;
+      $("vid-height").value = 720;
       $("vid-fps").value = 24;
+      $("vid-duration").value = 4.0;
       return;
     }
     if (state.videoSubmode === "ffmpeg") {
@@ -679,8 +764,32 @@
       state.videoMode = "ai";
       state.videoSubmode = modes.includes("i2v") ? "i2v" : modes[0] || "t2v";
     }
-    if (m.default_fps) $("vid-fps").value = m.default_fps;
-    if (m.default_steps) $("vid-steps").value = m.default_steps;
+    const spec = m.official_spec || {};
+    updateModelPresetsAndSpecBar(m);
+
+    const curW = Number($("vid-width").value || 1280);
+    const curH = Number($("vid-height").value || 704);
+    const wasPortrait = curH > curW * 1.08;
+    const targetRes = spec.fixed_resolution
+      ? spec.fixed_resolution
+      : wasPortrait
+      ? spec.portrait || [704, 1280]
+      : spec.landscape || [1280, 704];
+    $("vid-width").value = targetRes[0];
+    $("vid-height").value = targetRes[1];
+
+    if (spec.default_duration_sec || m.default_duration_sec) {
+      $("vid-duration").value = spec.default_duration_sec || m.default_duration_sec;
+    }
+    if (spec.default_fps || m.default_fps) {
+      $("vid-fps").value = spec.default_fps || m.default_fps;
+    }
+    if (spec.default_steps || m.default_steps) {
+      $("vid-steps").value = spec.default_steps || m.default_steps;
+    }
+    if ($("vid-cfg") && (spec.default_cfg || m.default_cfg)) {
+      $("vid-cfg").value = spec.default_cfg || m.default_cfg;
+    }
     syncVideoPrepareButtonLabel();
     syncVideoSubmodeUI();
   }
@@ -1661,18 +1770,13 @@
     const thumbImg = $("vid-src-thumb-img");
     if (thumbImg && state.videoMode === "ai") {
       thumbImg.onload = () => {
-        const nw = thumbImg.naturalWidth || 832;
-        const nh = thumbImg.naturalHeight || 480;
-        if (nh > nw * 1.12) {
-          $("vid-width").value = 480;
-          $("vid-height").value = 832;
-        } else if (nw > nh * 1.12) {
-          $("vid-width").value = 832;
-          $("vid-height").value = 480;
-        } else {
-          $("vid-width").value = 640;
-          $("vid-height").value = 640;
-        }
+        const nw = thumbImg.naturalWidth || 1280;
+        const nh = thumbImg.naturalHeight || 704;
+        const vidSel = $("select-video-model");
+        const curModel = vidSel ? state.catalog.find((m) => m.id === vidSel.value) : null;
+        const dims = computeClientModelDimensions(curModel, nw, nh);
+        $("vid-width").value = dims.w;
+        $("vid-height").value = dims.h;
       };
     }
   }
@@ -2193,11 +2297,21 @@
           $("vid-height").value = 720;
           $("vid-fps").value = 24;
         } else {
-          $("vid-width").value = 832;
-          $("vid-height").value = 480;
+          const mid = $("select-video-model") ? $("select-video-model").value : null;
+          if (mid) applyVideoModelDefaults(mid);
         }
       });
     });
+
+    if ($("btn-restore-official-vid")) {
+      $("btn-restore-official-vid").addEventListener("click", () => {
+        const mid = $("select-video-model") ? $("select-video-model").value : null;
+        if (mid) {
+          applyVideoModelDefaults(mid);
+          toast("Restaurados los parámetros oficiales del modelo.", "success");
+        }
+      });
+    }
 
     document.querySelectorAll(".vid-preset-chip").forEach((chip) => {
       chip.addEventListener("click", () => {
@@ -2308,15 +2422,18 @@
           body: JSON.stringify({
             mode: effectiveMode,
             video_submode: effectiveSubmode,
+            model_id: chosenVidModel || null,
             prompt: $("vid-prompt").value,
+            negative_prompt: $("vid-neg-prompt") ? $("vid-neg-prompt").value : "",
             image_rel: effectiveSubmode === "t2v" ? null : startRel,
             end_image_rel: effectiveSubmode === "flf2v" ? endRel : null,
             audio_rel: $("vid-source-audio").value || null,
-            width: Number($("vid-width").value || 832),
-            height: Number($("vid-height").value || 480),
-            duration_sec: Number($("vid-duration").value || 4),
-            fps: Number($("vid-fps").value || 16),
-            steps: Number($("vid-steps").value || 20),
+            width: Number($("vid-width").value || 1280),
+            height: Number($("vid-height").value || 704),
+            duration_sec: Number($("vid-duration").value || 5),
+            fps: Number($("vid-fps").value || 24),
+            steps: Number($("vid-steps").value || 45),
+            guidance_scale: $("vid-cfg") ? Number($("vid-cfg").value || 5.0) : null,
             seed: Number($("vid-seed").value || 0),
             motion_style: $("vid-motion-style").value,
           }),
@@ -2547,6 +2664,9 @@
     setupMaskCanvas();
     bindEvents();
     await Promise.all([loadCatalog(), loadVoices(), loadAssets()]);
+    if ($("select-video-model") && $("select-video-model").value) {
+      applyVideoModelDefaults($("select-video-model").value);
+    }
     syncVideoSubmodeUI();
     startAdaptivePolling();
   }

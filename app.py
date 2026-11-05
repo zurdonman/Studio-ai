@@ -146,17 +146,18 @@ class ImageGenReq(BaseModel):
 class VideoGenReq(BaseModel):
     mode: str = "ai"  # "ai" | "ffmpeg_motion"
     video_submode: str = "auto"  # "auto" | "t2v" | "i2v" | "flf2v"
+    model_id: Optional[str] = None
     prompt: str = ""
     negative_prompt: str = ""
     image_rel: Optional[str] = None
     end_image_rel: Optional[str] = None
     audio_rel: Optional[str] = None
-    width: int = 832
-    height: int = 480
-    duration_sec: float = 4.0
-    fps: int = 16
-    steps: int = 20
-    guidance_scale: float = 5.0
+    width: int = 1280
+    height: int = 704
+    duration_sec: float = 5.0
+    fps: int = 24
+    steps: int = 45
+    guidance_scale: Optional[float] = None
     seed: int = 0
     motion_style: str = "zoom_in"
 
@@ -734,6 +735,19 @@ def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
             detail="La animación FFmpeg (0 GB) necesita al menos una imagen inicial.",
         )
 
+    if req.mode == "ai" and req.model_id:
+        m_defn = catalog_manager.get_definition(req.model_id)
+        if m_defn and sub in ("t2v", "i2v", "flf2v"):
+            allowed_modes = m_defn.get("video_modes") or ["i2v", "t2v"]
+            if sub not in allowed_modes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"El modelo «{m_defn['name']}» no soporta este modo ({sub}). "
+                        "Para Frame a Frame elige «Wan 2.1 VACE 1.3B», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
+                    ),
+                )
+
     sub_labels = {
         "t2v": "Texto→Vídeo",
         "i2v": "Imagen→Vídeo",
@@ -751,6 +765,7 @@ def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
         fn=lambda j: generate_video_clip(
             mode=req.mode,
             video_submode=sub,
+            model_id=req.model_id,
             prompt=req.prompt,
             negative_prompt=req.negative_prompt,
             image_path=img_p,
