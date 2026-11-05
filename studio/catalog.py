@@ -890,6 +890,57 @@ def _matches_artifact_filters(
 class CatalogManager:
     def __init__(self) -> None:
         self._custom_models: List[Dict[str, Any]] = self._load_custom_models()
+        env_tok = (
+            os.environ.get("HF_TOKEN")
+            or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+            or ""
+        ).strip()
+        self._hf_token: Optional[str] = env_tok or None
+        self._hf_username: Optional[str] = None
+
+    def get_hf_token(self) -> Optional[str]:
+        return self._hf_token
+
+    def hf_auth_status(self) -> Dict[str, Any]:
+        tok = self._hf_token
+        masked = None
+        if tok:
+            masked = f"{tok[:5]}...{tok[-4:]}" if len(tok) > 10 else "hf_***"
+        return {
+            "has_token": bool(tok),
+            "masked_token": masked,
+            "username": self._hf_username,
+        }
+
+    def set_hf_token(self, token: str) -> Dict[str, Any]:
+        clean = (token or "").strip()
+        if not clean:
+            return self.clear_hf_token()
+        if len(clean) < 8:
+            raise ValueError("El token de Hugging Face parece demasiado corto (suele empezar por 'hf_').")
+
+        username: Optional[str] = None
+        try:
+            who = HfApi(token=clean).whoami()
+            if isinstance(who, dict):
+                username = who.get("name") or who.get("fullname")
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "401" in msg or "invalid" in msg or "unauthorized" in msg:
+                raise ValueError("Token rechazado por Hugging Face (401 no autorizado). Revisa que esté bien copiado.") from exc
+            # Si estamos sin salida directa desde el servidor (ej. vista previa offline), guardarlo igualmente en sesión
+
+        self._hf_token = clean
+        self._hf_username = username
+        os.environ["HF_TOKEN"] = clean
+        return self.hf_auth_status()
+
+    def clear_hf_token(self) -> Dict[str, Any]:
+        self._hf_token = None
+        self._hf_username = None
+        os.environ.pop("HF_TOKEN", None)
+        os.environ.pop("HUGGING_FACE_HUB_TOKEN", None)
+        return self.hf_auth_status()
 
     def _load_custom_models(self) -> List[Dict[str, Any]]:
         if CUSTOM_MODELS_FILE.exists():
@@ -1044,7 +1095,8 @@ class CatalogManager:
             "tts": ["text-to-speech"],
         }
         tasks = task_map.get(category, ["image-to-video"])
-        api = HfApi()
+        tok = self.get_hf_token()
+        api = HfApi(token=tok)
         raw_models: List[Any] = []
         try:
             for t_tag in tasks:
@@ -1109,10 +1161,9 @@ class CatalogManager:
                 continue
             seen.add(repo_id.lower())
 
-            gated = getattr(m, "gated", False)
-            if gated:
-                # Omitimos modelos bloqueados con login obligatorio para cumplir cero tokens
-                continue
+            gated_raw = getattr(m, "gated", False)
+            is_gated = bool(gated_raw)
+            gated_locked = is_gated and not bool(tok)
 
             tags = [str(t).lower() for t in (getattr(m, "tags", None) or [])]
             if category in ("video", "image") and "gguf" in tags and "diffusers" not in tags:
@@ -1187,6 +1238,8 @@ class CatalogManager:
                     "compatibility": compat,
                     "already_in_catalog": repo_id.lower() in existing_repos,
                     "pipeline_tag": getattr(m, "pipeline_tag", "") or category,
+                    "gated": is_gated,
+                    "gated_locked": gated_locked,
                 }
             )
 
@@ -1271,6 +1324,7 @@ class CatalogManager:
                     "subdir": "base" if category != "lora" else "custom",
                     "filename": clean_fn,
                     "verify_file": clean_fn or ("model_index.json" if category in ("image", "video") else "config.json"),
+                    "allow_patterns": _DIFFUSERS_VIDEO_ALLOW if (category == "video" and not clean_fn) else None,
                 }
             ],
         }
@@ -1378,7 +1432,8 @@ class CatalogManager:
         if not precheck["ok"]:
             raise RuntimeError(precheck["message"])
 
-        api = HfApi()
+        tok = self.get_hf_token()
+        api = HfApi(token=tok)
         m_dir = self.model_dir(model_id)
         m_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1556,6 +1611,7 @@ class CatalogManager:
                     filename=rfn,
                     local_dir=str(item["subdir"]),
                     tqdm_class=_JobTqdm,
+                    token=tok,
                 )
             finally:
                 file_progress["done"] = True

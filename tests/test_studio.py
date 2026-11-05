@@ -371,5 +371,23 @@ def test_gpu_filter_stickers_artifact_patterns_and_hf_search(temp_studio_env):
     assert len(hf_json["items"]) >= 1
     assert all("sticker" in it["compatibility"] for it in hf_json["items"])
 
+    # Verificar gestión opcional de Token HF en memoria de sesión (sin persistencia pública)
+    r_auth0 = client.get("/api/hf/auth")
+    assert r_auth0.status_code == 200
+    assert r_auth0.json()["has_token"] is False
+
+    r_bad = client.post("/api/hf/token", json={"token": "abc"})
+    assert r_bad.status_code == 400
+
+    r_set = client.post("/api/hf/token", json={"token": "hf_testsessiontoken123456"})
+    assert r_set.status_code == 200
+    assert r_set.json()["hf_auth"]["has_token"] is True
+    assert "hf_te...3456" == r_set.json()["hf_auth"]["masked_token"]
+
+    r_del = client.delete("/api/hf/token")
+    assert r_del.status_code == 200
+    assert r_del.json()["hf_auth"]["has_token"] is False
+
+
 
 

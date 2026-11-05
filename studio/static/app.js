@@ -10,6 +10,8 @@
     vidOnlyCompat: true,
     catOnlyCompat: false,
     hfSearchResults: [],
+    hfAuth: { has_token: false, masked_token: null, username: null },
+    sessionHfToken: "",
     assets: { uploads: [], images: [], videos: [], audio: [], montages: [] },
     voices: [],
     jobs: [],
@@ -125,6 +127,7 @@
       const snap = await api("/api/status");
       activeCount = snap.active_jobs_count || 0;
       renderHardware(snap.hardware, snap.memory, snap.unexported_outputs_count);
+      renderHfAuthStatus(snap.hf_auth);
       renderJobs(snap.jobs);
     } catch (_e) {
       // Silencioso en polling puntual
@@ -714,11 +717,186 @@
     );
   }
 
+  function renderHfAuthStatus(hfAuth) {
+    if (!hfAuth) return;
+    state.hfAuth = hfAuth;
+    const topBtn = $("btn-open-hf-token");
+    const boxBtn = $("btn-hf-box-token");
+    const statusBox = $("hf-token-status-box");
+    const who = hfAuth.username ? ` (@${hfAuth.username})` : "";
+    if (hfAuth.has_token) {
+      if (topBtn) topBtn.textContent = `🟢 HF Conectado${who}`;
+      if (boxBtn) boxBtn.textContent = `🟢 Token Activo${who}`;
+      if (statusBox) {
+        statusBox.textContent = `✅ Token activo en esta sesión: ${hfAuth.masked_token || "hf_***"}${who}`;
+      }
+    } else {
+      if (topBtn) topBtn.textContent = "🔑 Token HF";
+      if (boxBtn) boxBtn.textContent = "🔑 Token HF (opcional)";
+      if (statusBox) {
+        statusBox.textContent = "Estado actual: Sin token activo (modo público sin registro)";
+      }
+    }
+  }
+
+  function evaluateClientGpuSticker(estVramMin, category) {
+    const prof = state.activeGpuProfile || { gpu_name: "L4 (22.5 GB)", vram_gb: 22.5, has_gpu: true };
+    const vram = Number(prof.vram_gb || 0);
+    const gname = prof.gpu_name || "GPU";
+    const recV = estVramMin * 1.45;
+    if (category === "lora") {
+      if (!prof.has_gpu || vram < 12) {
+        return { tier: "incompatible", compatible: false, sticker: "🔴 Requiere GPU ≥14 GB", label: `🔴 Requiere GPU ≥14 GB (${gname})` };
+      }
+      return { tier: "excellent", compatible: true, sticker: "🟢 Excelente", label: `🟢 Excelente en ${gname}` };
+    }
+    if (!prof.has_gpu || vram <= 0.1) {
+      return { tier: "incompatible", compatible: false, sticker: "🔴 Requiere GPU", label: `🔴 Requiere GPU (~${Math.round(estVramMin)} GB VRAM)` };
+    }
+    if (vram >= recV) {
+      return { tier: "excellent", compatible: true, sticker: "🟢 Excelente", label: `🟢 Excelente en ${gname}` };
+    }
+    if (vram >= estVramMin * 1.12) {
+      return { tier: "normal", compatible: true, sticker: "🟡 Normal", label: `🟡 Normal en ${gname} (con CPU Offload)` };
+    }
+    if (vram >= estVramMin * 0.95) {
+      return { tier: "slow", compatible: true, sticker: "🟠 Lento", label: `🟠 Lento en ${gname}` };
+    }
+    return { tier: "incompatible", compatible: false, sticker: "🔴 No cabe", label: `🔴 No cabe en ${gname} (pide ~${Math.round(estVramMin)} GB)` };
+  }
+
+  async function browserDirectHfSearch(query, category, signal) {
+    const taskMap = {
+      video: ["image-to-video", "text-to-video"],
+      image: ["image-to-image", "text-to-image"],
+      lora: [null],
+      tts: ["text-to-speech"],
+    };
+    const tasks = taskMap[category] || ["image-to-video"];
+    const headers = {};
+    if (state.sessionHfToken) {
+      headers["Authorization"] = `Bearer ${state.sessionHfToken}`;
+    }
+
+    const raw = [];
+    for (const t of tasks) {
+      const params = new URLSearchParams();
+      const sq = query || (category === "lora" ? "Qwen-Image-Edit lora" : "");
+      if (sq) params.set("search", sq);
+      if (t) params.set("pipeline_tag", t);
+      if (category === "tts") params.set("library", "transformers");
+      else if (category !== "lora") params.set("library", "diffusers");
+      params.set("sort", "downloads");
+      params.set("direction", "-1");
+      params.set("limit", "14");
+      ["safetensors", "gated", "tags", "downloads", "likes", "pipeline_tag"].forEach((ex) =>
+        params.append("expand[]", ex)
+      );
+      const r = await fetch(`https://huggingface.co/api/models?${params.toString()}`, {
+        headers,
+        signal,
+      });
+      if (r.ok) {
+        const arr = await r.json();
+        if (Array.isArray(arr)) raw.push(...arr);
+      }
+    }
+
+    const seen = new Set();
+    const out = [];
+    for (const m of raw) {
+      const repoId = m.id || "";
+      if (!repoId || seen.has(repoId.toLowerCase())) continue;
+      seen.add(repoId.toLowerCase());
+
+      const tags = (m.tags || []).map((x) => String(x).toLowerCase());
+      if ((category === "video" || category === "image") && tags.includes("gguf") && !tags.includes("diffusers")) {
+        continue;
+      }
+
+      const st = m.safetensors || null;
+      let paramsTotal = 0;
+      let bytesEst = 0;
+      if (st && st.parameters) {
+        paramsTotal = Number(st.total || 0);
+        for (const [dk, cnt] of Object.entries(st.parameters)) {
+          const c = Number(cnt || 0);
+          const up = String(dk).toUpperCase();
+          if (up.includes("F32")) bytesEst += c * 4;
+          else if (up.includes("BF16") || up.includes("F16")) bytesEst += c * 2;
+          else bytesEst += c * 1;
+        }
+      }
+
+      const lowId = repoId.toLowerCase();
+      let estDiskGb = 14.0;
+      let estVramMin = 12.0;
+      if (bytesEst > 0) {
+        estDiskGb = Math.max(0.2, Math.round((bytesEst / 1073741824) * 10) / 10);
+        estVramMin = Math.max(
+          1.0,
+          Math.round(((paramsTotal * 2.0) / 1073741824 + (category === "lora" ? 0.3 : 3.0)) * 10) / 10
+        );
+        if (lowId.includes("4bit") || lowId.includes("nf4")) {
+          estVramMin = Math.max(4.0, Math.round(((paramsTotal * 0.65) / 1073741824 + 3.0) * 10) / 10);
+        }
+      } else if (category === "lora" || lowId.includes("lora")) {
+        estDiskGb = 0.6;
+        estVramMin = 0.4;
+      } else if (lowId.includes("14b")) {
+        estDiskGb = 32.0;
+        estVramMin = 22.0;
+      } else if (lowId.includes("19b") || lowId.includes("27b")) {
+        estDiskGb = 48.0;
+        estVramMin = 26.0;
+      } else if (lowId.includes("5b")) {
+        estDiskGb = 18.0;
+        estVramMin = 13.5;
+      } else if (lowId.includes("1.3b") || lowId.includes("2b")) {
+        estDiskGb = 12.0;
+        estVramMin = 8.5;
+      } else if (category === "tts") {
+        estDiskGb = 1.2;
+        estVramMin = 1.5;
+      }
+
+      const compat = evaluateClientGpuSticker(estVramMin, category);
+      if (state.catOnlyCompat && !compat.compatible) continue;
+
+      const isGated = Boolean(m.gated);
+      out.push({
+        repo_id: repoId,
+        name: repoId.split("/").pop(),
+        author: repoId.split("/")[0],
+        category,
+        downloads: Number(m.downloads || 0),
+        likes: Number(m.likes || 0),
+        estimated_gb: estDiskGb,
+        min_vram_gb: estVramMin,
+        compatibility: compat,
+        gated: isGated,
+        gated_locked: isGated && !(state.hfAuth.has_token || Boolean(state.sessionHfToken)),
+      });
+    }
+    return out.slice(0, 14);
+  }
+
+  let _hfDebounceTimer = null;
+  let _hfAbortCtrl = null;
+
+  function scheduleRealtimeHfSearch() {
+    if (_hfDebounceTimer) clearTimeout(_hfDebounceTimer);
+    _hfDebounceTimer = setTimeout(() => {
+      runHfLiveSearch();
+    }, 280);
+  }
+
   async function runHfLiveSearch(customQuery = null, customCat = null) {
     const qInput = $("hf-live-query");
     const cSelect = $("hf-live-cat");
     const box = $("hf-live-results");
     const btn = $("btn-hf-live-search");
+    const ind = $("hf-live-indicator");
     if (!box) return;
 
     if (customQuery !== null && qInput) qInput.value = customQuery;
@@ -727,28 +905,77 @@
     const q = (qInput && qInput.value.trim()) || "";
     const cat = (cSelect && cSelect.value) || "video";
 
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = "⏳ Consultando Hugging Face...";
+    if (_hfAbortCtrl) {
+      _hfAbortCtrl.abort();
     }
-    box.innerHTML = `<div class="muted">Consultando repositorios abiertos en Hugging Face Hub...</div>`;
+    const ctrl = new AbortController();
+    _hfAbortCtrl = ctrl;
+
+    if (ind) {
+      ind.classList.add("searching");
+      ind.textContent = "⏳ Buscando en tiempo real...";
+    }
+    if (btn) btn.disabled = true;
 
     try {
-      const data = await api(
-        `/api/catalog/hf-search?query=${encodeURIComponent(q)}&category=${encodeURIComponent(cat)}&gpu_profile=${encodeURIComponent(state.gpuProfile)}&only_compatible=${state.catOnlyCompat}`
+      const resp = await fetch(
+        `/api/catalog/hf-search?query=${encodeURIComponent(q)}&category=${encodeURIComponent(cat)}&gpu_profile=${encodeURIComponent(state.gpuProfile)}&only_compatible=${state.catOnlyCompat}`,
+        { signal: ctrl.signal }
       );
-      state.hfSearchResults = data.items || [];
-      if (state.hfSearchResults.length === 0) {
-        box.innerHTML = `<div class="muted">${escapeHtml(data.warning || "Sin resultados para esa búsqueda con el filtro actual.")}</div>`;
+      const data = await resp.json();
+      let items = data.items || [];
+
+      // Si el contenedor actual no sale directo a huggingface.co, consultar desde el navegador en tiempo real
+      if (data.online === false) {
+        try {
+          const browserItems = await browserDirectHfSearch(q, cat, ctrl.signal);
+          if (browserItems.length > 0) {
+            items = browserItems;
+          }
+        } catch (_be) {
+          // Mantiene resultados locales verificados si tampoco hubiera red en el navegador
+        }
+      }
+
+      if (ctrl.signal.aborted) return;
+      state.hfSearchResults = items;
+
+      if (ind) {
+        ind.classList.remove("searching");
+        ind.textContent = `⚡ ${items.length} resultado(s) en vivo`;
+      }
+
+      if (items.length === 0) {
+        box.innerHTML = `<div class="muted">Sin coincidencias para «${escapeHtml(q)}» con el filtro de GPU actual. Prueba otro término o cambia la GPU arriba.</div>`;
         return;
       }
 
-      box.innerHTML = state.hfSearchResults
+      box.innerHTML = items
         .map((it, idx) => {
           const comp = it.compatibility || {};
           const already = state.catalog.some((m) =>
-            (m.artifacts || []).some((a) => a.repo_id === it.repo_id)
+            (m.artifacts || []).some((a) => a.repo_id.toLowerCase() === it.repo_id.toLowerCase())
           );
+          const gatedHtml = it.gated
+            ? it.gated_locked
+              ? `<span class="gated-pill locked" title="Requiere aceptar licencia en HF y activar tu Token HF">🔒 Pide Token HF</span>`
+              : `<span class="gated-pill unlocked">🔓 Token HF listo</span>`
+            : `<span class="gated-pill">🔓 Público</span>`;
+
+          let actionHtml = "";
+          if (already) {
+            actionHtml = `<span class="mc-tag ok">✓ Ya en tu catálogo</span>`;
+          } else if (it.gated_locked) {
+            actionHtml = `<button type="button" class="btn btn-secondary btn-sm" data-hf-unlock="1">🔑 Poner Token HF para usar</button>`;
+          } else {
+            actionHtml = `
+              <div class="row-gap" style="flex-wrap:wrap;">
+                <button type="button" class="btn btn-secondary btn-sm" data-hf-import="${idx}">➕ Añadir</button>
+                <button type="button" class="btn btn-primary btn-sm" data-hf-import-load="${idx}">⬇⚡ Añadir y Cargar</button>
+              </div>
+            `;
+          }
+
           return `
             <div class="hf-live-card">
               <div>
@@ -756,55 +983,68 @@
                   <strong style="font-size:12.5px;word-break:break-word;">${escapeHtml(it.repo_id)}</strong>
                   <span class="muted" style="white-space:nowrap;">⬇ ${(it.downloads || 0).toLocaleString()}</span>
                 </div>
-                <div style="margin-top:6px;">
-                  <span class="gpu-sticker ${escapeHtml(comp.tier || "good")}">${escapeHtml(comp.label || comp.sticker || "")}</span>
+                <div style="margin-top:6px;display:flex;gap:5px;flex-wrap:wrap;align-items:center;">
+                  <span class="gpu-sticker ${escapeHtml(comp.tier || "normal")}">${escapeHtml(comp.label || comp.sticker || "")}</span>
+                  ${gatedHtml}
                 </div>
                 <div class="muted" style="margin-top:5px;">
-                  Descarga est.: ~${it.estimated_gb} GB · VRAM mín.: ~${it.min_vram_gb} GB
+                  Peso aprox.: ~${it.estimated_gb} GB · VRAM mín.: ~${it.min_vram_gb} GB
                 </div>
               </div>
-              <div>
-                ${
-                  already
-                    ? `<span class="mc-tag ok">✓ Ya incluido en tu catálogo</span>`
-                    : `<button type="button" class="btn btn-secondary btn-sm" data-hf-import="${idx}">➕ Añadir a mi Catálogo</button>`
-                }
-              </div>
+              <div>${actionHtml}</div>
             </div>
           `;
         })
         .join("");
 
-      box.querySelectorAll("[data-hf-import]").forEach((b) => {
-        b.addEventListener("click", async () => {
-          const item = state.hfSearchResults[Number(b.dataset.hfImport)];
-          if (!item) return;
-          try {
-            await api("/api/catalog/custom", {
-              method: "POST",
-              body: JSON.stringify({
-                name: item.name || item.repo_id,
-                repo_id: item.repo_id,
-                category: item.category,
-                estimated_gb: item.estimated_gb,
-                min_vram_gb: item.min_vram_gb,
-              }),
-            });
-            toast(`«${item.repo_id}» añadido a tu catálogo.`, "success");
-            await loadCatalog();
-            runHfLiveSearch();
-          } catch (e) {
-            toast(e.message, "error");
-          }
+      box.querySelectorAll("[data-hf-unlock]").forEach((b) => {
+        b.addEventListener("click", () => {
+          $("hf-token-modal").hidden = false;
         });
       });
+
+      const importItem = async (idx, andLoad) => {
+        const item = state.hfSearchResults[idx];
+        if (!item) return;
+        try {
+          const res = await api("/api/catalog/custom", {
+            method: "POST",
+            body: JSON.stringify({
+              name: item.name || item.repo_id,
+              repo_id: item.repo_id,
+              category: item.category,
+              estimated_gb: item.estimated_gb,
+              min_vram_gb: item.min_vram_gb,
+            }),
+          });
+          await loadCatalog();
+          if (andLoad && res.model && res.model.id) {
+            toast(`Descargando y cargando «${item.repo_id}»...`, "info");
+            await loadModelIntoMemory(res.model.id, true);
+          } else {
+            toast(`«${item.repo_id}» añadido a tu catálogo.`, "success");
+          }
+          runHfLiveSearch();
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      };
+
+      box.querySelectorAll("[data-hf-import]").forEach((b) => {
+        b.addEventListener("click", () => importItem(Number(b.dataset.hfImport), false));
+      });
+      box.querySelectorAll("[data-hf-import-load]").forEach((b) => {
+        b.addEventListener("click", () => importItem(Number(b.dataset.hfImportLoad), true));
+      });
     } catch (e) {
-      box.innerHTML = `<div class="muted">No se pudo conectar con Hugging Face (${escapeHtml(e.message)}).</div>`;
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = "🔍 Buscar en HF";
+      if (e && e.name === "AbortError") return;
+      if (ind) {
+        ind.classList.remove("searching");
+        ind.textContent = "⚡ En vivo al escribir";
       }
+      box.innerHTML = `<div class="muted">Error consultando Hugging Face (${escapeHtml(e.message)}).</div>`;
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -1926,7 +2166,65 @@
       }
     });
 
-    // Pestaña 5: Catálogo, Explorador HF en vivo y Añadir HF custom
+    // Pestaña 5: Catálogo, Buscador HF en tiempo real, Token HF opcional y Añadir HF custom
+    const openHfModal = () => {
+      $("hf-token-modal").hidden = false;
+    };
+    if ($("btn-open-hf-token")) $("btn-open-hf-token").addEventListener("click", openHfModal);
+    if ($("btn-hf-box-token")) $("btn-hf-box-token").addEventListener("click", openHfModal);
+    if ($("btn-close-hf-token")) {
+      $("btn-close-hf-token").addEventListener("click", () => {
+        $("hf-token-modal").hidden = true;
+      });
+    }
+    if ($("btn-save-hf-token")) {
+      $("btn-save-hf-token").addEventListener("click", async () => {
+        const val = ($("inp-hf-token").value || "").trim();
+        if (!val) {
+          toast("Pega un token hf_... o pulsa «Quitar Token».", "error");
+          return;
+        }
+        try {
+          const res = await api("/api/hf/token", {
+            method: "POST",
+            body: JSON.stringify({ token: val }),
+          });
+          state.sessionHfToken = val;
+          $("inp-hf-token").value = "";
+          renderHfAuthStatus(res.hf_auth);
+          $("hf-token-modal").hidden = true;
+          toast("Token de Hugging Face activado en esta sesión.", "success");
+          runHfLiveSearch();
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
+    if ($("btn-clear-hf-token")) {
+      $("btn-clear-hf-token").addEventListener("click", async () => {
+        try {
+          const res = await api("/api/hf/token", { method: "DELETE" });
+          state.sessionHfToken = "";
+          $("inp-hf-token").value = "";
+          renderHfAuthStatus(res.hf_auth);
+          toast("Token de Hugging Face eliminado.", "success");
+          runHfLiveSearch();
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
+
+    if ($("btn-vid-jump-hf")) {
+      $("btn-vid-jump-hf").addEventListener("click", () => {
+        switchTab("tab-catalog");
+        if ($("hf-live-cat")) $("hf-live-cat").value = "video";
+        const qEl = $("hf-live-query");
+        if (qEl) qEl.focus();
+        runHfLiveSearch(null, "video");
+      });
+    }
+
     document.querySelectorAll(".filter-chip").forEach((chip) => {
       chip.addEventListener("click", () => {
         state.catalogFilter = chip.dataset.cat;
@@ -1940,9 +2238,17 @@
       $("btn-hf-live-search").addEventListener("click", () => runHfLiveSearch());
     }
     if ($("hf-live-query")) {
+      // Búsqueda instantánea en tiempo real mientras escribes (debounce 280 ms)
+      $("hf-live-query").addEventListener("input", () => scheduleRealtimeHfSearch());
       $("hf-live-query").addEventListener("keydown", (ev) => {
-        if (ev.key === "Enter") runHfLiveSearch();
+        if (ev.key === "Enter") {
+          if (_hfDebounceTimer) clearTimeout(_hfDebounceTimer);
+          runHfLiveSearch();
+        }
       });
+    }
+    if ($("hf-live-cat")) {
+      $("hf-live-cat").addEventListener("change", () => runHfLiveSearch());
     }
     document.querySelectorAll(".hf-topic-chip").forEach((chip) => {
       chip.addEventListener("click", () => runHfLiveSearch(chip.dataset.q, chip.dataset.c));

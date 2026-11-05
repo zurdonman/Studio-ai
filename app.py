@@ -95,6 +95,10 @@ class CreditsConfigReq(BaseModel):
     idle_alert_minutes: Optional[int] = None
 
 
+class HfTokenReq(BaseModel):
+    token: str = ""
+
+
 class CustomModelReq(BaseModel):
     name: str
     repo_id: str
@@ -308,7 +312,34 @@ def api_status() -> Dict[str, Any]:
         "jobs": jobs,
         "active_jobs_count": active_cnt,
         "unexported_outputs_count": _count_unexported_outputs(),
+        "hf_auth": catalog_manager.hf_auth_status(),
     }
+
+
+@app.get("/api/hf/auth")
+def api_get_hf_auth() -> Dict[str, Any]:
+    return catalog_manager.hf_auth_status()
+
+
+@app.post("/api/hf/token")
+def api_set_hf_token(req: HfTokenReq) -> Dict[str, Any]:
+    try:
+        auth = catalog_manager.set_hf_token(req.token)
+        if auth["has_token"]:
+            who_txt = f" (@{auth['username']})" if auth.get("username") else ""
+            colab_console_log(f"Token de Hugging Face activado en la sesión{who_txt}.", icon="🔑")
+        else:
+            colab_console_log("Token de Hugging Face eliminado de la sesión.", icon="🔑")
+        return {"ok": True, "hf_auth": auth}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve)) from ve
+
+
+@app.delete("/api/hf/token")
+def api_clear_hf_token() -> Dict[str, Any]:
+    auth = catalog_manager.clear_hf_token()
+    colab_console_log("Token de Hugging Face eliminado de la sesión.", icon="🔑")
+    return {"ok": True, "hf_auth": auth}
 
 
 @app.post("/api/credits/config")

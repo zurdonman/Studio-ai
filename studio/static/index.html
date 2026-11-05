@@ -44,6 +44,9 @@
     </div>
 
     <div class="topbar-actions">
+      <button class="btn btn-ghost btn-sm" id="btn-open-hf-token" title="Opcional: conecta tu Token de lectura de Hugging Face para descargas más rápidas y modelos con licencia">
+        🔑 Token HF
+      </button>
       <button class="btn btn-ghost btn-sm" id="btn-free-all-mem" title="Saca los pesos de la RAM y VRAM sin borrar los modelos descargados del disco">
         🧹 Liberar RAM/VRAM
       </button>
@@ -351,6 +354,9 @@
             <div class="engine-bar-actions">
               <button class="btn btn-primary btn-sm" id="btn-prepare-video">
                 ⚡ Descargar y Cargar Modelo
+              </button>
+              <button class="btn btn-secondary btn-sm" id="btn-vid-jump-hf" title="Abrir el buscador en tiempo real de Hugging Face filtrado para Vídeo">
+                🔍 Buscar más en HF
               </button>
               <button class="btn btn-ghost btn-sm" id="btn-unload-video">
                 🧹 Sacar de RAM/VRAM
@@ -678,35 +684,41 @@
           </label>
         </div>
 
-        <div id="catalog-grid" class="catalog-grid"></div>
-
-        <!-- Explorador en vivo de Hugging Face (Lectura directa API HF sin token) -->
-        <div class="card add-hf-card">
+        <!-- Buscador en Tiempo Real de Hugging Face (funciona al instante mientras escribes, con o sin Token HF) -->
+        <div class="card add-hf-card live-hf-box" id="live-hf-search-card" style="margin-top:0;margin-bottom:14px;">
           <div class="card-header">
             <div>
-              <h3>🔍 Explorar más modelos en Hugging Face (en vivo)</h3>
-              <span class="muted">Consulta tamaños reales, descargas y compatibilidad con tu GPU directamente desde Hugging Face Hub</span>
+              <div class="row-gap" style="flex-wrap:wrap;">
+                <h3>🔍 Buscador Hugging Face en Tiempo Real</h3>
+                <span class="live-pill-indicator" id="hf-live-indicator">⚡ En vivo al escribir</span>
+              </div>
+              <span class="muted">Escribe cualquier modelo o LoRA y verás al instante su peso, descargas y si cabe en tu GPU</span>
             </div>
-            <div class="preset-pills" id="hf-quick-topics">
-              <button type="button" class="hf-topic-chip" data-q="Wan" data-c="video">Wan Vídeo</button>
-              <button type="button" class="hf-topic-chip" data-q="LTX" data-c="video">LTX Vídeo</button>
-              <button type="button" class="hf-topic-chip" data-q="CogVideoX" data-c="video">CogVideoX</button>
-              <button type="button" class="hf-topic-chip" data-q="SkyReels" data-c="video">SkyReels</button>
-              <button type="button" class="hf-topic-chip" data-q="Qwen-Image" data-c="lora">LoRAs Qwen</button>
+            <div class="row-gap" style="flex-wrap:wrap;">
+              <div class="preset-pills" id="hf-quick-topics">
+                <button type="button" class="hf-topic-chip" data-q="Wan" data-c="video">Wan</button>
+                <button type="button" class="hf-topic-chip" data-q="LTX" data-c="video">LTX</button>
+                <button type="button" class="hf-topic-chip" data-q="HunyuanVideo" data-c="video">Hunyuan</button>
+                <button type="button" class="hf-topic-chip" data-q="FLUX" data-c="image">FLUX</button>
+                <button type="button" class="hf-topic-chip" data-q="Qwen-Image" data-c="lora">LoRAs Qwen</button>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-hf-box-token">🔑 Token HF</button>
             </div>
           </div>
           <div class="hf-search-bar">
             <select id="hf-live-cat" class="hf-cat-select">
-              <option value="video">🎬 Modelos de Vídeo</option>
+              <option value="video">🎬 Vídeo (I2V / T2V)</option>
               <option value="lora">🧩 LoRAs</option>
-              <option value="image">🖼️ Modelos de Imagen</option>
-              <option value="tts">🎙️ Modelos de Voz / TTS</option>
+              <option value="image">🖼️ Imagen</option>
+              <option value="tts">🎙️ Voz / TTS</option>
             </select>
-            <input type="text" id="hf-live-query" class="flex-1" placeholder="Buscar en Hugging Face (ej: Wan, LTX, Hunyuan, Sana, Qwen, LoRA...)" />
-            <button type="button" class="btn btn-primary" id="btn-hf-live-search">🔍 Buscar en HF</button>
+            <input type="text" id="hf-live-query" class="flex-1" autocomplete="off" placeholder="Escribe para buscar en tiempo real (ej: LTX, Wan 2.2, SkyReels, CogVideoX, Qwen, FLUX...)" />
+            <button type="button" class="btn btn-primary" id="btn-hf-live-search">🔍 Buscar</button>
           </div>
           <div id="hf-live-results" class="hf-live-results"></div>
         </div>
+
+        <div id="catalog-grid" class="catalog-grid"></div>
 
         <!-- Añadir repositorio propio de Hugging Face manualmente -->
         <div class="card add-hf-card">
@@ -821,6 +833,33 @@
         </label>
         <div class="row-gap">
           <button class="btn btn-primary flex-1" id="btn-save-credits">Guardar ajustes</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DE TOKEN OPCIONAL DE HUGGING FACE -->
+  <div class="modal-backdrop" id="hf-token-modal" hidden>
+    <div class="modal-box">
+      <div class="card-header">
+        <h3>🔑 Token de Hugging Face (100% Opcional)</h3>
+        <button class="link-btn" id="btn-close-hf-token">✕ Cerrar</button>
+      </div>
+      <p class="muted">
+        El buscador y los modelos públicos funcionan <strong>sin token</strong>. Si añades un token gratuito de lectura (<code>hf_...</code>), eliminas límites de velocidad de descarga y desbloqueas modelos con licencia aceptada (como <em>LTX-2.5</em> o <em>FLUX.1-dev</em>).
+      </p>
+      <div class="form-stack">
+        <div id="hf-token-status-box" class="provenance-box">
+          Estado actual: Sin token activo (modo público)
+        </div>
+        <div>
+          <label class="field-label">Pega tu Token de lectura (huggingface.co/settings/tokens)</label>
+          <input type="password" id="inp-hf-token" autocomplete="off" placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx" />
+          <small class="muted">Solo se mantiene en la memoria RAM de esta sesión; nunca se sube a GitHub ni se guarda en archivos públicos.</small>
+        </div>
+        <div class="row-gap">
+          <button type="button" class="btn btn-primary flex-1" id="btn-save-hf-token">Guardar y Activar Token</button>
+          <button type="button" class="btn btn-danger btn-sm" id="btn-clear-hf-token">Quitar Token</button>
         </div>
       </div>
     </div>
