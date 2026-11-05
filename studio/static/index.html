@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Studio IA — Imagen · Vídeo · Voz · Montaje</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- BARRA SUPERIOR DE TELEMETRÍA Y CONTROL DE SESIÓN -->
+  <header class="topbar">
+    <div class="brand-block">
+      <div class="brand-logo">◆</div>
+      <div>
+        <div class="brand-title">STUDIO IA</div>
+        <div class="brand-sub" id="gpu-badge">Detectando hardware...</div>
+      </div>
+    </div>
+
+    <div class="telemetry-strip">
+      <div class="metric-pill" title="Memoria gráfica activa">
+        <span class="metric-label">VRAM</span>
+        <span class="metric-val" id="vram-text">0.0 / 0.0 GB</span>
+        <div class="mini-bar"><div class="mini-fill vram" id="vram-bar" style="width:0%"></div></div>
+      </div>
+
+      <div class="metric-pill" title="Memoria RAM del sistema">
+        <span class="metric-label">RAM</span>
+        <span class="metric-val" id="ram-text">0.0 / 0.0 GB</span>
+        <div class="mini-bar"><div class="mini-fill ram" id="ram-bar" style="width:0%"></div></div>
+      </div>
+
+      <div class="metric-pill" title="Espacio en disco de la sesión actual">
+        <span class="metric-label">Disco libre</span>
+        <span class="metric-val" id="disk-text">-- GB</span>
+        <div class="mini-bar"><div class="mini-fill disk" id="disk-bar" style="width:0%"></div></div>
+      </div>
+
+      <button class="metric-pill clickable" id="btn-open-credits" title="Pulsar para ajustar tu saldo inicial o tarifa por hora">
+        <span class="metric-label">Créditos Colab ⚙</span>
+        <span class="metric-val accent" id="credits-text">100.0 u.</span>
+        <span class="metric-sub" id="credits-sub">0.00 u/h</span>
+      </button>
+    </div>
+
+    <div class="topbar-actions">
+      <button class="btn btn-ghost btn-sm" id="btn-free-all-mem" title="Saca los pesos de la RAM y VRAM sin borrar los modelos descargados del disco">
+        🧹 Liberar RAM/VRAM
+      </button>
+      <a class="btn btn-secondary btn-sm" href="/api/export/zip" id="btn-export-zip" title="Descarga todas tus imágenes, vídeos, voces y montajes en un archivo .zip">
+        📥 Descargar Todo (.zip) <span class="badge-dot" id="unexported-badge" hidden>0</span>
+      </a>
+      <button class="btn btn-danger btn-sm" id="btn-shutdown-gpu" title="Libera memoria y desconecta el entorno de Google Colab para dejar de gastar créditos">
+        ⏻ Liberar GPU
+      </button>
+    </div>
+  </header>
+
+  <!-- BANNERS DE AVISO (CUELGUE / INACTIVIDAD / ESPACIO) -->
+  <div id="alerts-area" class="alerts-area">
+    <div id="hang-banner" class="alert-banner alert-danger" hidden>
+      <div>
+        <strong>⚠️ Posible cuelgue detectado:</strong>
+        <span id="hang-banner-msg">Un proceso lleva más de 30 segundos sin emitir actividad.</span>
+      </div>
+      <button class="btn btn-sm btn-danger" id="btn-cancel-hung">Cancelar proceso</button>
+    </div>
+
+    <div id="idle-banner" class="alert-banner alert-warn" hidden>
+      <div>
+        <strong>⏱️ GPU encendida sin actividad:</strong>
+        <span id="idle-banner-msg">Llevas varios minutos sin ejecutar tareas mientras Colab sigue contabilizando tiempo.</span>
+      </div>
+      <button class="btn btn-sm btn-danger" id="btn-idle-shutdown">Apagar y liberar GPU ahora</button>
+    </div>
+
+    <div id="space-banner" class="alert-banner alert-danger" hidden>
+      <div id="space-banner-content"></div>
+      <button class="btn btn-sm btn-ghost" onclick="document.getElementById('space-banner').hidden = true">Cerrar</button>
+    </div>
+  </div>
+
+  <!-- NAVEGACIÓN PRINCIPAL DE 4 PASOS + CATÁLOGO -->
+  <nav class="main-tabs">
+    <button class="tab-btn active" data-tab="tab-image">
+      <span class="step-num">1</span> Imagen · Qwen + LoRAs
+    </button>
+    <button class="tab-btn" data-tab="tab-video">
+      <span class="step-num">2</span> Vídeo · Clips IA / FFmpeg
+    </button>
+    <button class="tab-btn" data-tab="tab-tts">
+      <span class="step-num">3</span> Voces · Texto a Voz
+    </button>
+    <button class="tab-btn" data-tab="tab-montage">
+      <span class="step-num">4</span> Montaje Final · MP4
+    </button>
+    <button class="tab-btn tab-catalog-btn" data-tab="tab-catalog">
+      📦 Catálogo HF y Memoria <span class="loaded-pill" id="nav-loaded-count">0 en VRAM</span>
+    </button>
+  </nav>
+
+  <!-- CONTENIDO PRINCIPAL + MONITOR DE PROCESO LATERAL/INFERIOR -->
+  <main class="workspace-grid">
+    <div class="views-column">
+
+      <!-- ==================== PESTAÑA 1: ESTUDIO DE IMAGEN ==================== -->
+      <section id="tab-image" class="view-panel active">
+        <div class="engine-bar">
+          <div class="engine-bar-info">
+            <span class="status-dot" id="img-engine-dot"></span>
+            <div>
+              <strong>Motor predeterminado:</strong> Qwen-Image-Edit 2511 (4-bit) + LoRA Lightning (4 pasos)
+              <span class="muted-inline" id="img-engine-state">Comprobando estado...</span>
+            </div>
+          </div>
+          <div class="engine-bar-actions">
+            <button class="btn btn-primary btn-sm" id="btn-prepare-qwen">
+              ⚡ Preparar Qwen + Lightning (1 clic)
+            </button>
+            <button class="btn btn-ghost btn-sm" id="btn-unload-image">
+              🧹 Sacar de RAM/VRAM
+            </button>
+          </div>
+        </div>
+
+        <div class="two-col-studio">
+          <!-- Columna Izquierda: Lienzo + Inpainting + Referencias -->
+          <div class="card">
+            <div class="card-header">
+              <h3>Lienzo Base, Inpainting y Referencias</h3>
+              <div class="row-gap">
+                <label class="btn btn-secondary btn-sm file-btn">
+                  📷 Subir imagen
+                  <input type="file" id="input-upload-image" accept="image/*" hidden />
+                </label>
+                <button class="btn btn-ghost btn-sm" id="btn-clear-base-image" title="Usar lienzo limpio desde cero">
+                  ✖ Quitar base
+                </button>
+              </div>
+            </div>
+
+            <!-- Herramientas de máscara Inpainting -->
+            <div class="canvas-toolbar">
+              <button class="tool-chip" id="btn-toggle-mask" title="Activa el pincel para pintar la zona que quieres editar">
+                🖌️ Pintar máscara (Inpainting): <strong id="mask-mode-label">OFF</strong>
+              </button>
+              <div id="mask-controls" class="mask-subcontrols" hidden>
+                <button class="tool-chip active" id="btn-brush-draw">Pintar</button>
+                <button class="tool-chip" id="btn-brush-erase">Goma</button>
+                <label class="inline-slider">
+                  Grosor <input type="range" id="brush-size" min="8" max="120" value="36" />
+                </label>
+                <label class="inline-slider" title="Suavizado del borde al fusionar con la imagen original">
+                  Borde <input type="number" id="mask-feather" min="0" max="40" value="8" class="num-xs" /> px
+                </label>
+                <button class="tool-chip" id="btn-undo-mask" title="Deshacer último trazo">↩</button>
+                <button class="tool-chip" id="btn-clear-mask" title="Borrar toda la máscara">🗑 Limpiar</button>
+              </div>
+            </div>
+
+            <!-- Zona de visualización + dibujo de máscara -->
+            <div class="canvas-stage" id="canvas-stage">
+              <div class="canvas-empty" id="canvas-empty-hint">
+                <p><strong>Sube una imagen</strong> para editar / hacer inpainting, o déjalo vacío para generar sobre lienzo nuevo.</p>
+                <p class="muted">También puedes elegir cualquier imagen generada abajo con un clic.</p>
+              </div>
+              <div class="canvas-wrap" id="canvas-wrap" hidden>
+                <img id="base-preview-img" alt="Imagen base" draggable="false" />
+                <canvas id="mask-canvas"></canvas>
+              </div>
+            </div>
+
+            <!-- Ranuras de referencias multi-imagen -->
+            <div class="refs-section">
+              <div class="refs-header">
+                <span>Referencias adicionales (Multi-Imagen hasta 3, opcionales)</span>
+                <span class="muted">Para combinar ropa, objetos, poses o estilo en Qwen Edit</span>
+              </div>
+              <div class="refs-grid">
+                <div class="ref-slot" data-slot="0">
+                  <div class="ref-preview" id="ref-preview-0"><span>+ Ref 1</span></div>
+                  <div class="ref-actions">
+                    <label class="link-btn">Subir<input type="file" class="ref-file-input" data-slot="0" accept="image/*" hidden /></label>
+                    <button class="link-btn danger ref-clear-btn" data-slot="0">Quitar</button>
+                  </div>
+                </div>
+                <div class="ref-slot" data-slot="1">
+                  <div class="ref-preview" id="ref-preview-1"><span>+ Ref 2</span></div>
+                  <div class="ref-actions">
+                    <label class="link-btn">Subir<input type="file" class="ref-file-input" data-slot="1" accept="image/*" hidden /></label>
+                    <button class="link-btn danger ref-clear-btn" data-slot="1">Quitar</button>
+                  </div>
+                </div>
+                <div class="ref-slot" data-slot="2">
+                  <div class="ref-preview" id="ref-preview-2"><span>+ Ref 3</span></div>
+                  <div class="ref-actions">
+                    <label class="link-btn">Subir<input type="file" class="ref-file-input" data-slot="2" accept="image/*" hidden /></label>
+                    <button class="link-btn danger ref-clear-btn" data-slot="2">Quitar</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Columna Derecha: Parámetros + Salida + Procedencia -->
+          <div class="card">
+            <div class="card-header">
+              <h3>Instrucción y Ajustes</h3>
+              <div class="preset-pills">
+                <button class="chip-preset" data-w="1024" data-h="1024">1:1 (1024)</button>
+                <button class="chip-preset" data-w="1280" data-h="720">16:9 (1280×720)</button>
+                <button class="chip-preset" data-w="768" data-h="1344">9:16 Vertical</button>
+              </div>
+            </div>
+
+            <div class="form-stack">
+              <label class="field-label">Prompt (qué quieres editar, cambiar o crear)</label>
+              <textarea id="img-prompt" rows="3" placeholder="Ej: Cambia la iluminación a atardecer cálido de cine manteniendo el rostro intacto..."></textarea>
+
+              <details class="compact-details">
+                <summary>Prompt negativo y opciones avanzadas</summary>
+                <div class="details-body">
+                  <label class="field-label">Prompt negativo (opcional)</label>
+                  <input type="text" id="img-neg-prompt" placeholder="borroso, deformado, baja calidad, artefactos..." />
+                </div>
+              </details>
+
+              <div class="params-grid-4">
+                <div>
+                  <label class="field-label">Ancho</label>
+                  <input type="number" id="img-width" value="1024" min="512" max="1536" step="64" />
+                </div>
+                <div>
+                  <label class="field-label">Alto</label>
+                  <input type="number" id="img-height" value="1024" min="512" max="1536" step="64" />
+                </div>
+                <div>
+                  <label class="field-label">Pasos</label>
+                  <input type="number" id="img-steps" value="4" min="1" max="40" step="1" />
+                </div>
+                <div>
+                  <label class="field-label">Guía (CFG)</label>
+                  <input type="number" id="img-cfg" value="4.0" min="1.0" max="15.0" step="0.5" />
+                </div>
+              </div>
+
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Semilla (0 = aleatoria)</label>
+                  <input type="number" id="img-seed" value="0" min="0" step="1" />
+                </div>
+                <div class="checks-box">
+                  <label class="check-row">
+                    <input type="checkbox" id="chk-lightning" checked />
+                    <span>LoRA Lightning (rápido 4 pasos)</span>
+                  </label>
+                  <label class="check-row">
+                    <input type="checkbox" id="chk-nsfw-lora" />
+                    <span>LoRA Extra / NSFW</span>
+                    <button type="button" class="link-btn" id="btn-quick-dl-nsfw" title="Descargar este LoRA opcional desde Hugging Face">(Descargar 0.35 GB)</button>
+                  </label>
+                  <label class="check-row">
+                    <input type="checkbox" id="chk-bt709" checked />
+                    <span>Procesado FFmpeg BT.709 (entrada y salida)</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="action-buttons-row">
+                <button class="btn btn-primary btn-lg flex-1" id="btn-run-image">
+                  ✨ Generar / Editar con Qwen
+                </button>
+                <button class="btn btn-secondary" id="btn-run-bt709-cpu" title="Limpia metadatos y normaliza a BT.709 con FFmpeg al instante (no requiere GPU)">
+                  🎬 Normalizar BT.709 (CPU)
+                </button>
+              </div>
+            </div>
+
+            <!-- Resultado actual + Procedencia -->
+            <div class="result-panel" id="img-result-panel">
+              <div class="result-placeholder" id="img-result-empty">
+                Aquí verás la imagen generada junto con su semilla, modelo, tiempo y accesos directos a Vídeo o Montaje.
+              </div>
+              <div id="img-result-content" hidden>
+                <img id="img-result-view" class="result-media" alt="Resultado" />
+                <div class="provenance-box" id="img-provenance"></div>
+                <div class="quick-send-row">
+                  <button class="btn btn-secondary btn-sm" id="btn-res-to-base">🎨 Usar como base</button>
+                  <button class="btn btn-secondary btn-sm" id="btn-res-to-video">🎬 Enviar a Vídeo</button>
+                  <button class="btn btn-primary btn-sm" id="btn-res-to-montage">🎞️ Añadir al Montaje</button>
+                  <a class="btn btn-ghost btn-sm" id="btn-res-download" href="#" download>⬇ Guardar JPG</a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Galería reciente de imágenes -->
+        <div class="card gallery-card">
+          <div class="card-header">
+            <h3>Imágenes Subidas y Generadas</h3>
+            <span class="muted">Haz clic en «Usar base», «Ref», «Vídeo» o «+ Montaje» en cualquier miniatura</span>
+          </div>
+          <div class="asset-strip" id="image-gallery-strip"></div>
+        </div>
+      </section>
+
+      <!-- ==================== PESTAÑA 2: ESTUDIO DE VÍDEO ==================== -->
+      <section id="tab-video" class="view-panel">
+        <div class="engine-bar">
+          <div class="engine-bar-info">
+            <span class="status-dot" id="vid-engine-dot"></span>
+            <div class="row-gap">
+              <strong>Modelo de Vídeo IA:</strong>
+              <select id="select-video-model" class="inline-select"></select>
+              <span class="muted-inline" id="vid-engine-state">Sin cargar en VRAM</span>
+            </div>
+          </div>
+          <div class="engine-bar-actions">
+            <button class="btn btn-primary btn-sm" id="btn-prepare-video">
+              ⚡ Preparar Modelo de Vídeo
+            </button>
+            <button class="btn btn-ghost btn-sm" id="btn-unload-video">
+              🧹 Sacar de RAM/VRAM
+            </button>
+          </div>
+        </div>
+
+        <div class="two-col-studio">
+          <div class="card">
+            <div class="card-header">
+              <h3>Origen del Clip (Imagen + Voz opcional)</h3>
+              <div class="mode-switch">
+                <button class="mode-pill active" data-vmode="ai" id="vmode-ai">🤖 Vídeo IA (GPU)</button>
+                <button class="mode-pill" data-vmode="ffmpeg_motion" id="vmode-ffmpeg">⚡ Clip Animado FFmpeg (CPU · 0 VRAM)</button>
+              </div>
+            </div>
+
+            <div class="form-stack">
+              <label class="field-label">Imagen inicial del plano</label>
+              <div class="row-gap">
+                <select id="vid-source-image" class="flex-1"></select>
+                <label class="btn btn-secondary btn-sm file-btn">
+                  📷 Subir otra
+                  <input type="file" id="input-vid-upload-img" accept="image/*" hidden />
+                </label>
+              </div>
+              <div class="selected-thumb-box" id="vid-source-preview-box">
+                <span class="muted">Selecciona una imagen arriba o súbela</span>
+              </div>
+
+              <label class="field-label">Pista de voz / diálogo opcional (para Wan S2V o clip hablado)</label>
+              <select id="vid-source-audio"></select>
+
+              <div id="vid-ai-fields">
+                <label class="field-label">Prompt de movimiento / acción</label>
+                <textarea id="vid-prompt" rows="2" placeholder="Ej: La cámara avanza suavemente mientras el personaje gira la cabeza con expresión natural..."></textarea>
+              </div>
+
+              <div id="vid-ffmpeg-fields" hidden>
+                <label class="field-label">Movimiento de cámara FFmpeg (instantáneo sin GPU)</label>
+                <select id="vid-motion-style">
+                  <option value="zoom_in">Acercamiento suave (Zoom In)</option>
+                  <option value="zoom_out">Alejamiento suave (Zoom Out)</option>
+                  <option value="pan_right">Paneo lateral suave</option>
+                  <option value="none">Plano fijo limpio BT.709</option>
+                </select>
+              </div>
+
+              <div class="params-grid-4">
+                <div>
+                  <label class="field-label">Ancho</label>
+                  <input type="number" id="vid-width" value="832" step="16" min="256" max="1920" />
+                </div>
+                <div>
+                  <label class="field-label">Alto</label>
+                  <input type="number" id="vid-height" value="480" step="16" min="256" max="1920" />
+                </div>
+                <div>
+                  <label class="field-label">Duración (s)</label>
+                  <input type="number" id="vid-duration" value="4.0" step="0.5" min="1" max="30" />
+                </div>
+                <div>
+                  <label class="field-label">FPS</label>
+                  <input type="number" id="vid-fps" value="16" step="1" min="8" max="30" />
+                </div>
+              </div>
+
+              <div class="params-grid-2" id="vid-ai-steps-row">
+                <div>
+                  <label class="field-label">Pasos IA</label>
+                  <input type="number" id="vid-steps" value="20" min="4" max="50" />
+                </div>
+                <div>
+                  <label class="field-label">Semilla (0 = aleatoria)</label>
+                  <input type="number" id="vid-seed" value="0" min="0" />
+                </div>
+              </div>
+
+              <button class="btn btn-primary btn-lg" id="btn-run-video">
+                🎬 Generar Clip de Vídeo
+              </button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Previsualización del Clip</h3>
+            </div>
+            <div class="result-panel">
+              <div class="result-placeholder" id="vid-result-empty">
+                El clip MP4 generado aparecerá aquí con su duración real, resolución, FPS y botón para añadirlo al montaje.
+              </div>
+              <div id="vid-result-content" hidden>
+                <video id="vid-result-player" class="result-media" controls playsinline></video>
+                <div class="provenance-box" id="vid-provenance"></div>
+                <div class="quick-send-row">
+                  <button class="btn btn-primary btn-sm" id="btn-vid-to-montage">🎞️ Añadir al Montaje</button>
+                  <a class="btn btn-ghost btn-sm" id="btn-vid-download" href="#" download>⬇ Guardar MP4</a>
+                </div>
+              </div>
+            </div>
+
+            <h4 class="sub-heading">Clips Generados</h4>
+            <div class="asset-strip" id="video-gallery-strip"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== PESTAÑA 3: VOCES Y AUDIO (TTS) ==================== -->
+      <section id="tab-tts" class="view-panel">
+        <div class="two-col-studio">
+          <div class="card">
+            <div class="card-header">
+              <h3>Generador de Voz (TTS) o Audio Propio</h3>
+              <label class="btn btn-secondary btn-sm file-btn">
+                🎵 Subir MP3 / WAV
+                <input type="file" id="input-upload-audio" accept="audio/*" hidden />
+              </label>
+            </div>
+
+            <div class="form-stack">
+              <label class="field-label">Motor de Voz</label>
+              <select id="tts-engine-select">
+                <option value="edge-tts-cloud">Edge-TTS Neural (0 GB · Sin descarga · Español e idiomas)</option>
+                <option value="kokoro-82m-tts">Kokoro-82M Multilingüe (Local HF · 0.35 GB)</option>
+                <option value="qwen3-tts-1.7b">Qwen3-TTS 1.7B CustomVoice (Local HF · 3.6 GB)</option>
+              </select>
+
+              <label class="field-label">Voz</label>
+              <select id="tts-voice-select"></select>
+
+              <label class="field-label">Texto / Diálogo a locutar</label>
+              <textarea id="tts-text" rows="4" placeholder="Escribe aquí la frase exacta que dirá el personaje o narrador..."></textarea>
+
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Velocidad (%)</label>
+                  <input type="number" id="tts-rate" value="0" min="-40" max="40" step="5" />
+                </div>
+                <div>
+                  <label class="field-label">Tono (Hz)</label>
+                  <input type="number" id="tts-pitch" value="0" min="-20" max="20" step="2" />
+                </div>
+              </div>
+
+              <button class="btn btn-primary btn-lg" id="btn-run-tts">
+                🎙️ Generar Locución
+              </button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Biblioteca de Voces y Pistas de Audio</h3>
+            </div>
+            <div id="audio-list-container" class="audio-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== PESTAÑA 4: MONTAJE FINAL FFMPEG ==================== -->
+      <section id="tab-montage" class="view-panel">
+        <div class="two-col-studio">
+          <!-- Secuencia de planos -->
+          <div class="card">
+            <div class="card-header">
+              <h3>Línea de Tiempo del Montaje</h3>
+              <div class="row-gap">
+                <label class="btn btn-secondary btn-sm file-btn">
+                  ➕ Subir imágenes/clips directos
+                  <input type="file" id="input-montage-files" accept="image/*,video/*" multiple hidden />
+                </label>
+                <button class="btn btn-ghost btn-sm" id="btn-clear-timeline">Vaciar lista</button>
+              </div>
+            </div>
+
+            <div class="quick-picker-bar">
+              <select id="montage-asset-picker" class="flex-1"></select>
+              <button class="btn btn-secondary btn-sm" id="btn-add-picked-shot">+ Añadir plano</button>
+            </div>
+
+            <div id="timeline-list" class="timeline-list"></div>
+          </div>
+
+          <!-- Ajustes de exportación MP4 y reproductor final -->
+          <div class="card">
+            <div class="card-header">
+              <h3>Ajustes de Exportación FFmpeg (CPU · 0 VRAM)</h3>
+            </div>
+
+            <div class="form-stack">
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Nombre del proyecto</label>
+                  <input type="text" id="montage-title" value="montaje_studio" />
+                </div>
+                <div>
+                  <label class="field-label">Formato / Resolución</label>
+                  <select id="montage-res-preset">
+                    <option value="1280x720">HD Horizontal 1280×720 (16:9)</option>
+                    <option value="1920x1080">Full HD 1920×1080 (16:9)</option>
+                    <option value="720x1280">Vertical Reels/Shorts 720×1280 (9:16)</option>
+                    <option value="1080x1080">Cuadrado 1080×1080 (1:1)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Fotogramas por segundo (FPS)</label>
+                  <select id="montage-fps">
+                    <option value="24" selected>24 fps (Cine)</option>
+                    <option value="25">25 fps (PAL)</option>
+                    <option value="30">30 fps (Web / Redes)</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label">Fundido suave entre planos (s)</label>
+                  <input type="number" id="montage-fade" value="0.2" min="0" max="1.5" step="0.1" />
+                </div>
+              </div>
+
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Música / Audio de fondo global (opcional)</label>
+                  <select id="montage-global-audio"></select>
+                </div>
+                <div>
+                  <label class="field-label">Volumen fondo (0.1 – 1.0)</label>
+                  <input type="number" id="montage-bg-vol" value="0.30" min="0.05" max="1.5" step="0.05" />
+                </div>
+              </div>
+
+              <button class="btn btn-primary btn-lg" id="btn-render-montage">
+                🎞️ Renderizar Vídeo Final MP4 con FFmpeg
+              </button>
+            </div>
+
+            <div class="result-panel">
+              <div class="result-placeholder" id="montage-result-empty">
+                Añade tus imágenes o clips en orden y pulsa «Renderizar Vídeo Final MP4». Funciona incluso sin GPU.
+              </div>
+              <div id="montage-result-content" hidden>
+                <video id="montage-result-player" class="result-media" controls playsinline></video>
+                <div class="provenance-box" id="montage-provenance"></div>
+                <div class="quick-send-row">
+                  <a class="btn btn-primary btn-sm" id="btn-montage-download" href="#" download>⬇ Descargar MP4 Final</a>
+                </div>
+              </div>
+            </div>
+
+            <h4 class="sub-heading">Montajes Renderizados</h4>
+            <div class="asset-strip" id="montage-gallery-strip"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== PESTAÑA 5: CATÁLOGO HF Y MEMORIA ==================== -->
+      <section id="tab-catalog" class="view-panel">
+        <div class="catalog-top-note">
+          <div>
+            <strong>Gestor Bajo Demanda (Disco vs RAM/VRAM):</strong>
+            Nada se descarga solo al arrancar. Aquí eliges qué bajar de Hugging Face, qué cargar en memoria gráfica y qué liberar o borrar.
+            <span class="muted-block" id="ephemeral-note-text">Nota: el disco de sesión de Google Colab se reinicia al desconectar la máquina.</span>
+          </div>
+          <div class="filter-pills">
+            <button class="filter-chip active" data-cat="all">Todos</button>
+            <button class="filter-chip" data-cat="image">Imagen + LoRAs</button>
+            <button class="filter-chip" data-cat="video">Vídeo</button>
+            <button class="filter-chip" data-cat="tts">Voz / TTS</button>
+          </div>
+        </div>
+
+        <div id="catalog-grid" class="catalog-grid"></div>
+
+        <!-- Añadir repositorio propio de Hugging Face -->
+        <div class="card add-hf-card">
+          <div class="card-header">
+            <h3>➕ Añadir otro Modelo o LoRA desde Hugging Face</h3>
+            <span class="muted">Quedará disponible en el catálogo sin tocar código</span>
+          </div>
+          <div class="params-grid-5">
+            <div>
+              <label class="field-label">Nombre visible</label>
+              <input type="text" id="custom-hf-name" placeholder="Mi LoRA Retrato" />
+            </div>
+            <div>
+              <label class="field-label">Repositorio HF (autor/repo)</label>
+              <input type="text" id="custom-hf-repo" placeholder="autor/nombre-modelo" />
+            </div>
+            <div>
+              <label class="field-label">Tipo</label>
+              <select id="custom-hf-cat">
+                <option value="lora">LoRA para Qwen Imagen</option>
+                <option value="image">Modelo Imagen Base</option>
+                <option value="video">Modelo Vídeo</option>
+                <option value="tts">Modelo Voz / TTS</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Archivo concreto (opcional)</label>
+              <input type="text" id="custom-hf-file" placeholder="ej: peso.safetensors" />
+            </div>
+            <div>
+              <label class="field-label">Peso aprox. (GB)</label>
+              <div class="row-gap">
+                <input type="number" id="custom-hf-gb" value="0.5" min="0.05" step="0.1" />
+                <button class="btn btn-secondary" id="btn-add-custom-hf">Añadir</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- COLUMNA DERECHA FIJA: MONITOR DE TRABAJOS Y REGISTRO DETALLADO -->
+    <aside class="monitor-sidebar">
+      <div class="monitor-header">
+        <div>
+          <h3>Actividad y Registro en Vivo</h3>
+          <span class="muted" id="active-jobs-label">Sin tareas en curso</span>
+        </div>
+      </div>
+
+      <!-- Tarjeta del proceso activo con porcentaje 0-100% -->
+      <div id="active-job-card" class="active-job-card" hidden>
+        <div class="aj-top">
+          <strong id="aj-title">Procesando...</strong>
+          <span class="aj-pct" id="aj-pct">0%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="aj-bar" style="width:0%"></div>
+        </div>
+        <div class="aj-meta">
+          <span id="aj-step">Iniciando...</span>
+          <span id="aj-speed"></span>
+        </div>
+        <div class="aj-bottom">
+          <span class="muted" id="aj-elapsed">0.0 s</span>
+          <button class="link-btn danger" id="btn-cancel-active-job">Cancelar</button>
+        </div>
+      </div>
+
+      <!-- Consola de pasos línea a línea -->
+      <div class="log-console" id="log-console">
+        <div class="log-empty">Cada paso, porcentaje de descarga, velocidad y verificación de archivo se mostrará aquí con hora exacta.</div>
+      </div>
+
+      <!-- Historial de trabajos recientes -->
+      <div class="recent-jobs-header">Historial de trabajos (clic para ver su log)</div>
+      <div class="recent-jobs-list" id="recent-jobs-list"></div>
+    </aside>
+  </main>
+
+  <!-- MODAL DE CONTADOR DE CRÉDITOS DE COLAB -->
+  <div class="modal-backdrop" id="credits-modal" hidden>
+    <div class="modal-box">
+      <div class="card-header">
+        <h3>Contador de Créditos de Google Colab</h3>
+        <button class="link-btn" id="btn-close-credits">✕ Cerrar</button>
+      </div>
+      <p class="muted">
+        Google Colab no ofrece API pública de saldo, así que este contador calcula en vivo tu consumo según la GPU activa.
+      </p>
+      <div class="form-stack">
+        <div>
+          <label class="field-label">Tus créditos disponibles al empezar (unidades)</label>
+          <input type="number" id="cfg-initial-credits" step="0.5" min="0" value="100" />
+        </div>
+        <div>
+          <label class="field-label">Consumo por hora de esta GPU (unidades / hora)</label>
+          <input type="number" id="cfg-hourly-rate" step="0.05" min="0" value="4.82" />
+          <small class="muted">Referencia aprox.: T4 ~1.17 u/h · L4 ~4.82 u/h · A100 ~11.77 u/h · CPU 0 u/h</small>
+        </div>
+        <div>
+          <label class="field-label">Avisar por inactividad tras (minutos sin generar)</label>
+          <input type="number" id="cfg-idle-min" step="1" min="1" max="120" value="10" />
+        </div>
+        <label class="check-row">
+          <input type="checkbox" id="cfg-reset-session" />
+          <span>Reiniciar contador de tiempo gastado en esta sesión a 0</span>
+        </label>
+        <div class="row-gap">
+          <button class="btn btn-primary flex-1" id="btn-save-credits">Guardar ajustes</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

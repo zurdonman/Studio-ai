@@ -1,0 +1,11 @@
+-r requirements.txt
+diffusers>=0.36.0
+transformers>=4.48.0
+accelerate>=1.2.0
+bitsandbytes>=0.45.0
+peft>=0.14.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+ftfy>=6.2.0
+soundfile>=0.12.1
+imageio>=2.34.0

@@ -1,0 +1,25 @@
+# Entornos virtuales y cachés de Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Datos locales generados durante sesiones de trabajo y modelos descargados
+studio_data/
+models_cache/
+Unselected files/
+*.safetensors
+*.bin
+*.gguf
+*.pt
+*.pth
+
+# Archivos temporales y túneles
+cloudflared
+cloudflared.exe
+*.log
+.DS_Store
