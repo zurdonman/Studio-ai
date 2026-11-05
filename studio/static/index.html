@@ -436,16 +436,22 @@
               <!-- Bloque de selección de fotogramas (1 imagen en I2V, 2 imágenes Inicio→Fin en Frame a Frame) -->
               <div id="vid-frames-area" class="vid-frames-area">
                 <div class="vid-frame-slot" id="vid-slot-start">
-                  <div class="vfs-head">
+                  <div class="vfs-head" style="flex-wrap:wrap;gap:5px;">
                     <strong id="vid-start-label">🖼️ Imagen Inicial</strong>
-                    <label class="btn btn-secondary btn-xs file-btn">
-                      📤 Subir imagen
-                      <input type="file" id="input-vid-upload-img" accept="image/*" hidden />
-                    </label>
+                    <div class="row-gap" style="gap:5px;flex-wrap:wrap;">
+                      <label class="btn btn-secondary btn-xs file-btn" title="Puedes seleccionar 1 foto (Imagen a Vídeo) o 2 fotos a la vez (Inicio + Final para Frame a Frame automático)">
+                        📤 Subir imagen
+                        <input type="file" id="input-vid-upload-img" accept="image/*" multiple hidden />
+                      </label>
+                      <label class="btn btn-ghost btn-xs file-btn" id="lbl-vid-quick-add-end" title="Sube un segundo fotograma final para que el vídeo termine exactamente en esa pose/escena (activa Frame a Frame)">
+                        🏁 + Foto Final
+                        <input type="file" id="input-vid-quick-end-img" accept="image/*" hidden />
+                      </label>
+                    </div>
                   </div>
                   <select id="vid-source-image"></select>
                   <div class="selected-thumb-box" id="vid-source-preview-box">
-                    <span class="muted">Sube una imagen con «📤 Subir imagen» o elige una generada arriba</span>
+                    <span class="muted">Sube 1 foto (o selecciona 2 fotos a la vez para Inicio → Fin automático)</span>
                   </div>
                 </div>
 
@@ -547,6 +553,17 @@
                       <label class="field-label" style="margin:0 0 2px;font-size:10.5px;">Fuerza LoRA</label>
                       <input type="number" id="vid-lora-scale" value="1.0" min="0.2" max="1.5" step="0.05" />
                     </div>
+                  </div>
+                  <div id="vid-lora-quality-pills" class="vid-lora-quality-pills" hidden>
+                    <button type="button" class="lora-q-pill active" data-lsteps="6" data-lscale="1.0" data-lcfg="1.0" title="Máxima velocidad: 6 pasos en pasada simple (~1.5 min en L4)">
+                      ⚡ Turbo Rápido (6p · ~1.5 min)
+                    </button>
+                    <button type="button" class="lora-q-pill" data-lsteps="10" data-lscale="0.85" data-lcfg="1.0" title="Mayor definición y detalle de texturas manteniendo 1 pasada rápida (~2.3 min en L4)">
+                      ✨ Nitidez Extra (10p · ~2.3 min)
+                    </button>
+                    <button type="button" class="lora-q-pill" data-lsteps="8" data-lscale="0.75" data-lcfg="1.5" title="Activa guía CFG 1.5 + mezcla con modelo base para seguir acciones dinámicas y Frame a Frame con máxima fidelidad (~3.2 min en L4)">
+                      🎯 Máxima Fidelidad Acción/Pose (8p · CFG 1.5)
+                    </button>
                   </div>
                 </div>
 

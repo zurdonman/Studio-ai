@@ -689,7 +689,8 @@ def test_official_model_specs_prevent_hallucination_and_incompatible_flf2v(temp_
     cropped = _fit_and_crop_rgb(Image.new("RGB", (900, 1200), (80, 90, 100)), 704, 1280)
     assert cropped.size == (704, 1280)
 
-    # 7) Rechazar con HTTP 400 inmediato si intentan flf2v contra wan22-ti2v-5b
+    # 7) Wan 2.2 TI2V-5B ahora soporta nativamente flf2v; modelos exclusivos como cogvideox-5b-i2v devuelven HTTP 400
+    assert "flf2v" in wan22["video_modes"]
     buf = io.BytesIO()
     Image.new("RGB", (640, 360), (20, 40, 60)).save(buf, format="PNG")
     raw = buf.getvalue()
@@ -700,14 +701,14 @@ def test_official_model_specs_prevent_hallucination_and_incompatible_flf2v(temp_
         json={
             "mode": "ai",
             "video_submode": "flf2v",
-            "model_id": "wan22-ti2v-5b",
+            "model_id": "cogvideox-5b-i2v",
             "image_rel": u1["rel_path"],
             "end_image_rel": u2["rel_path"],
             "prompt": "transición",
         },
     )
     assert r_bad_flf.status_code == 400
-    assert "Wan 2.1 VACE" in r_bad_flf.json()["detail"]
+    assert "Wan 2.2 TI2V-5B" in r_bad_flf.json()["detail"]
 
 
 def test_video_speed_loras_and_steps_reset_controls(temp_studio_env, monkeypatch):
@@ -815,6 +816,140 @@ def test_video_speed_loras_and_steps_reset_controls(temp_studio_env, monkeypatch
     assert handle["active_lora_id"] is None
     assert mpipe.unloaded == 1
     assert mpipe.offloaded == 2
+
+
+def test_wan22_ti2v_native_flf2v_prepare_latents_and_fast_mp4(temp_studio_env, monkeypatch, tmp_path):
+    import sys, types
+    import numpy as np
+    from PIL import Image
+    from studio.engines.ffmpeg_utils import probe_media_info
+    from studio.engines.video_engine import _attach_wan22_flf2v_support, _frames_to_mp4
+
+    client, _ = temp_studio_env
+
+    # 1) Controles UX anti-error de 2 fotos y píldoras de calidad LoRA en index.html
+    html = client.get("/").text
+    assert 'id="input-vid-quick-end-img"' in html
+    assert 'id="vid-lora-quality-pills"' in html
+    assert "lora-q-pill" in html
+
+    # 2) Codificación rápida _frames_to_mp4 por pipe RGB24 directo
+    frames = [Image.new("RGB", (320, 240), (20 * i, 80, 160)) for i in range(8)]
+    mp4_out = tmp_path / "fast_pipe.mp4"
+    info = _frames_to_mp4(frames=frames, output_mp4=mp4_out, fps=8)
+    assert mp4_out.exists()
+    assert info["has_video"] is True
+    assert (info["width"], info["height"]) == (320, 240)
+
+    # 3) Verificar condicionamiento nativo Inicio → Fin (`_attach_wan22_flf2v_support`) en Wan 2.2 TI2V-5B
+    class FakeTensor:
+        def __init__(self, arr):
+            self.arr = np.asarray(arr, dtype=np.float32)
+
+        @property
+        def shape(self):
+            return self.arr.shape
+
+        def view(self, *s):
+            return FakeTensor(self.arr.reshape(*s))
+
+        def to(self, **_kw):
+            return self
+
+        def unsqueeze(self, axis):
+            return FakeTensor(np.expand_dims(self.arr, axis=axis))
+
+        def repeat(self, *reps):
+            return FakeTensor(np.tile(self.arr, reps))
+
+        def __sub__(self, other):
+            return FakeTensor(self.arr - (other.arr if isinstance(other, FakeTensor) else other))
+
+        def __mul__(self, other):
+            return FakeTensor(self.arr * (other.arr if isinstance(other, FakeTensor) else other))
+
+        def __rtruediv__(self, other):
+            return FakeTensor(other / self.arr)
+
+        def __getitem__(self, idx):
+            return FakeTensor(self.arr[idx])
+
+        def __setitem__(self, idx, val):
+            self.arr[idx] = val.arr if isinstance(val, FakeTensor) else val
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.tensor = lambda x: FakeTensor(x)
+    fake_torch.zeros = lambda shape, **_kw: FakeTensor(np.zeros(shape, dtype=np.float32))
+    fake_torch.ones = lambda *shape, **_kw: FakeTensor(
+        np.ones(shape[0] if len(shape) == 1 and isinstance(shape[0], tuple) else shape, dtype=np.float32)
+    )
+    fake_torch.randn = lambda shape, **_kw: FakeTensor(np.full(shape, 0.25, dtype=np.float32))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    class FakeDist:
+        def __init__(self, val):
+            self._val = val
+
+        def mode(self):
+            return self._val
+
+    class FakeVAE:
+        dtype = "float32"
+        config = types.SimpleNamespace(z_dim=4, latents_mean=[0.0] * 4, latents_std=[1.0] * 4)
+
+        def __init__(self):
+            self.calls = []
+
+        def encode(self, x):
+            self.calls.append(x.shape)
+            b, _c, nf, h, w = x.shape
+            t_lat = 1 + (nf - 1) // 4
+            # Codificar el valor medio del canal 0 para distinguir Inicio (10.0) vs Final (90.0)
+            val = float(x.arr.mean())
+            out = np.full((b, 4, t_lat, h // 16, w // 16), val, dtype=np.float32)
+            # Simular diferencia entre frame 0 (causal inicial) y frame 1 (bloque causal estacionario 4-frame)
+            if t_lat >= 2:
+                out[:, :, 0, :, :] = val - 1.0
+                out[:, :, 1, :, :] = val
+            return types.SimpleNamespace(latent_dist=FakeDist(FakeTensor(out)))
+
+    class FakeWan22Pipe:
+        config = types.SimpleNamespace(expand_timesteps=True)
+        vae_scale_factor_temporal = 4
+        vae_scale_factor_spatial = 16
+
+        def __init__(self):
+            self.vae = FakeVAE()
+            self.orig_called = 0
+
+        def prepare_latents(self, *args, **kwargs):
+            self.orig_called += 1
+            return ("orig_i2v",)
+
+    pipe = FakeWan22Pipe()
+    _attach_wan22_flf2v_support(pipe)
+
+    start_img = FakeTensor(np.full((1, 3, 64, 64), 10.0, dtype=np.float32))
+    end_img = FakeTensor(np.full((1, 3, 64, 64), 90.0, dtype=np.float32))
+
+    # Modo I2V normal (last_image=None) delega sin tocar nada
+    res_i2v = pipe.prepare_latents(start_img, 1, 4, 64, 64, 21, None, "cpu", None, None, None)
+    assert res_i2v == ("orig_i2v",)
+    assert pipe.orig_called == 1
+
+    # Modo Frame a Frame (last_image presente): ancla t=0 (10.0) y t=-1 (90.0 estacionario) con máscara 0 en ambos extremos
+    latents, cond, mask = pipe.prepare_latents(start_img, 1, 4, 64, 64, 21, None, "cpu", None, None, end_img)
+    assert latents.shape == (1, 4, 6, 4, 4)
+    assert cond.shape == (1, 4, 6, 4, 4)
+    assert mask.shape == (1, 1, 6, 4, 4)
+    assert pipe.vae.calls == [(1, 3, 1, 64, 64), (1, 3, 5, 64, 64)]
+    assert np.allclose(cond.arr[:, :, 0], 10.0)
+    assert np.allclose(cond.arr[:, :, -1], 90.0)
+    assert np.allclose(cond.arr[:, :, 1:-1], 0.0)
+    assert np.allclose(mask.arr[:, :, 0], 0.0)
+    assert np.allclose(mask.arr[:, :, -1], 0.0)
+    assert np.allclose(mask.arr[:, :, 1:-1], 1.0)
+
 
 
 

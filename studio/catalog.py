@@ -367,11 +367,11 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     # ==================== VÍDEO ====================
     {
         "id": "wan22-ti2v-5b",
-        "name": "Wan 2.2 TI2V-5B HD 720P (Imagen + Texto a Vídeo · 24 fps)",
+        "name": "Wan 2.2 TI2V-5B HD 720P (Imagen / Frame a Frame / Texto · 24 fps)",
         "category": "video",
         "is_default": True,
-        "badge": "Calidad HD 720P ★ · Admite LoRA Turbo ×12",
-        "video_modes": ["i2v", "t2v"],
+        "badge": "HD 720P ★ · Imagen + Frame a Frame + LoRA Turbo",
+        "video_modes": ["i2v", "flf2v", "t2v"],
         "default_fps": 24,
         "default_steps": 45,
         "default_cfg": 5.0,
@@ -393,16 +393,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "default_cfg": 5.0,
             "flow_shift": 5.0,
             "prompt_lang": "es_en",
-            "official_note": "720P nativo (1280×704 / 704×1280) · 5 s (121 frames @ 24 fps) · 45 pasos oficiales (28–32 rápido seguro · 6 pasos con LoRA Turbo)",
+            "official_note": "720P nativo (1280×704 / 704×1280) · Imagen a Vídeo, Frame a Frame (Inicio→Fin) y Texto a Vídeo · 45p oficial (6–10p con LoRA Turbo)",
         },
         "description": (
-            "Modelo híbrido 720P@24fps de Alibaba Wan 2.2. En calidad máxima oficial (45 pasos) tarda ~18 min en L4; "
-            "puedes bajar a 28–32 pasos sin deformar (~11 min) o activar su LoRA Turbo (332 MB) para generarlo en ~1.2 min (6 pasos)."
+            "Modelo 3-en-1 720P@24fps de Alibaba Wan 2.2: soporta Imagen a Vídeo, Frame a Frame (Inicio → Fin) y Texto a Vídeo. "
+            "En 45 pasos tarda ~18 min en L4; con su LoRA Turbo (332 MB) tarda ~1.5 min (6p) o ~3.5 min en modo Alta Nitidez (10p, fuerza 0.75)."
         ),
         "estimated_gb": 31.9,
         "min_vram_gb": 13.5,
         "recommended_vram_gb": 19.5,
-        "l4_seconds_hint": "~18 min (45p) · ~1.2 min con LoRA Turbo",
+        "l4_seconds_hint": "~18 min (45p) · ~1.5–3.5 min con LoRA Turbo",
         "engine": "wan_ti2v",
         "artifacts": [
             {
@@ -417,11 +417,11 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "wan22-ti2v-5b-turbo",
-        "name": "Wan 2.2 TI2V-5B TURBO 4 Pasos (720P Ya Destilado · 22.8 GB)",
+        "name": "Wan 2.2 TI2V-5B TURBO 4 Pasos (Imagen / Frame a Frame / Texto · 22.8 GB)",
         "category": "video",
         "is_default": False,
-        "badge": "⚡ 4 Pasos de Fábrica · 22.8 GB",
-        "video_modes": ["i2v", "t2v"],
+        "badge": "⚡ 4 Pasos de Fábrica · Imagen + Frame a Frame",
+        "video_modes": ["i2v", "flf2v", "t2v"],
         "default_fps": 24,
         "default_steps": 4,
         "default_cfg": 1.0,

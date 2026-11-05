@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import types
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -94,6 +95,153 @@ def _apply_best_offload(
                 pass
 
 
+def _attach_wan22_flf2v_support(pipe: Any) -> Any:
+    """
+    Habilita soporte nativo Frame a Frame (Inicio → Fin, `last_image`) en `WanImageToVideoPipeline`
+    cuando `expand_timesteps=True` (arquitectura Wan 2.2 TI2V-5B).
+
+    En Diffusers <=0.42.1, `WanImageToVideoPipeline.prepare_latents` ignora `last_image` cuando
+    `self.config.expand_timesteps` es True (`video_condition = image` de 1 solo frame).
+    Sin embargo, `WanImageToVideoPipeline.__call__` soporta tensores `condition` y `first_frame_mask`
+    de longitud `num_latent_frames` completa:
+      - `latent_model_input = (1 - mask) * condition + mask * latents`
+      - `temp_ts = (mask[0][0][:, ::2, ::2] * t).flatten()` (fija `t=0` en los fotogramas anclados)
+    Codificamos `image` en `[:, :, 0:1]` (`mask=0`) y `last_image` en bloque causal estacionario
+    de 4 fotogramas (`repeat(1,1,5,1,1)` -> `[:, :, -1:]`, `mask=0`) para clavar exactamente
+    tanto el fotograma inicial como el fotograma final sin parpadeo final.
+    """
+    if getattr(pipe, "_studio_wan22_flf2v_patched", False):
+        return pipe
+    cfg = getattr(pipe, "config", None)
+    exp_ts = cfg.get("expand_timesteps", False) if isinstance(cfg, dict) else getattr(cfg, "expand_timesteps", False)
+    if not bool(exp_ts):
+        return pipe
+    orig_prepare_latents = getattr(pipe, "prepare_latents", None)
+    if not callable(orig_prepare_latents):
+        return pipe
+
+    def _wan22_flf2v_prepare_latents(
+        self: Any,
+        image: Any,
+        batch_size: int,
+        num_channels_latents: int = 16,
+        height: int = 480,
+        width: int = 832,
+        num_frames: int = 81,
+        dtype: Any = None,
+        device: Any = None,
+        generator: Any = None,
+        latents: Any = None,
+        last_image: Any = None,
+    ) -> Any:
+        scfg = getattr(self, "config", None)
+        s_exp = scfg.get("expand_timesteps", False) if isinstance(scfg, dict) else getattr(scfg, "expand_timesteps", False)
+        if last_image is None or not bool(s_exp):
+            return orig_prepare_latents(
+                image,
+                batch_size,
+                num_channels_latents,
+                height,
+                width,
+                num_frames,
+                dtype,
+                device,
+                generator,
+                latents,
+                last_image,
+            )
+
+        import torch  # type: ignore
+
+        num_latent_frames = (num_frames - 1) // self.vae_scale_factor_temporal + 1
+        if num_latent_frames < 2:
+            return orig_prepare_latents(
+                image,
+                batch_size,
+                num_channels_latents,
+                height,
+                width,
+                num_frames,
+                dtype,
+                device,
+                generator,
+                latents,
+                None,
+            )
+
+        latent_height = height // self.vae_scale_factor_spatial
+        latent_width = width // self.vae_scale_factor_spatial
+        shape = (batch_size, num_channels_latents, num_latent_frames, latent_height, latent_width)
+
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(f"Lista de generadores ({len(generator)}) != batch_size ({batch_size}).")
+
+        try:
+            from diffusers.utils.torch_utils import get_module_execution_device, randn_tensor  # type: ignore
+
+            vae_device = get_module_execution_device(self.vae)
+            if latents is None:
+                latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            else:
+                latents = latents.to(device=device, dtype=dtype)
+        except ImportError:
+            vae_device = device
+            if latents is None:
+                latents = torch.randn(shape, generator=generator, device=device, dtype=dtype)
+            else:
+                latents = latents.to(device=device, dtype=dtype)
+
+        vae_dtype = getattr(self.vae, "dtype", dtype)
+
+        latents_mean = (
+            torch.tensor(self.vae.config.latents_mean)
+            .view(1, self.vae.config.z_dim, 1, 1, 1)
+            .to(device=device, dtype=dtype)
+        )
+        latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(
+            1, self.vae.config.z_dim, 1, 1, 1
+        ).to(device=device, dtype=dtype)
+
+        def _extract_mode_latents(enc_out: Any) -> Any:
+            if hasattr(enc_out, "latent_dist"):
+                return enc_out.latent_dist.mode()
+            if hasattr(enc_out, "latents"):
+                return enc_out.latents
+            return enc_out[0].mode()
+
+        # 1) Fotograma inicial (modo causal primer frame t=0)
+        start_cond = image.unsqueeze(2).to(device=vae_device, dtype=vae_dtype)
+        z_start = _extract_mode_latents(self.vae.encode(start_cond)).to(device=device, dtype=dtype)
+        z_start = (z_start - latents_mean) * latents_std
+
+        # 2) Fotograma final (5 repeticiones -> bloque causal estacionario 4-frame `[:, :, -1:]`)
+        end_cond = last_image.unsqueeze(2).repeat(1, 1, 5, 1, 1).to(device=vae_device, dtype=vae_dtype)
+        z_end = _extract_mode_latents(self.vae.encode(end_cond))[:, :, -1:].to(device=device, dtype=dtype)
+        z_end = (z_end - latents_mean) * latents_std
+
+        if batch_size > 1:
+            if z_start.shape[0] == 1:
+                z_start = z_start.repeat(batch_size, 1, 1, 1, 1)
+            if z_end.shape[0] == 1:
+                z_end = z_end.repeat(batch_size, 1, 1, 1, 1)
+
+        latent_condition = torch.zeros(shape, dtype=dtype, device=device)
+        latent_condition[:, :, 0:1] = z_start[:, :, 0:1]
+        latent_condition[:, :, -1:] = z_end[:, :, -1:]
+
+        first_frame_mask = torch.ones(
+            1, 1, num_latent_frames, latent_height, latent_width, dtype=dtype, device=device
+        )
+        first_frame_mask[:, :, 0] = 0.0
+        first_frame_mask[:, :, -1] = 0.0
+
+        return latents, latent_condition, first_frame_mask
+
+    pipe.prepare_latents = types.MethodType(_wan22_flf2v_prepare_latents, pipe)
+    pipe._studio_wan22_flf2v_patched = True
+    return pipe
+
+
 def _switch_pipeline_class(
     handle: Dict[str, Any],
     target_cls: Any,
@@ -108,6 +256,7 @@ def _switch_pipeline_class(
     """
     pipe = handle["pipe"]
     if isinstance(pipe, target_cls):
+        _attach_wan22_flf2v_support(pipe)
         return pipe
 
     if hasattr(pipe, "remove_all_hooks"):
@@ -151,6 +300,7 @@ def _switch_pipeline_class(
         valid_kwargs = {k: v for k, v in merged_candidates.items() if k in allowed}
 
     new_pipe = target_cls(**valid_kwargs)
+    _attach_wan22_flf2v_support(new_pipe)
     if vram_total_gb is None:
         vram_total_gb = float(query_gpu_info().get("vram_total_gb", 22.0))
     _apply_best_offload(new_pipe, vram_total_gb, float(handle.get("min_vram_gb", 14.0)))
@@ -467,14 +617,15 @@ def _instantiate_video_pipeline(
         )
         flow_shift = float(spec.get("flow_shift", 5.0))
         pipe_i2v.scheduler = UniPCMultistepScheduler.from_config(pipe_i2v.scheduler.config, flow_shift=flow_shift)
+        _attach_wan22_flf2v_support(pipe_i2v)
         return {
             "pipe": pipe_i2v,
             "all_components": dict(pipe_i2v.components),
             "extra_init_kwargs": {"expand_timesteps": exp_ts, "boundary_ratio": b_ratio},
             "i2v_cls": WanImageToVideoPipeline,
             "t2v_cls": WanPipeline,
-            "flf2v_cls": None,
-            "supported_submodes": ["t2v", "i2v"],
+            "flf2v_cls": WanImageToVideoPipeline,
+            "supported_submodes": ["t2v", "i2v", "flf2v"],
             "active_mode": "i2v",
         }
 
@@ -819,36 +970,96 @@ def _write_float_audio_wav(audio_arr: Any, sample_rate: int, wav_path: Path) -> 
         wf.writeframes(pcm16.tobytes())
 
 
+def _frame_to_uint8_rgb_array(frame: Any) -> Any:
+    import numpy as np  # type: ignore
+
+    if isinstance(frame, Image.Image):
+        return np.asarray(frame.convert("RGB"), dtype=np.uint8)
+    if hasattr(frame, "detach"):
+        arr = frame.detach().float().cpu().numpy()
+    else:
+        arr = np.asarray(frame)
+    if arr.ndim == 3 and arr.shape[0] in (1, 3) and arr.shape[2] not in (1, 3):
+        arr = np.transpose(arr, (1, 2, 0))
+    if arr.dtype != np.uint8:
+        if arr.min() < -0.05:
+            arr = (arr + 1.0) * 0.5
+        arr = (np.clip(arr, 0.0, 1.0) * 255.0).round().astype("uint8")
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    elif arr.shape[2] == 4:
+        arr = arr[:, :, :3]
+    elif arr.shape[2] == 1:
+        arr = np.repeat(arr, 3, axis=2)
+    return np.ascontiguousarray(arr, dtype=np.uint8)
+
+
 def _frames_to_mp4(
     frames: List[Any],
     output_mp4: Path,
     fps: int = 16,
     audio_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Codifica una secuencia de fotogramas PIL/numpy/tensor a MP4 H.264 BT.709 con FFmpeg."""
-    import numpy as np  # type: ignore
+    """Codifica fotogramas a MP4 H.264 BT.709 vía pipe RGB24 directo (sin escritura lenta de PNGs)."""
+    if not frames:
+        raise ValueError("La lista de fotogramas generados está vacía.")
 
     ffmpeg_bin = get_ffmpeg_bin()
+    output_mp4.parent.mkdir(parents=True, exist_ok=True)
+    rgb_arrays = [_frame_to_uint8_rgb_array(f) for f in frames]
+    h0, w0 = int(rgb_arrays[0].shape[0]), int(rgb_arrays[0].shape[1])
+
+    # Vía rápida: envío directo de memoria RGB24 por stdin (~2s en lugar de ~55s escribiendo PNGs)
+    if all(int(a.shape[0]) == h0 and int(a.shape[1]) == w0 for a in rgb_arrays):
+        cmd_raw = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{w0}x{h0}",
+            "-framerate",
+            str(fps),
+            "-i",
+            "-",
+        ]
+        if audio_path and audio_path.exists():
+            cmd_raw += ["-i", str(audio_path), "-shortest", "-c:a", "aac", "-b:a", "192k"]
+        cmd_raw += [
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-colorspace",
+            "bt709",
+            "-movflags",
+            "+faststart",
+            "-y",
+            str(output_mp4),
+        ]
+        raw_bytes = b"".join(a.tobytes() for a in rgb_arrays)
+        res_raw = subprocess.run(cmd_raw, input=raw_bytes, capture_output=True, timeout=300)
+        if res_raw.returncode == 0 and output_mp4.exists():
+            return probe_media_info(output_mp4)
+
+    # Fallback seguro en disco (compress_level=1 rápido)
     tmp_dir = Path(tempfile.mkdtemp(prefix="vframes_"))
     try:
-        for i, frame in enumerate(frames):
-            if isinstance(frame, Image.Image):
-                pil_f = frame.convert("RGB")
-            else:
-                if hasattr(frame, "detach"):
-                    arr = frame.detach().float().cpu().numpy()
-                else:
-                    arr = np.asarray(frame)
-                if arr.ndim == 3 and arr.shape[0] in (1, 3) and arr.shape[2] not in (1, 3):
-                    arr = np.transpose(arr, (1, 2, 0))
-                if arr.dtype != np.uint8:
-                    if arr.min() < -0.05:
-                        arr = (arr + 1.0) * 0.5
-                    arr = (np.clip(arr, 0.0, 1.0) * 255.0).round().astype("uint8")
-                pil_f = Image.fromarray(arr).convert("RGB")
-            pil_f.save(tmp_dir / f"frame_{i:05d}.png", "PNG")
+        for i, arr in enumerate(rgb_arrays):
+            Image.fromarray(arr, mode="RGB").save(
+                tmp_dir / f"frame_{i:05d}.png", "PNG", compress_level=1
+            )
 
-        output_mp4.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             ffmpeg_bin,
             "-hide_banner",
@@ -869,7 +1080,7 @@ def _frames_to_mp4(
             "-preset",
             "veryfast",
             "-crf",
-            "19",
+            "18",
             "-colorspace",
             "bt709",
             "-movflags",
@@ -1009,7 +1220,7 @@ def generate_video_clip(
             }.get(submode, submode)
             raise ValueError(
                 f"El modelo «{target_defn['name']}» no soporta el modo «{sub_es}». "
-                "Para Frame a Frame con IA elige arriba «Wan 2.1 VACE 1.3B», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
+                "Para Frame a Frame con IA elige arriba «Wan 2.2 TI2V-5B HD 720P», «Wan 2.1 VACE 1.3B», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
             )
 
     infer_pct_start = 10.0
@@ -1154,10 +1365,21 @@ def generate_video_clip(
                 step=f"{submode_es}: paso {cur}/{steps}",
                 speed_text=f"{dt:.2f} s/paso",
             )
+            if cur >= steps:
+                job.log(
+                    f"Difusión completada. Decodificando {num_frames} fotogramas HD en el VAE 3D...",
+                    progress=90.5,
+                    step="Decodificando vídeo en VAE 3D...",
+                )
         return kw
 
     if job:
         lora_tag = f" + LoRA «{active_lora_defn['name'].split('(')[0].strip()}»" if active_lora_defn else ""
+        if submode == "flf2v" and image_path is not None and end_image_path is not None:
+            job.log(
+                f"🎞️ Frame a Frame activo: Inicio=«{image_path.name}» → Final=«{end_image_path.name}» (ambos fotogramas anclados en t=0).",
+                progress=max(1.0, infer_pct_start - 0.5),
+            )
         job.log(
             f"Generando [{submode_es}] con «{slot['name']}»{lora_tag} ({width}×{height}, {num_frames} fotogramas @ {fps} fps, {steps} pasos, CFG {eff_cfg}, semilla {actual_seed})...",
             progress=infer_pct_start,

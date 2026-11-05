@@ -746,7 +746,7 @@ def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
                     status_code=400,
                     detail=(
                         f"El modelo «{m_defn['name']}» no soporta este modo ({sub}). "
-                        "Para Frame a Frame elige «Wan 2.1 VACE 1.3B», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
+                        "Para Frame a Frame elige «Wan 2.2 TI2V-5B HD 720P», «Wan 2.1 VACE 1.3B», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
                     ),
                 )
 

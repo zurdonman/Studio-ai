@@ -25,6 +25,7 @@
     lastMontageResult: null,
     videoMode: "ai", // "ai" | "ffmpeg_motion"
     videoSubmode: "i2v", // "i2v" | "flf2v" | "t2v" | "ffmpeg"
+    lastVidUploadStartRel: null,
     timeline: [], // [{ media_rel, media_url, filename, type, duration, motion, audio_rel, fit_to_audio }]
     mask: {
       enabled: false,
@@ -594,6 +595,7 @@
     if ($("vid-t2v-note")) $("vid-t2v-note").hidden = !isT2v;
     if ($("vid-slot-end")) $("vid-slot-end").hidden = !showEndSlot;
     if ($("vid-swap-col")) $("vid-swap-col").hidden = !showEndSlot;
+    if ($("lbl-vid-quick-add-end")) $("lbl-vid-quick-add-end").hidden = showEndSlot || isT2v;
     if ($("vid-start-label")) {
       $("vid-start-label").textContent = showEndSlot ? "1️⃣ Fotograma Inicial (Inicio)" : "🖼️ Imagen Inicial";
     }
@@ -748,11 +750,32 @@
     }
   }
 
+  function syncLoraQualityPills() {
+    const pillsWrap = $("vid-lora-quality-pills");
+    const lid = $("vid-lora-select") ? $("vid-lora-select").value : "";
+    if (!pillsWrap) return;
+    pillsWrap.hidden = !lid;
+    if (!lid) return;
+
+    const steps = Number(($("vid-steps") && $("vid-steps").value) || 6);
+    const scale = Number(($("vid-lora-scale") && $("vid-lora-scale").value) || 1.0);
+    const cfg = Number(($("vid-cfg") && $("vid-cfg").value) || 1.0);
+
+    pillsWrap.querySelectorAll(".lora-q-pill").forEach((pill) => {
+      const ps = Number(pill.dataset.lsteps);
+      const psc = Number(pill.dataset.lscale);
+      const pc = Number(pill.dataset.lcfg);
+      const match = ps === steps && Math.abs(psc - scale) < 0.03 && Math.abs(pc - cfg) < 0.06;
+      pill.classList.toggle("active", match);
+    });
+  }
+
   function populateVideoLoraSelect(modelId) {
     const loraBox = $("vid-lora-box");
     const loraSel = $("vid-lora-select");
     const scaleWrap = $("vid-lora-scale-wrap");
     const dlBtn = $("btn-dl-vid-lora");
+    const pillsWrap = $("vid-lora-quality-pills");
     if (!loraBox || !loraSel) return;
 
     const compatLoras = state.catalog.filter(
@@ -768,6 +791,7 @@
       loraSel.value = "";
       if (scaleWrap) scaleWrap.hidden = true;
       if (dlBtn) dlBtn.hidden = true;
+      if (pillsWrap) pillsWrap.hidden = true;
       return;
     }
 
@@ -796,6 +820,7 @@
         dlBtn.textContent = `⬇️ Pre-descargar (${chosen.estimated_gb} GB)`;
       }
     }
+    syncLoraQualityPills();
   }
 
   function resetVideoStepsToRecommended() {
@@ -836,7 +861,9 @@
 
     const steps = Number(numInput.value || 45);
     const cfg = Number(($("vid-cfg") && $("vid-cfg").value) || 5.0);
+    const scale = Number(($("vid-lora-scale") && $("vid-lora-scale").value) || 1.0);
     if (slider) slider.value = Math.max(4, Math.min(55, steps));
+    syncLoraQualityPills();
 
     const fastSafe = Number(spec.fast_safe_steps || 28);
     const minSafe = Number(spec.min_safe_steps || 22);
@@ -854,13 +881,17 @@
     if (loraObj) {
       const dlBtn = $("btn-dl-vid-lora");
       if (dlBtn) dlBtn.hidden = Boolean(loraObj.downloaded);
-      if (steps <= 10) {
-        const estMin = Math.max(0.6, Math.round(steps * (mid.includes("5b") ? 0.2 : 0.08) * 10) / 10);
+      if (steps <= 12) {
+        const secPerStep = mid.includes("5b") ? (cfg > 1.01 ? 24.0 : 13.5) : (cfg > 1.01 ? 7.5 : 4.2);
+        const estDiffMin = Math.max(0.5, Math.round((steps * secPerStep) / 6.0) / 10);
         noteEl.className = "vid-steps-note turbo";
-        noteEl.textContent = `⚡ LoRA Acelerador activo (${steps} pasos · CFG ${cfg}): genera el clip ~12× más rápido (~${estMin} min en GPU L4) sin deformar.`;
+        noteEl.textContent =
+          cfg > 1.01
+            ? `🎯 LoRA + Fidelidad Extra (${steps} pasos · Fuerza ${scale} · CFG ${cfg}): difusión en ~${estDiffMin} min en L4 con mayor nitidez y obediencia al prompt/pose.`
+            : `⚡ LoRA Acelerador activo (${steps} pasos · Fuerza ${scale} · CFG ${cfg}): difusión en ~${estDiffMin} min en GPU L4 (~12× más rápido) sin deformar.`;
       } else {
         noteEl.className = "vid-steps-note warn";
-        noteEl.textContent = `⚠️ Con el LoRA Acelerador activo lo ideal son 4–8 pasos y CFG 1.0 (más pasos pueden sobresaturar). Pulsa «↺ Resetear pasos».`;
+        noteEl.textContent = `⚠️ Con el LoRA Acelerador activo lo ideal son 6–10 pasos (Fuerza 0.75–1.0). Pulsa «↺ Resetear pasos» o elige un modo arriba.`;
       }
       return;
     }
@@ -1855,7 +1886,8 @@
       if (prevEnd && allImgs.some((i) => i.rel_path === prevEnd)) {
         endSel.value = prevEnd;
       } else if (allImgs.length >= 2 && !endSel.value) {
-        endSel.value = allImgs[1].rel_path;
+        const diffImg = allImgs.find((i) => i.rel_path !== imgSel.value) || allImgs[0];
+        endSel.value = diffImg.rel_path;
       }
       updateVideoEndThumb();
     }
@@ -2514,6 +2546,29 @@
       });
     }
 
+    if ($("vid-lora-scale")) {
+      $("vid-lora-scale").addEventListener("input", () => {
+        updateVideoStepsSafetyNote();
+      });
+    }
+
+    document.querySelectorAll(".lora-q-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        const lsteps = Number(pill.dataset.lsteps || 6);
+        const lscale = Number(pill.dataset.lscale || 1.0);
+        const lcfg = Number(pill.dataset.lcfg || 1.0);
+        if ($("vid-steps")) $("vid-steps").value = lsteps;
+        if ($("vid-steps-slider")) $("vid-steps-slider").value = lsteps;
+        if ($("vid-lora-scale")) $("vid-lora-scale").value = lscale;
+        if ($("vid-cfg")) $("vid-cfg").value = lcfg;
+        updateVideoStepsSafetyNote();
+        toast(
+          `Ajustado modo LoRA: ${lsteps} pasos · Fuerza ${lscale} · CFG ${lcfg}.`,
+          "success"
+        );
+      });
+    });
+
     if ($("btn-steps-fast-safe")) {
       $("btn-steps-fast-safe").addEventListener("click", () => {
         const mid = $("select-video-model") ? $("select-video-model").value : "";
@@ -2568,18 +2623,74 @@
     }
 
     $("input-vid-upload-img").addEventListener("change", async (ev) => {
-      const f = ev.target.files[0];
-      if (!f) return;
+      const files = Array.from(ev.target.files || []);
+      if (files.length === 0) return;
       try {
-        const asset = await uploadFile(f);
-        $("vid-source-image").value = asset.rel_path;
-        updateVideoSourceThumb();
-        toast(`Imagen inicial lista: ${asset.filename}`, "success");
+        if (files.length >= 2) {
+          const assetStart = await uploadFile(files[0]);
+          const assetEnd = await uploadFile(files[1]);
+          $("vid-source-image").value = assetStart.rel_path;
+          if ($("vid-end-image")) $("vid-end-image").value = assetEnd.rel_path;
+          state.lastVidUploadStartRel = null;
+          setVideoSubmode("flf2v");
+          updateVideoSourceThumb();
+          updateVideoEndThumb();
+          toast(
+            `🎞️ ¡2 fotos listas! Inicio: ${assetStart.filename} → Final: ${assetEnd.filename} (modo Frame a Frame activado).`,
+            "success"
+          );
+        } else {
+          const prevStart = $("vid-source-image").value;
+          const hadRecentSingleStart =
+            state.videoSubmode === "i2v" &&
+            Boolean(state.lastVidUploadStartRel) &&
+            prevStart === state.lastVidUploadStartRel;
+
+          const asset = await uploadFile(files[0]);
+          if (hadRecentSingleStart && asset.rel_path !== prevStart) {
+            $("vid-source-image").value = prevStart;
+            if ($("vid-end-image")) $("vid-end-image").value = asset.rel_path;
+            state.lastVidUploadStartRel = null;
+            setVideoSubmode("flf2v");
+            updateVideoSourceThumb();
+            updateVideoEndThumb();
+            toast(
+              `🎞️ 2ª foto detectada (${asset.filename}): activado Frame a Frame (Inicio → Fin). Usa «⇄ Invertir» si quieres cambiar el orden.`,
+              "success"
+            );
+          } else {
+            $("vid-source-image").value = asset.rel_path;
+            state.lastVidUploadStartRel = state.videoSubmode === "i2v" ? asset.rel_path : null;
+            updateVideoSourceThumb();
+            toast(`Imagen inicial lista: ${asset.filename}`, "success");
+          }
+        }
       } catch (e) {
         toast(e.message, "error");
       }
       ev.target.value = "";
     });
+
+    if ($("input-vid-quick-end-img")) {
+      $("input-vid-quick-end-img").addEventListener("change", async (ev) => {
+        const f = ev.target.files[0];
+        if (!f) return;
+        try {
+          const prevStart = $("vid-source-image").value;
+          const asset = await uploadFile(f);
+          if (prevStart) $("vid-source-image").value = prevStart;
+          if ($("vid-end-image")) $("vid-end-image").value = asset.rel_path;
+          state.lastVidUploadStartRel = null;
+          setVideoSubmode("flf2v");
+          updateVideoSourceThumb();
+          updateVideoEndThumb();
+          toast(`🏁 Fotograma final listo (${asset.filename}): modo Frame a Frame activado.`, "success");
+        } catch (e) {
+          toast(e.message, "error");
+        }
+        ev.target.value = "";
+      });
+    }
 
     if ($("input-vid-upload-end-img")) {
       $("input-vid-upload-end-img").addEventListener("change", async (ev) => {
@@ -2588,6 +2699,7 @@
         try {
           const asset = await uploadFile(f);
           if ($("vid-end-image")) $("vid-end-image").value = asset.rel_path;
+          state.lastVidUploadStartRel = null;
           updateVideoEndThumb();
           toast(`Fotograma final listo: ${asset.filename}`, "success");
         } catch (e) {

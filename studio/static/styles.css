@@ -1832,6 +1832,36 @@ select:focus {
   width: 78px;
 }
 
+.vid-lora-quality-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.lora-q-pill {
+  background: rgba(30, 41, 59, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  color: #cbd5e1;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.lora-q-pill:hover {
+  border-color: rgba(56, 189, 248, 0.65);
+  color: #f8fafc;
+}
+
+.lora-q-pill.active {
+  background: rgba(37, 99, 235, 0.28);
+  border-color: rgba(56, 189, 248, 0.78);
+  color: #e0f2fe;
+  font-weight: 600;
+}
+
 .vid-steps-ctrl {
   display: flex;
   flex-direction: column;
