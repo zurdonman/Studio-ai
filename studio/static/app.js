@@ -112,14 +112,29 @@
   }
 
   // ==================== TELEMETRÍA Y TRABAJOS (POLLING) ====================
+  let _pollTimer = null;
+
   async function pollStatus() {
+    let activeCount = 0;
     try {
       const snap = await api("/api/status");
+      activeCount = snap.active_jobs_count || 0;
       renderHardware(snap.hardware, snap.memory, snap.unexported_outputs_count);
       renderJobs(snap.jobs);
     } catch (_e) {
       // Silencioso en polling puntual
     }
+    return activeCount;
+  }
+
+  function startAdaptivePolling() {
+    async function _tick() {
+      const activeCount = await pollStatus();
+      const nextDelay = activeCount > 0 ? 700 : 1600;
+      _pollTimer = setTimeout(_tick, nextDelay);
+    }
+    if (_pollTimer) clearTimeout(_pollTimer);
+    _tick();
   }
 
   function renderHardware(hw, mem, unexportedCount) {
@@ -139,7 +154,7 @@
     $("ram-text").textContent = `${hw.ram.used_gb} / ${hw.ram.total_gb} GB`;
     $("ram-bar").style.width = `${Math.min(100, hw.ram.percent || 0)}%`;
 
-    $("disk-text").textContent = `${hw.disk.free_gb} GB libres`;
+    $("disk-text").textContent = `${hw.disk.free_gb} / ${hw.disk.total_gb} GB libres`;
     $("disk-bar").style.width = `${Math.min(100, hw.disk.percent || 0)}%`;
 
     const cr = hw.credits;
@@ -176,18 +191,19 @@
     const imgSlot = loadedSlots.find((s) => s.slot === "image");
     const qwenDef = state.catalog.find((m) => m.id === "qwen-image-edit-2511-pack");
     const imgDot = $("img-engine-dot");
+    const btnQwen = $("btn-prepare-qwen");
     if (imgSlot) {
       imgDot.className = "status-dot loaded";
       $("img-engine-state").textContent = `Cargado en RAM/VRAM (${imgSlot.name})`;
-      $("btn-prepare-qwen").textContent = "✅ Qwen + Lightning Listo en VRAM";
+      if (!btnQwen.disabled) btnQwen.textContent = "✅ Qwen + Lightning Listo en VRAM";
     } else if (qwenDef && qwenDef.downloaded) {
       imgDot.className = "status-dot downloaded";
       $("img-engine-state").textContent = "Descargado en disco · Sin cargar en VRAM";
-      $("btn-prepare-qwen").textContent = "⚡ Cargar Qwen + Lightning en VRAM";
+      if (!btnQwen.disabled) btnQwen.textContent = "⚡ Cargar Qwen + Lightning en VRAM";
     } else {
       imgDot.className = "status-dot";
       $("img-engine-state").textContent = "No descargado todavía (~12.2 GB)";
-      $("btn-prepare-qwen").textContent = "⬇⚡ Descargar y Cargar Qwen + Lightning (1 clic)";
+      if (!btnQwen.disabled) btnQwen.textContent = "⬇⚡ Descargar y Cargar Qwen + Lightning (1 clic)";
     }
 
     const vidSlot = loadedSlots.find((s) => s.slot === "video");
@@ -225,9 +241,15 @@
       hangBanner.hidden = true;
     }
 
-    // Tarjeta de trabajo activo
+    // Tarjeta de trabajo activo (panel derecho + barra global superior + barra inline del motor)
     const topRunning = running[0];
     const ajCard = $("active-job-card");
+    const gjs = $("global-job-strip");
+    const imgInline = $("img-inline-progress");
+    const vidInline = $("vid-inline-progress");
+    const btnQwen = $("btn-prepare-qwen");
+    const btnVidPrep = $("btn-prepare-video");
+
     if (topRunning) {
       ajCard.hidden = false;
       $("aj-title").textContent = topRunning.title;
@@ -237,9 +259,73 @@
       $("aj-speed").textContent = topRunning.speed_text || "";
       $("aj-elapsed").textContent = `${topRunning.elapsed_seconds} s`;
       $("btn-cancel-active-job").onclick = () => cancelJob(topRunning.id);
+
+      // Barra global fija arriba (visible en cualquier pestaña y móvil/escritorio)
+      gjs.hidden = false;
+      $("gjs-title").textContent = topRunning.title;
+      $("gjs-step").textContent = topRunning.current_step || "";
+      $("gjs-speed").textContent = topRunning.speed_text || "";
+      $("gjs-elapsed").textContent = `${topRunning.elapsed_seconds}s`;
+      $("gjs-pct").textContent = `${topRunning.progress}%`;
+      $("gjs-bar").style.width = `${topRunning.progress}%`;
+      const lastLogEntry =
+        Array.isArray(topRunning.logs) && topRunning.logs.length > 0
+          ? topRunning.logs[topRunning.logs.length - 1]
+          : null;
+      $("gjs-lastlog").textContent = lastLogEntry
+        ? `[${lastLogEntry.time}] ${lastLogEntry.message}`
+        : "";
+      $("btn-gjs-cancel").onclick = () => cancelJob(topRunning.id);
+
+      // Barra inline directa en el panel de Imagen cuando descarga/carga Qwen o edita imagen
+      const isImgRelated =
+        topRunning.kind === "image" ||
+        (topRunning.title && /qwen|imagen|lora/i.test(topRunning.title));
+      if (isImgRelated && imgInline) {
+        imgInline.hidden = false;
+        const spd = topRunning.speed_text ? ` · ${topRunning.speed_text}` : "";
+        $("img-iep-step").textContent = `${topRunning.current_step || topRunning.title}${spd}`;
+        $("img-iep-meta").textContent = `${topRunning.progress}% (${topRunning.elapsed_seconds}s)`;
+        $("img-iep-bar").style.width = `${topRunning.progress}%`;
+        if (topRunning.kind === "load_model" || topRunning.kind === "download") {
+          btnQwen.disabled = true;
+          btnQwen.textContent = `⏳ ${topRunning.progress}% · Preparando Qwen...`;
+        }
+      } else if (imgInline) {
+        imgInline.hidden = true;
+        btnQwen.disabled = false;
+      }
+
+      // Barra inline directa en el panel de Vídeo
+      const isVidRelated =
+        topRunning.kind === "video" ||
+        (topRunning.title && /wan|ltx|vídeo|video/i.test(topRunning.title));
+      if (isVidRelated && vidInline) {
+        vidInline.hidden = false;
+        const spd = topRunning.speed_text ? ` · ${topRunning.speed_text}` : "";
+        $("vid-iep-step").textContent = `${topRunning.current_step || topRunning.title}${spd}`;
+        $("vid-iep-meta").textContent = `${topRunning.progress}% (${topRunning.elapsed_seconds}s)`;
+        $("vid-iep-bar").style.width = `${topRunning.progress}%`;
+        if (topRunning.kind === "load_model" || topRunning.kind === "download") {
+          btnVidPrep.disabled = true;
+          btnVidPrep.textContent = `⏳ ${topRunning.progress}% · Preparando...`;
+        }
+      } else if (vidInline) {
+        vidInline.hidden = true;
+        btnVidPrep.disabled = false;
+      }
+
       state.selectedJobId = topRunning.id;
     } else {
       ajCard.hidden = true;
+      gjs.hidden = true;
+      if (imgInline) imgInline.hidden = true;
+      if (vidInline) vidInline.hidden = true;
+      if (btnQwen) btnQwen.disabled = false;
+      if (btnVidPrep) {
+        btnVidPrep.disabled = false;
+        btnVidPrep.textContent = "⚡ Preparar Modelo de Vídeo";
+      }
       if (!state.selectedJobId && state.jobs.length > 0) {
         state.selectedJobId = state.jobs[0].id;
       }
@@ -1177,6 +1263,20 @@
     $("btn-close-credits").addEventListener("click", () => {
       $("credits-modal").hidden = true;
     });
+    $("btn-auto-gpu-rate").addEventListener("click", async () => {
+      try {
+        const res = await api("/api/credits/config", {
+          method: "POST",
+          body: JSON.stringify({ use_auto_gpu_rate: true }),
+        });
+        const newRate = res.hardware.credits.hourly_rate;
+        $("cfg-hourly-rate").value = newRate;
+        toast(`Tarifa ajustada automáticamente a ${newRate} u/h.`, "success");
+        await pollStatus();
+      } catch (e) {
+        toast(e.message, "error");
+      }
+    });
     $("btn-save-credits").addEventListener("click", async () => {
       try {
         await api("/api/credits/config", {
@@ -1510,8 +1610,8 @@
   async function init() {
     setupMaskCanvas();
     bindEvents();
-    await Promise.all([loadCatalog(), loadVoices(), loadAssets(), pollStatus()]);
-    setInterval(pollStatus, 1400);
+    await Promise.all([loadCatalog(), loadVoices(), loadAssets()]);
+    startAdaptivePolling();
   }
 
   document.addEventListener("DOMContentLoaded", init);

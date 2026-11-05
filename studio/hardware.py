@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -13,16 +14,25 @@ from studio.config import DATA_ROOT, STATE_DIR, is_colab_env
 CREDITS_STATE_FILE = STATE_DIR / "credits_state.json"
 SHUTDOWN_FLAG_FILE = STATE_DIR / "shutdown_requested.flag"
 
-# Tarifas orientativas de unidades de cómputo por hora en Google Colab (editables por el usuario)
+# Tarifas reales de unidades de cómputo por hora en Google Colab (editables en 1 clic desde la interfaz)
 GPU_RATES_DEFAULT = {
     "T4": 1.17,
-    "L4": 4.82,
-    "V100": 5.36,
-    "A100": 11.77,
-    "H100": 22.50,
-    "GPU": 4.50,
+    "L4": 1.92,
+    "V100": 3.90,
+    "A100": 5.37,
+    "H100": 11.77,
+    "GPU": 1.92,
     "CPU": 0.0,
 }
+
+# Antiguos valores por defecto para migrar automáticamente si quedaron guardados
+_LEGACY_AUTO_RATES = {4.82, 4.50}
+
+
+def colab_console_log(message: str, icon: str = "🔹") -> None:
+    """Imprime una línea limpia e inmediata en la celda de Google Colab (stdout sin buffer)."""
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {icon} {message}", flush=True)
 
 
 def _classify_gpu_tier(gpu_name: str) -> str:
@@ -36,8 +46,7 @@ def _classify_gpu_tier(gpu_name: str) -> str:
 
 
 def query_gpu_info() -> Dict[str, Any]:
-    """Obtiene información real de GPU y VRAM usando torch.cuda o nvidia-smi."""
-    # Intento 1: torch si ya está importado o disponible
+    """Obtiene información real e instantánea de GPU y VRAM usando cudaMemGetInfo o nvidia-smi."""
     try:
         import torch  # type: ignore
 
@@ -48,9 +57,17 @@ def query_gpu_info() -> Dict[str, Any]:
             total_gb = props.total_memory / (1024**3)
             alloc_gb = torch.cuda.memory_allocated(idx) / (1024**3)
             reserved_gb = torch.cuda.memory_reserved(idx) / (1024**3)
-            # Intentar leer el uso total real del sistema por nvidia-smi (incluye subprocesos)
-            smi = _query_nvidia_smi()
-            used_gb = smi["vram_used_gb"] if smi else max(alloc_gb, reserved_gb)
+
+            # mem_get_info consulta directamente al driver CUDA (incluye pesos 4-bit bitsandbytes y contexto)
+            try:
+                free_b, total_b = torch.cuda.mem_get_info(idx)
+                total_gb = total_b / (1024**3)
+                free_gb = free_b / (1024**3)
+                used_gb = max(0.0, total_gb - free_gb)
+            except Exception:
+                used_gb = max(alloc_gb, reserved_gb)
+                free_gb = max(0.0, total_gb - used_gb)
+
             tier = _classify_gpu_tier(name)
             return {
                 "has_gpu": True,
@@ -61,13 +78,12 @@ def query_gpu_info() -> Dict[str, Any]:
                 "vram_used_gb": round(used_gb, 2),
                 "vram_allocated_gb": round(alloc_gb, 2),
                 "vram_reserved_gb": round(reserved_gb, 2),
-                "vram_free_gb": round(max(0.0, total_gb - used_gb), 2),
+                "vram_free_gb": round(free_gb, 2),
                 "vram_percent": round((used_gb / total_gb) * 100, 1) if total_gb > 0 else 0.0,
             }
     except Exception:
         pass
 
-    # Intento 2: nvidia-smi directo
     smi = _query_nvidia_smi()
     if smi:
         return smi
@@ -149,6 +165,10 @@ class HardwareAndCreditsTracker:
             try:
                 loaded = json.loads(CREDITS_STATE_FILE.read_text(encoding="utf-8"))
                 defaults.update(loaded)
+                # Si tenía guardada la tarifa antigua de L4 (4.82), actualizar a 1.92
+                if gpu["gpu_tier"] == "L4" and round(float(defaults.get("hourly_rate", 0)), 2) in _LEGACY_AUTO_RATES:
+                    defaults["hourly_rate"] = 1.92
+                    defaults["rate_auto"] = True
             except Exception:
                 pass
         if defaults.get("rate_auto", True):
@@ -169,12 +189,17 @@ class HardwareAndCreditsTracker:
         self,
         initial_credits: Optional[float] = None,
         hourly_rate: Optional[float] = None,
+        use_auto_gpu_rate: bool = False,
         reset_session_spent: bool = False,
         idle_alert_minutes: Optional[int] = None,
     ) -> Dict[str, Any]:
+        gpu = query_gpu_info()
         if initial_credits is not None:
             self._state["initial_credits"] = max(0.0, float(initial_credits))
-        if hourly_rate is not None:
+        if use_auto_gpu_rate:
+            self._state["rate_auto"] = True
+            self._state["hourly_rate"] = GPU_RATES_DEFAULT.get(gpu["gpu_tier"], 0.0)
+        elif hourly_rate is not None:
             self._state["hourly_rate"] = max(0.0, float(hourly_rate))
             self._state["rate_auto"] = False
         if idle_alert_minutes is not None:
@@ -183,6 +208,11 @@ class HardwareAndCreditsTracker:
             self.session_start_ts = time.time()
             self._state["prior_spent_credits"] = 0.0
         self._save_state()
+        colab_console_log(
+            f"Contador de créditos actualizado: saldo inicial={self._state['initial_credits']} u., "
+            f"consumo={self._state['hourly_rate']} u/h ({gpu['gpu_tier']}).",
+            icon="💳",
+        )
         return self.get_snapshot()
 
     def get_snapshot(self, active_jobs_count: int = 0) -> Dict[str, Any]:
@@ -191,8 +221,9 @@ class HardwareAndCreditsTracker:
             self.last_activity_ts = now
 
         gpu = query_gpu_info()
+        detected_default_rate = GPU_RATES_DEFAULT.get(gpu["gpu_tier"], 0.0)
         if self._state.get("rate_auto", True):
-            self._state["hourly_rate"] = GPU_RATES_DEFAULT.get(gpu["gpu_tier"], 0.0)
+            self._state["hourly_rate"] = detected_default_rate
 
         vm = psutil.virtual_memory()
         DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -239,6 +270,7 @@ class HardwareAndCreditsTracker:
             "credits": {
                 "initial_credits": round(initial_credits, 2),
                 "hourly_rate": round(hourly_rate, 2),
+                "detected_gpu_default_rate": round(detected_default_rate, 2),
                 "rate_auto": bool(self._state.get("rate_auto", True)),
                 "session_spent": round(session_spent, 3),
                 "remaining_credits": round(remaining, 2),
@@ -255,10 +287,10 @@ class HardwareAndCreditsTracker:
 
 def request_colab_shutdown() -> Dict[str, Any]:
     """Solicita liberar y desconectar el entorno de ejecución de Google Colab."""
+    colab_console_log("Solicitud de «Liberar GPU y apagar sesión» recibida desde la interfaz.", icon="🛑")
     SHUTDOWN_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
     SHUTDOWN_FLAG_FILE.write_text(str(time.time()), encoding="utf-8")
 
-    # Si estamos dentro del propio proceso de Colab
     try:
         from google.colab import runtime  # type: ignore
 
@@ -272,7 +304,6 @@ def request_colab_shutdown() -> Dict[str, Any]:
         pass
 
     if is_colab_env():
-        # En Colab como subproceso: launch_colab.py detecta SHUTDOWN_FLAG_FILE y llama a runtime.unassign()
         return {
             "ok": True,
             "colab_disconnected": True,

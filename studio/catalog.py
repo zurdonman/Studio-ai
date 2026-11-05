@@ -1,15 +1,17 @@
+import io
 import json
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from huggingface_hub import HfApi, hf_hub_download
-from tqdm.auto import tqdm
+from tqdm.std import tqdm as std_tqdm
 
 from studio.config import MODELS_DIR, STATE_DIR
-from studio.hardware import query_gpu_info
+from studio.hardware import colab_console_log, query_gpu_info
 from studio.jobs import JobRecord
 
 CUSTOM_MODELS_FILE = STATE_DIR / "custom_models.json"
@@ -463,12 +465,23 @@ class CatalogManager:
             "message": msg,
         }
 
-    def download_model(self, model_id: str, job: JobRecord) -> Dict[str, Any]:
+    def download_model(
+        self,
+        model_id: str,
+        job: JobRecord,
+        progress_range: Tuple[float, float] = (0.0, 100.0),
+    ) -> Dict[str, Any]:
+        p_min, p_max = float(progress_range[0]), float(progress_range[1])
+
+        def _scale_pct(raw_pct: float) -> float:
+            clamped = max(0.0, min(100.0, raw_pct))
+            return round(p_min + (clamped / 100.0) * (p_max - p_min), 1)
+
         defn = self.get_definition(model_id)
         if not defn:
             raise ValueError(f"Modelo desconocido: {model_id}")
         if defn.get("builtin_no_download"):
-            job.log("Este motor no requiere descargar archivos.", progress=100.0, step="Listo")
+            job.log("Este motor no requiere descargar archivos.", progress=_scale_pct(100.0), step="Listo")
             return {"model_id": model_id, "downloaded_gb": 0.0}
 
         precheck = self.check_disk_space(model_id)
@@ -482,7 +495,7 @@ class CatalogManager:
         # Paso 1: Consultar lista exacta de ficheros y tamaños en Hugging Face
         job.log(
             f"Consultando metadatos y tamaño exacto en Hugging Face para «{defn['name']}»...",
-            progress=2.0,
+            progress=_scale_pct(2.0),
             step="Consultando Hugging Face...",
         )
 
@@ -535,76 +548,133 @@ class CatalogManager:
         total_gb = total_bytes / (1024**3)
         job.log(
             f"Plan de descarga verificado: {len(plan_files)} archivo(s), peso real {total_gb:.2f} GB.",
-            progress=5.0,
-            step=f"0 / {len(plan_files)} archivos",
+            progress=_scale_pct(4.0),
+            step=f"0 / {len(plan_files)} archivos (0.00 / {total_gb:.2f} GB)",
         )
 
-        state = {
-            "downloaded": already_bytes,
+        completed_files_bytes = already_bytes
+        dl_clock = {
             "start_ts": time.time(),
-            "session_bytes": 0,
-            "last_emit_ts": 0.0,
+            "net_bytes": 0,
+            "last_ui_ts": 0.0,
         }
 
         for idx, item in enumerate(plan_files, start=1):
             job.check_cancelled()
             rfn = item["rfilename"]
             short_name = Path(rfn).name
+            fsize = int(item["size"] or 0)
+
             if item["exists"]:
-                pct = (state["downloaded"] / total_bytes * 100.0) if total_bytes > 0 else (idx / len(plan_files) * 100.0)
+                raw_pct = (completed_files_bytes / total_bytes * 100.0) if total_bytes > 0 else (idx / len(plan_files) * 100.0)
                 job.log(
                     f"[{idx}/{len(plan_files)}] Ya en disco: {short_name}",
-                    progress=min(99.0, pct),
+                    progress=_scale_pct(min(99.0, max(4.0, raw_pct))),
                     step=f"[{idx}/{len(plan_files)}] Verificado {short_name}",
                 )
                 continue
 
+            file_mb = fsize / (1024**2)
+            base_raw_pct = (completed_files_bytes / total_bytes * 100.0) if total_bytes > 0 else ((idx - 1) / len(plan_files) * 100.0)
             job.log(
-                f"[{idx}/{len(plan_files)}] Descargando {short_name} ({item['size'] / (1024**2):.1f} MB)...",
-                step=f"[{idx}/{len(plan_files)}] {short_name}",
+                f"[{idx}/{len(plan_files)}] Descargando {short_name} ({file_mb:.1f} MB)...",
+                progress=_scale_pct(min(99.0, max(4.0, base_raw_pct))),
+                step=f"[{idx}/{len(plan_files)}] {short_name} ({completed_files_bytes / (1024**3):.2f} / {total_gb:.2f} GB)",
             )
 
-            class _JobTqdm(tqdm):  # type: ignore
-                def update(self, n: int = 1) -> Optional[bool]:
+            file_progress = {
+                "reconstructed": 0,
+                "transfer": 0,
+                "done": False,
+            }
+
+            def _emit_live_progress(force: bool = False) -> None:
+                now = time.time()
+                if not force and (now - dl_clock["last_ui_ts"] < 0.35):
+                    return
+                dl_clock["last_ui_ts"] = now
+
+                # En descargas hf_xet usamos el avance mayor entre transferencia de red y reconstrucción
+                est_file_done = max(file_progress["reconstructed"], file_progress["transfer"])
+                if fsize > 0:
+                    est_file_done = min(fsize, est_file_done)
+
+                cur_total_done = completed_files_bytes + est_file_done
+                raw_pct = (
+                    (cur_total_done / total_bytes) * 100.0
+                    if total_bytes > 0
+                    else ((idx - 0.5) / len(plan_files)) * 100.0
+                )
+                dt = max(0.05, now - dl_clock["start_ts"])
+                mbps = (dl_clock["net_bytes"] / (1024**2)) / dt
+                done_gb = cur_total_done / (1024**3)
+                rem_bytes = max(0, total_bytes - cur_total_done)
+                bps = dl_clock["net_bytes"] / dt
+                eta_str = f" · ETA ~{int(rem_bytes / bps)}s" if bps > 64 * 1024 else ""
+                spd_str = f"{mbps:.1f} MB/s{eta_str}" if dl_clock["net_bytes"] > 0 else "Conectando con HF..."
+
+                job.heartbeat(
+                    progress=_scale_pct(min(99.2, max(4.0, raw_pct))),
+                    step=f"[{idx}/{len(plan_files)}] {short_name} ({done_gb:.2f} / {total_gb:.2f} GB)",
+                    speed_text=spd_str,
+                )
+
+            class _JobTqdm(std_tqdm):  # type: ignore
+                def __init__(self, *args: Any, **kwargs: Any) -> None:
+                    desc = str(kwargs.get("desc") or "")
+                    self._is_xet_transfer = desc == "Downloading bytes"
+                    kwargs["file"] = io.StringIO()
+                    kwargs["disable"] = False
+                    kwargs.pop("name", None)
+                    super().__init__(*args, **kwargs)
+
+                def update(self, n: Optional[int | float] = 1) -> Optional[bool]:
                     job.check_cancelled()
                     res = super().update(n)
-                    if n and n > 0:
-                        state["downloaded"] += n
-                        state["session_bytes"] += n
-                        now = time.time()
-                        if now - state["last_emit_ts"] >= 0.35:
-                            state["last_emit_ts"] = now
-                            dt = max(0.001, now - state["start_ts"])
-                            mbps = (state["session_bytes"] / (1024**2)) / dt
-                            pct = (
-                                (state["downloaded"] / total_bytes) * 100.0
-                                if total_bytes > 0
-                                else (idx / len(plan_files)) * 100.0
-                            )
-                            done_gb = state["downloaded"] / (1024**3)
-                            rem_bytes = max(0, total_bytes - state["downloaded"])
-                            eta_s = int(rem_bytes / max(1.0, (state["session_bytes"] / dt))) if state["session_bytes"] > 0 else 0
-                            job.heartbeat(
-                                progress=min(99.4, max(5.0, pct)),
-                                step=f"[{idx}/{len(plan_files)}] {short_name} ({done_gb:.2f} / {total_gb:.2f} GB)",
-                                speed_text=f"{mbps:.1f} MB/s · ETA ~{eta_s}s",
-                            )
+                    inc = int(n or 0)
+                    if inc > 0:
+                        if self._is_xet_transfer:
+                            file_progress["transfer"] += inc
+                            dl_clock["net_bytes"] += inc
+                        else:
+                            prev_rec = file_progress["reconstructed"]
+                            file_progress["reconstructed"] += inc
+                            # Si no hay barra xet separada (descarga HTTP normal), contabilizar velocidad aquí
+                            if file_progress["transfer"] == 0:
+                                dl_clock["net_bytes"] += inc
+                            elif file_progress["reconstructed"] > file_progress["transfer"]:
+                                dl_clock["net_bytes"] += max(0, file_progress["reconstructed"] - max(prev_rec, file_progress["transfer"]))
+                        _emit_live_progress(force=False)
                     return res
 
-            downloaded_path = hf_hub_download(
-                repo_id=item["repo_id"],
-                filename=rfn,
-                local_dir=str(item["subdir"]),
-                tqdm_class=_JobTqdm,
-            )
+            # Hilo vigilante cada 1.5s para mantener el pulso vivo incluso durante verificación de hashes
+            def _pulse_watcher() -> None:
+                while not file_progress["done"] and not job.cancel_requested:
+                    time.sleep(1.5)
+                    if not file_progress["done"]:
+                        _emit_live_progress(force=True)
+
+            watcher = threading.Thread(target=_pulse_watcher, daemon=True)
+            watcher.start()
+            try:
+                downloaded_path = hf_hub_download(
+                    repo_id=item["repo_id"],
+                    filename=rfn,
+                    local_dir=str(item["subdir"]),
+                    tqdm_class=_JobTqdm,
+                )
+            finally:
+                file_progress["done"] = True
+
             p_check = Path(downloaded_path)
             if not p_check.exists() or p_check.stat().st_size == 0:
                 raise RuntimeError(f"Verificación fallida: {short_name} no existe o está vacío tras descargar.")
 
-            pct_done = (state["downloaded"] / total_bytes * 100.0) if total_bytes > 0 else (idx / len(plan_files) * 100.0)
+            completed_files_bytes += fsize if fsize > 0 else p_check.stat().st_size
+            pct_done = (completed_files_bytes / total_bytes * 100.0) if total_bytes > 0 else (idx / len(plan_files) * 100.0)
             job.log(
-                f"[{idx}/{len(plan_files)}] Completado y verificado: {short_name}",
-                progress=min(99.5, pct_done),
+                f"[{idx}/{len(plan_files)}] Completado: {short_name} ({completed_files_bytes / (1024**3):.2f} / {total_gb:.2f} GB)",
+                progress=_scale_pct(min(99.5, pct_done)),
                 step=f"[{idx}/{len(plan_files)}] {short_name} listo",
             )
 
@@ -631,10 +701,10 @@ class CatalogManager:
             raise RuntimeError("Faltan archivos clave tras la descarga; no se marca como válido.")
 
         job.log(
-            f"Modelo «{defn['name']}» listo en disco ({actual_gb:.2f} GB verificados).",
+            f"Descarga en disco verificada: «{defn['name']}» ({actual_gb:.2f} GB).",
             level="success",
-            progress=100.0,
-            step="Descargado y verificado",
+            progress=_scale_pct(100.0),
+            step="Archivos verificados en disco",
         )
         return {"model_id": model_id, "actual_disk_gb": actual_gb}
 
@@ -658,12 +728,14 @@ class CatalogManager:
             shutil.rmtree(m_dir)
         freed_gb = round(before_bytes / (1024**3), 2)
         free_now_gb = round(shutil.disk_usage(MODELS_DIR).free / (1024**3), 2)
+        msg = f"«{defn['name']}» eliminado del disco ({freed_gb} GB liberados). Espacio libre actual: {free_now_gb} GB."
+        colab_console_log(msg, icon="🗑️")
         return {
             "ok": True,
             "model_id": model_id,
             "freed_gb": freed_gb,
             "free_disk_gb": free_now_gb,
-            "message": f"«{defn['name']}» eliminado del disco ({freed_gb} GB liberados). Espacio libre actual: {free_now_gb} GB.",
+            "message": msg,
         }
 
 

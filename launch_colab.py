@@ -2,11 +2,13 @@
 """
 Lanzador todo-en-uno para Google Colab:
 1. Instala dependencias en limpio sin importar diffusers/bitsandbytes antes de tiempo.
-2. Arranca app.py en un PROCESO PYTHON NUEVO (evita el bug de @lru_cache en bitsandbytes).
+2. Arranca app.py en un PROCESO PYTHON NUEVO con salida sin buffer (PYTHONUNBUFFERED=1)
+   y redirige cada línea en tiempo real a la celda de Google Colab (ipykernel OutStream).
 3. Abre enlace directo https://... con cloudflared efímero (sin cuentas ni claves) + proxy nativo de Colab.
 4. Escucha el botón «Liberar GPU» de la interfaz para desconectar la máquina de Colab al instante.
 """
 
+import json
 import os
 import platform
 import re
@@ -24,9 +26,9 @@ PORT = int(os.environ.get("PORT", "7860"))
 
 def _print_box(lines: list[str]) -> None:
     width = max(len(ln) for ln in lines) + 4
-    print("\n" + "═" * width)
+    print("\n" + "═" * width, flush=True)
     for ln in lines:
-        print(f"  {ln}")
+        print(f"  {ln}", flush=True)
     print("═" * width + "\n", flush=True)
 
 
@@ -92,16 +94,16 @@ def start_cloudflared_tunnel(port: int) -> tuple[subprocess.Popen | None, str | 
     return proc, (public_url[0] if public_url else None)
 
 
-def wait_for_local_server(port: int, timeout: float = 30.0) -> bool:
+def wait_for_local_server(port: int, timeout: float = 35.0) -> dict | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=2) as resp:
                 if resp.status == 200:
-                    return True
+                    return json.loads(resp.read().decode("utf-8"))
         except Exception:
             time.sleep(0.4)
-    return False
+    return None
 
 
 def try_colab_proxy_url(port: int) -> str | None:
@@ -127,7 +129,6 @@ def disconnect_colab_if_possible() -> None:
 def main() -> None:
     ensure_dependencies()
 
-    # Limpiar bandera previa de apagado si existía
     data_dir = Path("/content/studio_data") if Path("/var/colab").exists() else (ROOT_DIR / "studio_data")
     shutdown_flag = data_dir / "state" / "shutdown_requested.flag"
     if shutdown_flag.exists():
@@ -136,13 +137,31 @@ def main() -> None:
     print("🚀 [2/3] Arrancando servidor Studio IA en proceso limpio...", flush=True)
     env = os.environ.copy()
     env["PORT"] = str(PORT)
+    env["PYTHONUNBUFFERED"] = "1"
+
+    # Capturamos stdout/stderr en un hilo lector hacia print(..., flush=True) para que
+    # Google Colab (ipykernel OutStream) muestre todos los logs en tiempo real en la celda.
     server_proc = subprocess.Popen(
-        [sys.executable, str(ROOT_DIR / "app.py")],
+        [sys.executable, "-u", str(ROOT_DIR / "app.py")],
         cwd=str(ROOT_DIR),
         env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     )
 
-    if not wait_for_local_server(PORT, timeout=35.0):
+    def _stream_server_logs() -> None:
+        assert server_proc.stdout is not None
+        for line in iter(server_proc.stdout.readline, ""):
+            if line:
+                print(line, end="", flush=True)
+
+    log_thread = threading.Thread(target=_stream_server_logs, daemon=True)
+    log_thread.start()
+
+    initial_status = wait_for_local_server(PORT, timeout=35.0)
+    if not initial_status:
         print("❌ El servidor tardó demasiado en responder.", flush=True)
         server_proc.terminate()
         sys.exit(1)
@@ -151,6 +170,11 @@ def main() -> None:
     cf_proc, cf_url = start_cloudflared_tunnel(PORT)
     colab_url = try_colab_proxy_url(PORT)
 
+    hw = initial_status.get("hardware", {})
+    gpu = hw.get("gpu", {})
+    disk = hw.get("disk", {})
+    cred = hw.get("credits", {})
+
     msg_lines = ["✨ STUDIO IA ACTIVO Y LISTO ✨"]
     if cf_url:
         msg_lines.append(f"👉 Abre este enlace (PC o móvil):  {cf_url}")
@@ -158,7 +182,10 @@ def main() -> None:
         msg_lines.append(f"🔹 Enlace alternativo Colab:       {colab_url}")
     if not cf_url and not colab_url:
         msg_lines.append(f"👉 Enlace local:                   http://127.0.0.1:{PORT}")
-    msg_lines.append("💡 Ningún modelo se descarga solo. Elige qué bajar dentro de la app.")
+    msg_lines.append(
+        f"🖥️  Hardware: {gpu.get('gpu_name', 'CPU')} · Disco libre: {disk.get('free_gb', '?')} GB · Tarifa: {cred.get('hourly_rate', 0)} u/h"
+    )
+    msg_lines.append("📡 Debajo verás EN TIEMPO REAL cada descarga (0-100%), carga de modelo y proceso que lances:")
     _print_box(msg_lines)
 
     try:
@@ -171,7 +198,7 @@ def main() -> None:
                     cf_proc.terminate()
                 disconnect_colab_if_possible()
                 return
-            time.sleep(1.0)
+            time.sleep(0.8)
     except KeyboardInterrupt:
         print("\n⏹️ Deteniendo Studio IA...", flush=True)
     finally:

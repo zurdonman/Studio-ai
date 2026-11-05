@@ -2,11 +2,11 @@ import ctypes
 import gc
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import psutil
 
-from studio.hardware import query_gpu_info
+from studio.hardware import colab_console_log, query_gpu_info
 
 
 def flush_ram_and_vram() -> None:
@@ -29,6 +29,56 @@ def flush_ram_and_vram() -> None:
         libc.malloc_trim(0)
     except Exception:
         pass
+
+
+def run_with_live_memory_progress(
+    job: Any,
+    start_pct: float,
+    end_pct: float,
+    step_label: str,
+    fn: Callable[[], Any],
+    expected_seconds: float = 45.0,
+) -> Any:
+    """
+    Ejecuta una operación bloqueante de carga de pesos (ej. from_pretrained) emitiendo
+    en vivo cada 1.5s el porcentaje gradual y el uso real de RAM y VRAM para que tanto
+    la interfaz como la celda de Google Colab muestren actividad continua 0-100%.
+    """
+    if job is None:
+        return fn()
+
+    done = {"flag": False}
+    t0 = time.time()
+
+    def _watcher() -> None:
+        while not done["flag"] and not job.cancel_requested:
+            time.sleep(1.5)
+            if done["flag"]:
+                break
+            elapsed = time.time() - t0
+            # Avance asintótico suave entre start_pct y (end_pct - 1.5)
+            ratio = 1.0 - (1.0 / (1.0 + elapsed / max(5.0, expected_seconds * 0.6)))
+            cur_pct = start_pct + ratio * max(0.0, (end_pct - 1.5) - start_pct)
+            vm = psutil.virtual_memory()
+            ram_gb = (vm.total - vm.available) / (1024**3)
+            gpu = query_gpu_info()
+            mem_txt = (
+                f"RAM {ram_gb:.1f} GB · VRAM {gpu['vram_used_gb']:.1f}/{gpu['vram_total_gb']:.1f} GB"
+                if gpu["has_gpu"]
+                else f"RAM {ram_gb:.1f} GB"
+            )
+            job.heartbeat(
+                progress=round(cur_pct, 1),
+                step=f"{step_label} ({int(elapsed)}s)",
+                speed_text=mem_txt,
+            )
+
+    t = threading.Thread(target=_watcher, daemon=True)
+    t.start()
+    try:
+        return fn()
+    finally:
+        done["flag"] = True
 
 
 class RuntimeMemoryManager:
@@ -117,6 +167,11 @@ class RuntimeMemoryManager:
         after_ram = psutil.virtual_memory().used / (1024**3)
         vram_freed = round(max(0.0, before_gpu["vram_used_gb"] - after_gpu["vram_used_gb"]), 2)
         ram_freed = round(max(0.0, before_ram - after_ram), 2)
+        colab_console_log(
+            f"Liberados de RAM/VRAM: {', '.join(removed_names) or 'caché'} "
+            f"(-{vram_freed} GB VRAM, -{ram_freed} GB RAM). Archivos en disco intactos.",
+            icon="🧹",
+        )
 
         return {
             "unloaded": removed_names,
@@ -159,10 +214,16 @@ class RuntimeMemoryManager:
 
         after_gpu = query_gpu_info()
         after_ram = psutil.virtual_memory().used / (1024**3)
+        v_freed = round(max(0.0, before_gpu["vram_used_gb"] - after_gpu["vram_used_gb"]), 2)
+        r_freed = round(max(0.0, before_ram - after_ram), 2)
+        colab_console_log(
+            f"Memoria global limpiada ({', '.join(names) or 'caché'}): -{v_freed} GB VRAM, -{r_freed} GB RAM.",
+            icon="🧹",
+        )
         return {
             "unloaded": names,
-            "vram_freed_gb": round(max(0.0, before_gpu["vram_used_gb"] - after_gpu["vram_used_gb"]), 2),
-            "ram_freed_gb": round(max(0.0, before_ram - after_ram), 2),
+            "vram_freed_gb": v_freed,
+            "ram_freed_gb": r_freed,
             "vram_used_now_gb": after_gpu["vram_used_gb"],
         }
 

@@ -251,3 +251,32 @@ def test_full_upload_bt709_video_clip_montage_and_zip_export(temp_studio_env):
     assert any(n.startswith("imagenes/") and n.endswith(".jpg") for n in names)
     assert any(n.startswith("videos/") and n.endswith(".mp4") for n in names)
     assert any(n.startswith("montajes_mp4/") and n.endswith(".mp4") for n in names)
+
+
+def test_l4_rate_is_192_and_realtime_colab_stdout_logs(capsys):
+    from studio.hardware import GPU_RATES_DEFAULT
+    from studio.jobs import JobRecord
+    from studio.memory_manager import run_with_live_memory_progress
+
+    assert GPU_RATES_DEFAULT["L4"] == 1.92
+
+    job = JobRecord(kind="load_model", title="Preparar Qwen + Lightning")
+    job.log("Descargando archivo 1/5...", progress=25.0, step="[1/5] model.safetensors")
+    job.heartbeat(progress=32.5, step="[1/5] model.safetensors (3.9 / 12.2 GB)", speed_text="120.4 MB/s")
+
+    out_val = run_with_live_memory_progress(
+        job=job,
+        start_pct=70.0,
+        end_pct=90.0,
+        step_label="Cargando tensores 4-bit",
+        fn=lambda: (time.sleep(1.7) or "ok"),
+        expected_seconds=10.0,
+    )
+    assert out_val == "ok"
+    assert job.progress > 70.0
+
+    captured = capsys.readouterr().out
+    assert "25.0%" in captured
+    assert "32.5%" in captured
+    assert "120.4 MB/s" in captured
+

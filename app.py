@@ -46,7 +46,7 @@ from studio.engines.video_engine import (
     generate_video_clip,
     load_video_model_into_memory,
 )
-from studio.hardware import hardware_tracker, request_colab_shutdown
+from studio.hardware import colab_console_log, hardware_tracker, request_colab_shutdown
 from studio.jobs import job_manager
 from studio.memory_manager import memory_manager
 
@@ -80,6 +80,7 @@ _export_tracker = {"last_export_ts": 0.0}
 class CreditsConfigReq(BaseModel):
     initial_credits: Optional[float] = None
     hourly_rate: Optional[float] = None
+    use_auto_gpu_rate: bool = False
     reset_session_spent: bool = False
     idle_alert_minutes: Optional[int] = None
 
@@ -304,6 +305,7 @@ def api_update_credits(req: CreditsConfigReq) -> Dict[str, Any]:
     snap = hardware_tracker.update_credits_config(
         initial_credits=req.initial_credits,
         hourly_rate=req.hourly_rate,
+        use_auto_gpu_rate=req.use_auto_gpu_rate,
         reset_session_spent=req.reset_session_spent,
         idle_alert_minutes=req.idle_alert_minutes,
     )
@@ -333,6 +335,7 @@ def api_add_custom_model(req: CustomModelReq) -> Dict[str, Any]:
             estimated_gb=req.estimated_gb,
             adapter_name=req.adapter_name,
         )
+        colab_console_log(f"Añadido al catálogo desde HF: {entry['name']} ({req.repo_id})", icon="➕")
         return {"ok": True, "model": entry}
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve)) from ve
@@ -522,6 +525,10 @@ async def api_upload_asset(file: UploadFile = File(...)) -> Dict[str, Any]:
         }
 
     hardware_tracker.mark_activity()
+    colab_console_log(
+        f"Archivo subido desde la app: {out_name} ({round(len(content) / 1024, 1)} KB, tipo={extra['type']})",
+        icon="📥",
+    )
     return {
         "ok": True,
         "asset": {
@@ -780,6 +787,7 @@ def api_export_zip() -> StreamingResponse:
                     zf.write(fp, arcname=f"{sub_name}/{fp.name}")
     buf.seek(0)
     _export_tracker["last_export_ts"] = time.time()
+    colab_console_log("Archivo .zip de resultados empaquetado y enviado al navegador.", icon="📦")
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     headers = {"Content-Disposition": f'attachment; filename="studio_ia_resultados_{stamp}.zip"'}
     return StreamingResponse(buf, media_type="application/zip", headers=headers)
@@ -796,4 +804,5 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("PORT", "7860"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    colab_console_log(f"Servidor FastAPI Studio IA escuchando en puerto {port}.", icon="🟢")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning", access_log=False)

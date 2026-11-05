@@ -56,6 +56,27 @@
     </div>
   </header>
 
+  <!-- BARRA GLOBAL DE PROCESO EN VIVO (0-100% SIEMPRE VISIBLE EN CUALQUIER PANTALLA) -->
+  <div id="global-job-strip" class="global-job-strip" hidden>
+    <div class="gjs-row">
+      <div class="gjs-left">
+        <span class="pulse-ring"></span>
+        <strong id="gjs-title">Ejecutando proceso...</strong>
+        <span class="gjs-step" id="gjs-step">Iniciando...</span>
+      </div>
+      <div class="gjs-right">
+        <span class="gjs-speed" id="gjs-speed"></span>
+        <span class="gjs-elapsed" id="gjs-elapsed">0.0s</span>
+        <span class="gjs-pct" id="gjs-pct">0%</span>
+        <button class="btn btn-sm btn-danger" id="btn-gjs-cancel">Cancelar</button>
+      </div>
+    </div>
+    <div class="progress-track gjs-track">
+      <div class="progress-fill" id="gjs-bar" style="width:0%"></div>
+    </div>
+    <div class="gjs-lastlog" id="gjs-lastlog"></div>
+  </div>
+
   <!-- BANNERS DE AVISO (CUELGUE / INACTIVIDAD / ESPACIO) -->
   <div id="alerts-area" class="alerts-area">
     <div id="hang-banner" class="alert-banner alert-danger" hidden>
@@ -120,6 +141,16 @@
             <button class="btn btn-ghost btn-sm" id="btn-unload-image">
               🧹 Sacar de RAM/VRAM
             </button>
+          </div>
+          <!-- Progreso 0-100% directo al descargar o cargar el modelo de imagen -->
+          <div id="img-inline-progress" class="inline-engine-progress" hidden>
+            <div class="iep-top">
+              <span id="img-iep-step">Preparando...</span>
+              <span id="img-iep-meta">0%</span>
+            </div>
+            <div class="progress-track">
+              <div class="progress-fill" id="img-iep-bar" style="width:0%"></div>
+            </div>
           </div>
         </div>
 
@@ -323,6 +354,15 @@
             <button class="btn btn-ghost btn-sm" id="btn-unload-video">
               🧹 Sacar de RAM/VRAM
             </button>
+          </div>
+          <div id="vid-inline-progress" class="inline-engine-progress" hidden>
+            <div class="iep-top">
+              <span id="vid-iep-step">Preparando...</span>
+              <span id="vid-iep-meta">0%</span>
+            </div>
+            <div class="progress-track">
+              <div class="progress-fill" id="vid-iep-bar" style="width:0%"></div>
+            </div>
           </div>
         </div>
 
@@ -691,8 +731,11 @@
         </div>
         <div>
           <label class="field-label">Consumo por hora de esta GPU (unidades / hora)</label>
-          <input type="number" id="cfg-hourly-rate" step="0.05" min="0" value="4.82" />
-          <small class="muted">Referencia aprox.: T4 ~1.17 u/h · L4 ~4.82 u/h · A100 ~11.77 u/h · CPU 0 u/h</small>
+          <div class="row-gap">
+            <input type="number" id="cfg-hourly-rate" step="0.01" min="0" value="1.92" />
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-auto-gpu-rate" title="Restaurar tarifa oficial detectada para esta GPU">Auto GPU</button>
+          </div>
+          <small class="muted">Tarifas Google Colab: L4 = 1.92 u/h · T4 ~1.17 u/h · V100 ~3.90 u/h · A100 ~5.37 u/h · CPU = 0 u/h</small>
         </div>
         <div>
           <label class="field-label">Avisar por inactividad tras (minutos sin generar)</label>

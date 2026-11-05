@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from studio.hardware import hardware_tracker
+from studio.hardware import colab_console_log, hardware_tracker
 
 HANG_THRESHOLD_SECONDS = 30.0
 
@@ -29,12 +29,14 @@ class JobRecord:
         self.started_ts: Optional[float] = None
         self.finished_ts: Optional[float] = None
         self.last_heartbeat_ts: float = now
+        self._last_console_hb_ts: float = 0.0
+        self._last_console_hb_pct: float = -10.0
         self.logs: List[Dict[str, Any]] = []
         self.result: Optional[Dict[str, Any]] = None
         self.error: Optional[str] = None
         self.cancel_requested: bool = False
         self._lock = threading.Lock()
-        self.log(f"Trabajo creado: {title}")
+        self.log(f"En cola: {title}", emit_console=False)
 
     def log(
         self,
@@ -43,6 +45,7 @@ class JobRecord:
         progress: Optional[float] = None,
         step: Optional[str] = None,
         speed_text: Optional[str] = None,
+        emit_console: bool = True,
     ) -> None:
         now = time.time()
         t_str = datetime.fromtimestamp(now).strftime("%H:%M:%S")
@@ -54,6 +57,9 @@ class JobRecord:
                 self.current_step = step
             if speed_text is not None:
                 self.speed_text = speed_text
+            cur_pct = self.progress
+            self._last_console_hb_ts = now
+            self._last_console_hb_pct = cur_pct
             self.logs.append(
                 {
                     "ts": round(now, 2),
@@ -62,9 +68,19 @@ class JobRecord:
                     "message": message,
                 }
             )
-            if len(self.logs) > 500:
-                self.logs = self.logs[-500:]
+            if len(self.logs) > 600:
+                self.logs = self.logs[-600:]
+
         hardware_tracker.mark_activity()
+        if emit_console:
+            icon_map = {
+                "info": "🔹",
+                "success": "✅",
+                "warning": "⚠️",
+                "error": "❌",
+            }
+            icon = icon_map.get(level, "🔹")
+            colab_console_log(f"[{cur_pct:5.1f}%] {message}", icon=icon)
 
     def heartbeat(
         self,
@@ -72,8 +88,9 @@ class JobRecord:
         step: Optional[str] = None,
         speed_text: Optional[str] = None,
     ) -> None:
-        """Actualiza progreso/velocidad sin saturar de líneas el registro."""
+        """Actualiza porcentaje y velocidad en vivo y refleja avances periódicos en la celda de Colab."""
         now = time.time()
+        should_print = False
         with self._lock:
             self.last_heartbeat_ts = now
             if progress is not None:
@@ -82,7 +99,20 @@ class JobRecord:
                 self.current_step = step
             if speed_text is not None:
                 self.speed_text = speed_text
+
+            cur_pct = self.progress
+            cur_step = self.current_step
+            cur_spd = self.speed_text
+
+            if (now - self._last_console_hb_ts >= 2.5) or (abs(cur_pct - self._last_console_hb_pct) >= 5.0):
+                self._last_console_hb_ts = now
+                self._last_console_hb_pct = cur_pct
+                should_print = True
+
         hardware_tracker.mark_activity()
+        if should_print:
+            extra = f" · {cur_spd}" if cur_spd else ""
+            colab_console_log(f"[{cur_pct:5.1f}%] {cur_step}{extra}", icon="⏳")
 
     def check_cancelled(self) -> None:
         if self.cancel_requested:
@@ -161,19 +191,21 @@ class JobManager:
         def _runner() -> None:
             job.status = "running"
             job.started_ts = time.time()
-            job.log("Iniciando ejecución...", progress=1.0, step="Iniciando...")
+            colab_console_log(f"═══ INICIO DE TAREA ({job.id}): {title} ═══", icon="🚀")
+            job.log(f"Iniciando: {title}", progress=1.0, step="Iniciando...", emit_console=False)
             try:
                 res = fn(job)
                 job.check_cancelled()
                 job.result = res or {}
                 job.status = "completed"
                 job.finished_ts = time.time()
-                job.speed_text = ""
+                dt = round(job.finished_ts - (job.started_ts or job.finished_ts), 1)
+                job.speed_text = f"Completado en {dt}s"
                 job.log(
-                    "Proceso completado y verificado correctamente.",
+                    f"Completado y verificado en {dt}s: {title}",
                     level="success",
                     progress=100.0,
-                    step="Completado",
+                    step="Completado (100%)",
                 )
             except JobCancelledError as ce:
                 job.status = "cancelled"
@@ -187,7 +219,7 @@ class JobManager:
                 job.error = str(exc)
                 job.speed_text = ""
                 tb_last = traceback.format_exc().strip().splitlines()[-4:]
-                job.log(f"Error: {exc}", level="error", step="Error")
+                job.log(f"Error en «{title}»: {exc}", level="error", step="Error")
                 for ln in tb_last:
                     job.log(ln, level="error")
 
@@ -208,7 +240,7 @@ class JobManager:
             job.finished_ts = time.time()
             job.log("Cancelado antes de iniciar.", level="warning", step="Cancelado")
         else:
-            job.log("Solicitud de cancelación enviada...", level="warning")
+            job.log("Solicitud de cancelación enviada por el usuario...", level="warning")
         return job
 
     def list_jobs(self, limit: int = 30, include_logs: bool = True) -> List[Dict[str, Any]]:

@@ -16,8 +16,25 @@ from studio.engines.ffmpeg_utils import (
     process_pil_bt709,
     verify_image_file,
 )
+from studio.hardware import query_gpu_info
 from studio.jobs import JobRecord
-from studio.memory_manager import flush_ram_and_vram, memory_manager
+from studio.memory_manager import (
+    flush_ram_and_vram,
+    memory_manager,
+    run_with_live_memory_progress,
+)
+
+
+def _safe_load_lora(pipe: Any, lora_dir: Path, filename: Optional[str], adapter_name: str) -> None:
+    if filename:
+        file_path = lora_dir / filename
+        try:
+            pipe.load_lora_weights(str(lora_dir), weight_name=filename, adapter_name=adapter_name)
+            return
+        except Exception:
+            pipe.load_lora_weights(str(file_path), adapter_name=adapter_name)
+            return
+    pipe.load_lora_weights(str(lora_dir), adapter_name=adapter_name)
 
 
 def load_image_model_into_memory(
@@ -26,20 +43,10 @@ def load_image_model_into_memory(
     auto_download: bool = False,
     job: Optional[JobRecord] = None,
 ) -> Dict[str, Any]:
-    """Carga Qwen-Image-Edit 2511 (4-bit) + LoRA Lightning 4 pasos (+ LoRAs opcionales) en RAM/VRAM."""
+    """Carga Qwen-Image-Edit 2511 (4-bit) + LoRA Lightning 4 pasos (+ LoRAs opcionales) con progreso continuo 0-100%."""
     defn = catalog_manager.get_definition(model_id)
     if not defn:
         raise ValueError(f"Modelo de imagen no encontrado: {model_id}")
-
-    if not catalog_manager.is_downloaded(model_id):
-        if auto_download and job is not None:
-            job.log("El pack no está en disco todavía. Iniciando descarga automática...", step="Descargando modelo...")
-            catalog_manager.download_model(model_id, job)
-        else:
-            raise RuntimeError(
-                f"«{defn['name']}» aún no está descargado en disco. "
-                "Pulsa «Descargar + Cargar» o descárgalo primero desde el catálogo."
-            )
 
     try:
         import torch  # type: ignore
@@ -53,8 +60,35 @@ def load_image_model_into_memory(
     if not torch.cuda.is_available():
         raise RuntimeError(
             "No se detectó GPU NVIDIA activa en este entorno (estás en modo CPU). "
-            "Abre el cuaderno en Google Colab con GPU (T4, L4 o A100) para cargar Qwen 4-bit."
+            "Activa una GPU en Google Colab (T4, L4 o A100) para cargar Qwen 4-bit."
         )
+
+    was_downloaded = catalog_manager.is_downloaded(model_id)
+    if not was_downloaded:
+        if auto_download and job is not None:
+            job.log(
+                "Fase 1/2: El pack aún no está en disco. Descargando de Hugging Face (0% → 70%)...",
+                progress=1.0,
+                step="Fase 1/2: Iniciando descarga HF...",
+            )
+            catalog_manager.download_model(model_id, job, progress_range=(1.0, 70.0))
+            load_p_start = 70.0
+        else:
+            raise RuntimeError(
+                f"«{defn['name']}» aún no está descargado en disco. "
+                "Pulsa «Preparar Qwen + Lightning» o «Descargar + Cargar»."
+            )
+    else:
+        load_p_start = 4.0
+        if job:
+            job.log(
+                "Archivos ya verificados en disco. Iniciando carga directa en RAM y VRAM...",
+                progress=load_p_start,
+                step="Verificando memoria GPU...",
+            )
+
+    def _map_load_pct(frac: float) -> float:
+        return round(load_p_start + frac * (100.0 - load_p_start), 1)
 
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -64,7 +98,7 @@ def load_image_model_into_memory(
         if job:
             job.log(
                 f"Liberando modelo de vídeo «{vid_slot['name']}» de VRAM antes de cargar imagen...",
-                progress=8.0,
+                progress=_map_load_pct(0.06),
                 step="Liberando VRAM previa...",
             )
         memory_manager.unload_slot("video")
@@ -74,34 +108,60 @@ def load_image_model_into_memory(
     m_dir = catalog_manager.model_dir(model_id)
     base_dir = m_dir / "base"
     if not base_dir.exists():
-        # Modelos custom tienen subdir 'custom'
         base_dir = m_dir / defn["artifacts"][0]["subdir"]
 
+    p_pre_start = _map_load_pct(0.10)
+    p_pre_end = _map_load_pct(0.68)
     if job:
         job.log(
-            f"Cargando pipeline base QwenImageEditPlusPipeline (4-bit bfloat16) desde {base_dir}...",
-            progress=18.0,
-            step="Cargando modelo base 4-bit...",
+            f"Cargando pesos 4-bit de QwenImageEditPlusPipeline desde disco a RAM/VRAM...",
+            progress=p_pre_start,
+            step="Cargando pesos 4-bit en memoria...",
         )
 
-    pipe = QwenImageEditPlusPipeline.from_pretrained(
-        str(base_dir),
-        torch_dtype=torch.bfloat16,
+    pipe = run_with_live_memory_progress(
+        job=job,
+        start_pct=p_pre_start,
+        end_pct=p_pre_end,
+        step_label="Cargando tensores Qwen 4-bit",
+        fn=lambda: QwenImageEditPlusPipeline.from_pretrained(
+            str(base_dir),
+            torch_dtype=torch.bfloat16,
+        ),
+        expected_seconds=50.0,
     )
 
     if job:
-        job.log("Activando CPU Offload inteligente en GPU...", progress=55.0, step="Activando CPU Offload...")
+        job.log(
+            "Activando CPU Offload inteligente para optimizar VRAM...",
+            progress=_map_load_pct(0.72),
+            step="Activando CPU Offload...",
+        )
     pipe.enable_model_cpu_offload()
 
     loaded_adapters: Dict[str, str] = {}
 
     # Cargar LoRA Lightning 4 pasos incluido en el pack
     lightning_dir = m_dir / "lora_lightning"
-    lightning_file = lightning_dir / "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+    lightning_name = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+    lightning_file = lightning_dir / lightning_name
     if lightning_file.exists():
+        p_l_start = _map_load_pct(0.76)
+        p_l_end = _map_load_pct(0.90)
         if job:
-            job.log("Cargando LoRA Lightning (aceleración 4 pasos)...", progress=74.0, step="Cargando LoRA Lightning...")
-        pipe.load_lora_weights(str(lightning_file), adapter_name="lightning")
+            job.log(
+                "Integrando LoRA Lightning (aceleración 4 pasos)...",
+                progress=p_l_start,
+                step="Cargando LoRA Lightning...",
+            )
+        run_with_live_memory_progress(
+            job=job,
+            start_pct=p_l_start,
+            end_pct=p_l_end,
+            step_label="Fusionando LoRA Lightning",
+            fn=lambda: _safe_load_lora(pipe, lightning_dir, lightning_name, "lightning"),
+            expected_seconds=12.0,
+        )
         loaded_adapters["lightning"] = model_id
 
     # Cargar LoRAs adicionales descargados (ej. qwen-lora-nsfw o LoRAs custom de HF)
@@ -116,12 +176,16 @@ def load_image_model_into_memory(
             continue
         art = ldef["artifacts"][0]
         l_sub = catalog_manager.model_dir(lid) / art["subdir"]
-        l_path = (l_sub / art["filename"]) if art.get("filename") else l_sub
+        l_fn = art.get("filename")
         adapter_name = ldef.get("adapter_name") or lid
         try:
             if job:
-                job.log(f"Cargando LoRA opcional «{ldef['name']}»...", progress=86.0, step=f"Cargando {adapter_name}...")
-            pipe.load_lora_weights(str(l_path), adapter_name=adapter_name)
+                job.log(
+                    f"Cargando LoRA opcional «{ldef['name']}»...",
+                    progress=_map_load_pct(0.93),
+                    step=f"Cargando {adapter_name}...",
+                )
+            _safe_load_lora(pipe, l_sub, l_fn, adapter_name)
             loaded_adapters[adapter_name] = lid
         except Exception as e:
             if job:
@@ -131,7 +195,8 @@ def load_image_model_into_memory(
         default_active = ["lightning"] if "lightning" in loaded_adapters else list(loaded_adapters.keys())[:1]
         pipe.set_adapters(default_active, adapter_weights=[1.0] * len(default_active))
 
-    vram_gb = round(torch.cuda.memory_allocated(0) / (1024**3), 2)
+    gpu_now = query_gpu_info()
+    vram_gb = gpu_now["vram_used_gb"]
     memory_manager.register_loaded(
         slot="image",
         model_id=model_id,
@@ -142,10 +207,10 @@ def load_image_model_into_memory(
 
     if job:
         job.log(
-            f"Modelo de imagen + LoRAs listos ({', '.join(loaded_adapters.keys()) or 'base'}). VRAM activa: {vram_gb} GB.",
+            f"Qwen + LoRAs listos ({', '.join(loaded_adapters.keys()) or 'base'}). VRAM en uso: {vram_gb} GB.",
             level="success",
             progress=100.0,
-            step="Modelo cargado en RAM/VRAM",
+            step="Modelo listo en RAM/VRAM (100%)",
         )
     return {
         "model_id": model_id,

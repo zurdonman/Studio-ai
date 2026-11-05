@@ -20,7 +20,11 @@ from studio.engines.ffmpeg_utils import (
 )
 from studio.hardware import query_gpu_info
 from studio.jobs import JobRecord
-from studio.memory_manager import flush_ram_and_vram, memory_manager
+from studio.memory_manager import (
+    flush_ram_and_vram,
+    memory_manager,
+    run_with_live_memory_progress,
+)
 
 
 def load_video_model_into_memory(
@@ -28,19 +32,10 @@ def load_video_model_into_memory(
     auto_download: bool = False,
     job: Optional[JobRecord] = None,
 ) -> Dict[str, Any]:
-    """Carga un modelo de vídeo del catálogo (Wan 2.2 TI2V, Wan 2.2 S2V, LTX-Video) en RAM/VRAM."""
+    """Carga un modelo de vídeo del catálogo (Wan 2.2 TI2V, Wan 2.2 S2V, LTX-Video) con progreso 0-100%."""
     defn = catalog_manager.get_definition(model_id)
     if not defn:
         raise ValueError(f"Modelo de vídeo desconocido: {model_id}")
-
-    if not catalog_manager.is_downloaded(model_id):
-        if auto_download and job is not None:
-            job.log("El modelo de vídeo no está en disco. Descargando primero...", step="Descargando modelo de vídeo...")
-            catalog_manager.download_model(model_id, job)
-        else:
-            raise RuntimeError(
-                f"«{defn['name']}» no está descargado todavía. Descárgalo desde el catálogo o pulsa «Descargar + Cargar»."
-            )
 
     try:
         import torch  # type: ignore
@@ -56,6 +51,31 @@ def load_video_model_into_memory(
             "Para animar sin GPU puedes usar «Clip con Movimiento FFmpeg (CPU)», o abrir en Google Colab con GPU."
         )
 
+    if not catalog_manager.is_downloaded(model_id):
+        if auto_download and job is not None:
+            job.log(
+                "Fase 1/2: El modelo de vídeo aún no está en disco. Descargando de Hugging Face (0% → 72%)...",
+                progress=1.0,
+                step="Fase 1/2: Descargando modelo de vídeo...",
+            )
+            catalog_manager.download_model(model_id, job, progress_range=(1.0, 72.0))
+            load_p_start = 72.0
+        else:
+            raise RuntimeError(
+                f"«{defn['name']}» no está descargado todavía. Descárgalo desde el catálogo o pulsa «Preparar Modelo»."
+            )
+    else:
+        load_p_start = 4.0
+        if job:
+            job.log(
+                "Archivos de vídeo ya en disco. Cargando en RAM y VRAM...",
+                progress=load_p_start,
+                step="Preparando memoria de vídeo...",
+            )
+
+    def _map_pct(frac: float) -> float:
+        return round(load_p_start + frac * (100.0 - load_p_start), 1)
+
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     # Liberar modelo de imagen previo de VRAM para dejar sitio limpio al modelo de vídeo
@@ -64,7 +84,7 @@ def load_video_model_into_memory(
         if job:
             job.log(
                 f"Liberando «{img_slot['name']}» de RAM/VRAM (sus archivos siguen en disco)...",
-                progress=10.0,
+                progress=_map_pct(0.08),
                 step="Liberando VRAM de imagen...",
             )
         memory_manager.unload_slot("image")
@@ -74,16 +94,25 @@ def load_video_model_into_memory(
     art = defn["artifacts"][0]
     base_dir = catalog_manager.model_dir(model_id) / art["subdir"]
 
+    p_s = _map_pct(0.15)
+    p_e = _map_pct(0.80)
     if job:
         job.log(
             f"Cargando pipeline de vídeo «{defn['name']}» en bfloat16...",
-            progress=25.0,
-            step="Cargando pesos de vídeo...",
+            progress=p_s,
+            step="Cargando tensores de vídeo...",
         )
 
-    pipe = DiffusionPipeline.from_pretrained(
-        str(base_dir),
-        torch_dtype=torch.bfloat16,
+    pipe = run_with_live_memory_progress(
+        job=job,
+        start_pct=p_s,
+        end_pct=p_e,
+        step_label=f"Cargando {defn['name']}",
+        fn=lambda: DiffusionPipeline.from_pretrained(
+            str(base_dir),
+            torch_dtype=torch.bfloat16,
+        ),
+        expected_seconds=55.0,
     )
 
     gpu_info = query_gpu_info()
@@ -94,13 +123,13 @@ def load_video_model_into_memory(
         if job:
             job.log(
                 f"Activando Sequential CPU Offload para encajar en {vram_total:.1f} GB VRAM...",
-                progress=75.0,
+                progress=_map_pct(0.88),
                 step="Activando Sequential Offload...",
             )
         pipe.enable_sequential_cpu_offload()
     elif hasattr(pipe, "enable_model_cpu_offload"):
         if job:
-            job.log("Activando Model CPU Offload...", progress=75.0, step="Activando CPU Offload...")
+            job.log("Activando Model CPU Offload...", progress=_map_pct(0.88), step="Activando CPU Offload...")
         pipe.enable_model_cpu_offload()
     else:
         pipe.to("cuda")
@@ -108,7 +137,7 @@ def load_video_model_into_memory(
     if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
         pipe.vae.enable_tiling()
 
-    vram_gb = round(torch.cuda.memory_allocated(0) / (1024**3), 2)
+    vram_gb = query_gpu_info()["vram_used_gb"]
     memory_manager.register_loaded(
         slot="video",
         model_id=model_id,
