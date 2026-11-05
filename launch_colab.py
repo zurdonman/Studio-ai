@@ -235,10 +235,17 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n⏹️ Deteniendo Studio IA...", flush=True)
     finally:
-        if server_proc.poll() is None:
-            server_proc.terminate()
-        if cf_proc and cf_proc.poll() is None:
-            cf_proc.terminate()
+        try:
+            if server_proc.poll() is None:
+                server_proc.terminate()
+        except BaseException:
+            pass
+        try:
+            if cf_proc and cf_proc.poll() is None:
+                cf_proc.terminate()
+        except BaseException:
+            pass
+        print("✅ Servidor Studio IA detenido limpiamente.", flush=True)
 
 
 if __name__ == "__main__":

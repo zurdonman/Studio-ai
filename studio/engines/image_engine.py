@@ -70,11 +70,13 @@ def load_image_model_into_memory(
     if not defn:
         raise ValueError(f"Modelo de imagen no encontrado: {model_id}")
 
-    # Comprobar qué LoRAs están hoy descargados en disco
+    # Comprobar qué LoRAs de imagen están hoy descargados en disco
     downloaded_loras = {
         item["id"]
         for item in catalog_manager.get_all_definitions()
-        if item["category"] == "lora" and catalog_manager.is_downloaded(item["id"])
+        if item["category"] == "lora"
+        and item.get("lora_target", "image") == "image"
+        and catalog_manager.is_downloaded(item["id"])
     }
     if extra_lora_ids:
         downloaded_loras.update(lid for lid in extra_lora_ids if catalog_manager.is_downloaded(lid))

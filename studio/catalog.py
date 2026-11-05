@@ -261,13 +261,116 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             }
         ],
     },
+    # ==================== LoRAs ACELERADORES DE VÍDEO ====================
+    {
+        "id": "lora-wan22-ti2v-5b-turbo",
+        "name": "⚡ LoRA Turbo 4–6 Pasos para Wan 2.2 TI2V-5B (Self-Forcing · ×12 más rápido)",
+        "category": "lora",
+        "lora_target": "video",
+        "compatible_models": ["wan22-ti2v-5b"],
+        "recommended_steps": 6,
+        "min_safe_steps": 4,
+        "max_steps": 8,
+        "recommended_cfg": 1.0,
+        "default_lora_scale": 1.0,
+        "is_default": False,
+        "parent_model": "wan22-ti2v-5b",
+        "adapter_name": "wan22_5b_turbo",
+        "badge": "⚡ Vídeo ×12 más rápido · 332 MB",
+        "description": (
+            "LoRA de destilación Self-Forcing para Wan 2.2 TI2V-5B (solo 332 MB). "
+            "Baja de 45 pasos (~18 min) a solo 4–6 pasos con CFG 1.0 (~1.2 min en L4) sobre el modelo que ya tienes descargado."
+        ),
+        "estimated_gb": 0.33,
+        "min_vram_gb": 0.4,
+        "recommended_vram_gb": 1.0,
+        "l4_seconds_hint": "~1.2 min (6 pasos @ CFG 1.0)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Kijai/WanVideo_comfy",
+                "subdir": "lora_turbo",
+                "filename": "LoRAs/Wan22-Turbo/Wan22_TI2V_5B_Turbo_lora_rank_64_fp16.safetensors",
+                "verify_file": "LoRAs/Wan22-Turbo/Wan22_TI2V_5B_Turbo_lora_rank_64_fp16.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-wan22-ti2v-5b-fastwan",
+        "name": "🚀 LoRA FastWan 6 Pasos para Wan 2.2 TI2V-5B (Hao AI Lab DMD · Fidelidad Foto)",
+        "category": "lora",
+        "lora_target": "video",
+        "compatible_models": ["wan22-ti2v-5b"],
+        "recommended_steps": 6,
+        "min_safe_steps": 4,
+        "max_steps": 8,
+        "recommended_cfg": 1.0,
+        "default_lora_scale": 0.75,
+        "is_default": False,
+        "parent_model": "wan22-ti2v-5b",
+        "adapter_name": "wan22_5b_fastwan",
+        "badge": "🚀 FastWan DMD · 661 MB",
+        "description": (
+            "LoRA FastWan DMD oficial extraído de FastVideo (Hao AI Lab, 661 MB) para Wan 2.2 TI2V-5B. "
+            "Genera en 6 pasos con CFG 1.0 y escala 0.75 manteniendo máxima fidelidad a la imagen inicial."
+        ),
+        "estimated_gb": 0.66,
+        "min_vram_gb": 0.6,
+        "recommended_vram_gb": 1.2,
+        "l4_seconds_hint": "~1.2 min (6 pasos @ CFG 1.0)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Kijai/WanVideo_comfy",
+                "subdir": "lora_fastwan",
+                "filename": "FastWan/Wan2_2_5B_FastWanFullAttn_lora_rank_128_bf16.safetensors",
+                "verify_file": "FastWan/Wan2_2_5B_FastWanFullAttn_lora_rank_128_bf16.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-wan21-1.3b-rcm-turbo",
+        "name": "⚡ LoRA rCM Turbo 6 Pasos para Wan 2.1 1.3B / VACE (Frame a Frame Rápido)",
+        "category": "lora",
+        "lora_target": "video",
+        "compatible_models": ["wan21-vace-1.3b", "wan21-t2v-1.3b"],
+        "recommended_steps": 6,
+        "min_safe_steps": 4,
+        "max_steps": 8,
+        "recommended_cfg": 1.0,
+        "default_lora_scale": 0.85,
+        "is_default": False,
+        "parent_model": "wan21-vace-1.3b",
+        "adapter_name": "wan21_1_3b_rcm",
+        "badge": "⚡ Frame a Frame ×6 más rápido · 187 MB",
+        "description": (
+            "LoRA acelerador rCM (187 MB) para Wan 2.1 1.3B y Wan 2.1 VACE 1.3B: "
+            "reduce de 40 pasos a solo 6 pasos con CFG 1.0."
+        ),
+        "estimated_gb": 0.19,
+        "min_vram_gb": 0.3,
+        "recommended_vram_gb": 0.8,
+        "l4_seconds_hint": "~25–35 s (6 pasos)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Kijai/WanVideo_comfy",
+                "subdir": "lora_rcm",
+                "filename": "LoRAs/rCM/Wan_2_1_T2V_1_3B_480p_rCM_lora_average_rank_64_bf16.safetensors",
+                "verify_file": "LoRAs/rCM/Wan_2_1_T2V_1_3B_480p_rCM_lora_average_rank_64_bf16.safetensors",
+            }
+        ],
+    },
     # ==================== VÍDEO ====================
     {
         "id": "wan22-ti2v-5b",
         "name": "Wan 2.2 TI2V-5B HD 720P (Imagen + Texto a Vídeo · 24 fps)",
         "category": "video",
         "is_default": True,
-        "badge": "Calidad HD 720P ★ · I2V + T2V",
+        "badge": "Calidad HD 720P ★ · Admite LoRA Turbo ×12",
         "video_modes": ["i2v", "t2v"],
         "default_fps": 24,
         "default_steps": 45,
@@ -285,24 +388,76 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "default_duration_sec": 5.0,
             "default_fps": 24,
             "default_steps": 45,
+            "fast_safe_steps": 28,
+            "min_safe_steps": 22,
             "default_cfg": 5.0,
             "flow_shift": 5.0,
             "prompt_lang": "es_en",
-            "official_note": "720P obligatorio (1280×704 / 704×1280, VAE 16×16) · 5 s (121 frames @ 24 fps) · 45–50 pasos · CFG 5.0 · Entiende Español e Inglés",
+            "official_note": "720P nativo (1280×704 / 704×1280) · 5 s (121 frames @ 24 fps) · 45 pasos oficiales (28–32 rápido seguro · 6 pasos con LoRA Turbo)",
         },
         "description": (
-            "Modelo híbrido 720P@24fps de Alibaba Wan 2.2 (VAE alta compresión 16×16×4). "
-            "IMPORTANTE: trabaja en su resolución nativa 1280×704 / 704×1280, 5 s (121 fotogramas) y 45–50 pasos para máxima nitidez sin alucinaciones."
+            "Modelo híbrido 720P@24fps de Alibaba Wan 2.2. En calidad máxima oficial (45 pasos) tarda ~18 min en L4; "
+            "puedes bajar a 28–32 pasos sin deformar (~11 min) o activar su LoRA Turbo (332 MB) para generarlo en ~1.2 min (6 pasos)."
         ),
         "estimated_gb": 31.9,
         "min_vram_gb": 13.5,
         "recommended_vram_gb": 19.5,
-        "l4_seconds_hint": "3.5–5 min / clip 720p",
+        "l4_seconds_hint": "~18 min (45p) · ~1.2 min con LoRA Turbo",
         "engine": "wan_ti2v",
         "artifacts": [
             {
                 "role": "base",
                 "repo_id": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "wan22-ti2v-5b-turbo",
+        "name": "Wan 2.2 TI2V-5B TURBO 4 Pasos (720P Ya Destilado · 22.8 GB)",
+        "category": "video",
+        "is_default": False,
+        "badge": "⚡ 4 Pasos de Fábrica · 22.8 GB",
+        "video_modes": ["i2v", "t2v"],
+        "default_fps": 24,
+        "default_steps": 4,
+        "default_cfg": 1.0,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [1280, 704],
+            "portrait": [704, 1280],
+            "square": [960, 960],
+            "max_area": 704 * 1280,
+            "min_area": 640 * 960,
+            "mod_value": 32,
+            "frame_rule": "4k+1",
+            "default_frames": 121,
+            "default_duration_sec": 5.0,
+            "default_fps": 24,
+            "default_steps": 4,
+            "fast_safe_steps": 4,
+            "min_safe_steps": 4,
+            "default_cfg": 1.0,
+            "flow_shift": 5.0,
+            "prompt_lang": "es_en",
+            "official_note": "Versión destilada 4 pasos @ CFG 1.0 · 720P (1280×704 / 704×1280) · 5 s (121 frames @ 24 fps) · ~1 min en L4",
+        },
+        "description": (
+            "Edición completa ya destilada a 4 pasos (Self-Forcing, bfloat16, 22.8 GB) de Wan 2.2 TI2V-5B. "
+            "Genera 121 fotogramas 720P@24fps en solo 4 pasos con CFG 1.0 (~1 min en L4). Si ya descargaste el Wan 2.2 normal, basta usar el LoRA Turbo de 332 MB."
+        ),
+        "estimated_gb": 22.8,
+        "min_vram_gb": 12.5,
+        "recommended_vram_gb": 18.0,
+        "l4_seconds_hint": "~1 min / clip 720p (4 pasos)",
+        "engine": "wan_ti2v",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "yetter-ai/Wan2.2-TI2V-5B-Turbo-Diffusers",
                 "subdir": "base",
                 "filename": None,
                 "verify_file": "model_index.json",
@@ -1519,7 +1674,11 @@ class CatalogManager:
         elif category == "image":
             eng = "qwen_image_edit" if "qwen" in low_repo and "edit" in low_repo else "generic_diffusers_image"
         elif category == "lora":
-            eng = "qwen_lora"
+            is_vid_lora = any(
+                k in low_repo or k in (clean_fn or "").lower()
+                for k in ("wan", "ti2v", "vace", "ltx", "skyreels", "video", "cogvideo")
+            )
+            eng = "video_lora" if is_vid_lora else "qwen_lora"
         else:
             eng = "mms_tts" if "mms" in low_repo else ("bark_tts" if "bark" in low_repo else "kokoro_tts")
 
@@ -1529,13 +1688,16 @@ class CatalogManager:
             else (0.4 if category == "lora" else max(4.0, round(float(estimated_gb) * 0.65, 1)))
         )
 
+        is_vid_l = category == "lora" and eng == "video_lora"
         entry: Dict[str, Any] = {
             "id": slug,
             "name": name.strip() or repo_id,
             "category": category,
+            "lora_target": "video" if is_vid_l else ("image" if category == "lora" else None),
+            "compatible_models": ["wan22-ti2v-5b", "wan21-vace-1.3b", "wan21-t2v-1.3b", "ltx-video-2b"] if is_vid_l else None,
             "is_default": False,
             "is_custom": True,
-            "parent_model": "qwen-image-edit-2511-pack" if category == "lora" else None,
+            "parent_model": "wan22-ti2v-5b" if is_vid_l else ("qwen-image-edit-2511-pack" if category == "lora" else None),
             "adapter_name": adapter_name or slug[:20],
             "badge": "Importado de HF",
             "video_modes": ["i2v", "t2v"] if category == "video" else None,

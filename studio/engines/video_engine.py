@@ -168,6 +168,186 @@ def _read_model_index_json(base_dir: Path) -> Dict[str, Any]:
     return {}
 
 
+def _prepare_wan_lora_state_dict(raw_sd: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sanea y normaliza un state_dict LoRA de Wan 2.1 / Wan 2.2 (ComfyUI / Kijai / LightX2V / FastWan / rCM / Diffusers)
+    para que `WanLoraLoaderMixin.load_lora_weights(sd)` en Diffusers >=0.42 nunca falle por:
+      - claves sin prefijo `diffusion_model.` (`blocks.0.self_attn...`)
+      - escalares `.alpha` en capas fuera de `blocks.*` (`text_embedding`, `time_embedding`, `time_projection`, `head.head`, `img_emb`)
+        que `_convert_non_diffusers_wan_lora_to_diffusers` no consume y provocarían ValueError al final
+      - claves `vace_blocks.*` cuando se aplica un LoRA sobre un transformer sin bloques VACE o viceversa.
+    """
+    sd: Dict[str, Any] = dict(raw_sd)
+
+    # Si ya está en formato nativo PEFT/Diffusers (`transformer.blocks...`), devolver tal cual
+    if any(k.startswith("transformer.") and "lora_" in k for k in sd):
+        return {k: v for k, v in sd.items() if "dora_scale" not in k}
+
+    # Si está en formato Musubi (`lora_unet_...`), Diffusers tiene conversor propio
+    if any(k.startswith("lora_unet_") for k in sd):
+        return {k: v for k, v in sd.items() if "dora_scale" not in k}
+
+    # Añadir prefijo `diffusion_model.` si viene con claves desnudas `blocks.0.self_attn...`
+    if not any(k.startswith("diffusion_model.") for k in sd) and any(
+        k.startswith("blocks.") and (".self_attn." in k or ".cross_attn." in k or ".ffn." in k)
+        for k in sd
+    ):
+        sd = {f"diffusion_model.{k}": v for k, v in sd.items()}
+
+    if not any(k.startswith("diffusion_model.") for k in sd):
+        return sd
+
+    # Pre-aplicar `.alpha` en capas fuera de `diffusion_model.blocks.*` (ej. rCM / LightX2V tienen
+    # `diffusion_model.text_embedding.0.alpha` y `time_embedding.0.alpha` que Diffusers no hace .pop())
+    for k in list(sd.keys()):
+        if "dora_scale" in k or k.startswith("diffusion_model.vace_blocks."):
+            sd.pop(k, None)
+            continue
+        if k.endswith(".alpha") and not k.startswith("diffusion_model.blocks."):
+            alpha_tensor = sd.pop(k)
+            base_prefix = k[: -len(".alpha")]
+            down_key = (
+                f"{base_prefix}.lora_A.weight"
+                if f"{base_prefix}.lora_A.weight" in sd
+                else f"{base_prefix}.lora_down.weight"
+            )
+            if down_key in sd:
+                down_w = sd[down_key]
+                rank = int(down_w.shape[0]) if hasattr(down_w, "shape") and len(down_w.shape) > 0 else 1
+                alpha_val = float(alpha_tensor.item()) if hasattr(alpha_tensor, "item") else float(alpha_tensor)
+                if rank > 0:
+                    sd[down_key] = down_w * (alpha_val / float(rank))
+
+    return sd
+
+
+def _resolve_lora_safetensors_file(lora_id: str) -> Path:
+    defn = catalog_manager.get_definition(lora_id)
+    if not defn:
+        raise ValueError(f"LoRA de vídeo no encontrado en el catálogo: {lora_id}")
+    m_dir = catalog_manager.model_dir(lora_id)
+    for art in defn.get("artifacts", []):
+        sub = m_dir / art["subdir"]
+        fn = art.get("filename") or art.get("verify_file")
+        if fn:
+            cand = sub / fn
+            if cand.exists():
+                return cand
+        if sub.exists():
+            found = sorted(sub.rglob("*.safetensors"))
+            if found:
+                return found[0]
+    raise FileNotFoundError(f"No se encontró archivo .safetensors para el LoRA {lora_id}")
+
+
+def _sync_video_lora_on_handle(
+    handle: Dict[str, Any],
+    pipe: Any,
+    video_lora_id: Optional[str],
+    video_lora_scale: float = 1.0,
+    job: Optional[JobRecord] = None,
+    pct_base: float = 8.0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Activa, ajusta escala o desactiva en caliente un LoRA acelerador en el pipeline de vídeo,
+    quitando temporalmente los hooks de CPU Offload para evitar conflictos de dispositivo en PEFT.
+    """
+    clean_id = (video_lora_id or "").strip() or None
+    cur_id = handle.get("active_lora_id")
+    cur_scale = handle.get("active_lora_scale")
+    vram_total = float(query_gpu_info().get("vram_total_gb", 22.0))
+    min_vram = float(handle.get("min_vram_gb", 14.0))
+
+    if not clean_id:
+        if cur_id and hasattr(pipe, "unload_lora_weights"):
+            if job:
+                job.log("Desactivando LoRA acelerador para volver al modo estándar...", progress=pct_base)
+            if hasattr(pipe, "remove_all_hooks"):
+                try:
+                    pipe.remove_all_hooks()
+                except Exception:
+                    pass
+            pipe.unload_lora_weights()
+            _apply_best_offload(pipe, vram_total, min_vram)
+            handle["active_lora_id"] = None
+            handle["active_lora_scale"] = None
+        return None
+
+    lora_defn = catalog_manager.get_definition(clean_id)
+    if not lora_defn:
+        raise ValueError(f"LoRA desconocido: {clean_id}")
+
+    compat_models = lora_defn.get("compatible_models")
+    loaded_model_id = (handle.get("defn") or {}).get("id")
+    if compat_models and loaded_model_id and loaded_model_id not in compat_models:
+        raise ValueError(
+            f"El LoRA «{lora_defn['name']}» está diseñado para {', '.join(compat_models)} "
+            f"y no es compatible con «{loaded_model_id}»."
+        )
+
+    if not catalog_manager.is_downloaded(clean_id):
+        if job is not None:
+            job.log(
+                f"Descargando acelerador ligero «{lora_defn['name']}» ({lora_defn.get('estimated_gb', 0.3)} GB)...",
+                progress=max(1.0, pct_base - 4.0),
+                step="Descargando LoRA Turbo...",
+            )
+            catalog_manager.download_model(
+                clean_id,
+                job,
+                progress_range=(max(1.0, pct_base - 4.0), pct_base),
+            )
+        else:
+            raise RuntimeError(f"El LoRA «{lora_defn['name']}» aún no está descargado.")
+
+    eff_scale = float(video_lora_scale) if video_lora_scale is not None else float(lora_defn.get("default_lora_scale", 1.0))
+
+    if cur_id == clean_id:
+        if cur_scale != eff_scale and hasattr(pipe, "set_adapters"):
+            pipe.set_adapters(["vid_speed_lora"], adapter_weights=[eff_scale])
+            handle["active_lora_scale"] = eff_scale
+        return lora_defn
+
+    lora_file = _resolve_lora_safetensors_file(clean_id)
+    if job:
+        job.log(
+            f"Activando LoRA acelerador «{lora_defn['name']}» (escala {eff_scale:.2f})...",
+            progress=pct_base,
+            step="Aplicando LoRA Turbo...",
+        )
+
+    if hasattr(pipe, "remove_all_hooks"):
+        try:
+            pipe.remove_all_hooks()
+        except Exception:
+            pass
+
+    if cur_id and hasattr(pipe, "unload_lora_weights"):
+        pipe.unload_lora_weights()
+
+    engine = handle.get("engine", "")
+    if engine in ("wan_ti2v", "wan_t2v", "wan_vace", "wan_i2v_14b", "skyreels_v2"):
+        import safetensors.torch  # type: ignore
+
+        raw_sd = safetensors.torch.load_file(str(lora_file), device="cpu")
+        clean_sd = _prepare_wan_lora_state_dict(raw_sd)
+        pipe.load_lora_weights(clean_sd, adapter_name="vid_speed_lora")
+    else:
+        pipe.load_lora_weights(
+            str(lora_file.parent),
+            weight_name=lora_file.name,
+            adapter_name="vid_speed_lora",
+        )
+
+    if hasattr(pipe, "set_adapters"):
+        pipe.set_adapters(["vid_speed_lora"], adapter_weights=[eff_scale])
+
+    _apply_best_offload(pipe, vram_total, min_vram)
+    handle["active_lora_id"] = clean_id
+    handle["active_lora_scale"] = eff_scale
+    return lora_defn
+
+
 def compute_official_video_params(
     defn: Optional[Dict[str, Any]],
     req_width: int,
@@ -709,6 +889,8 @@ def generate_video_clip(
     mode: str = "ai",  # "ai" | "ffmpeg_motion"
     video_submode: str = "auto",  # "auto" | "t2v" | "i2v" | "flf2v"
     model_id: Optional[str] = None,
+    video_lora_id: Optional[str] = None,
+    video_lora_scale: float = 1.0,
     prompt: str = "",
     negative_prompt: str = "",
     image_path: Optional[Path] = None,
@@ -883,6 +1065,15 @@ def generate_video_clip(
         pipe = _switch_pipeline_class(handle, target_cls)
         handle["active_mode"] = "t2v"
 
+    active_lora_defn = _sync_video_lora_on_handle(
+        handle=handle,
+        pipe=pipe,
+        video_lora_id=video_lora_id,
+        video_lora_scale=video_lora_scale,
+        job=job,
+        pct_base=max(4.0, infer_pct_start - 2.0),
+    )
+
     actual_seed = int(seed) if int(seed) > 0 else random.randint(1, 2_147_483_647)
 
     if audio_path and audio_path.exists():
@@ -896,6 +1087,15 @@ def generate_video_clip(
         raw_start_img = Image.open(image_path).convert("RGB")
         img_size = raw_start_img.size
 
+    eff_req_cfg = (
+        guidance_scale
+        if guidance_scale is not None
+        else (
+            float(active_lora_defn["recommended_cfg"])
+            if active_lora_defn and active_lora_defn.get("recommended_cfg") is not None
+            else None
+        )
+    )
     eff = compute_official_video_params(
         defn=defn,
         req_width=width,
@@ -903,7 +1103,7 @@ def generate_video_clip(
         req_duration_sec=duration_sec,
         req_fps=fps,
         req_steps=steps,
-        req_cfg=guidance_scale,
+        req_cfg=eff_req_cfg,
         img_size=img_size,
     )
     width = eff["width"]
@@ -957,8 +1157,9 @@ def generate_video_clip(
         return kw
 
     if job:
+        lora_tag = f" + LoRA «{active_lora_defn['name'].split('(')[0].strip()}»" if active_lora_defn else ""
         job.log(
-            f"Generando [{submode_es}] con «{slot['name']}» ({width}×{height}, {num_frames} fotogramas @ {fps} fps, {steps} pasos, CFG {eff_cfg}, semilla {actual_seed})...",
+            f"Generando [{submode_es}] con «{slot['name']}»{lora_tag} ({width}×{height}, {num_frames} fotogramas @ {fps} fps, {steps} pasos, CFG {eff_cfg}, semilla {actual_seed})...",
             progress=infer_pct_start,
             step=f"Inferencia {submode_es} 0/{steps}...",
         )
@@ -1098,6 +1299,8 @@ def generate_video_clip(
         "video_submode": submode,
         "model_id": slot["model_id"],
         "model_name": slot["name"],
+        "active_lora_id": active_lora_defn["id"] if active_lora_defn else None,
+        "active_lora_name": active_lora_defn["name"] if active_lora_defn else None,
         "prompt": clean_prompt,
         "negative_prompt": eff_neg,
         "duration_seconds": info["duration_seconds"],

@@ -147,6 +147,8 @@ class VideoGenReq(BaseModel):
     mode: str = "ai"  # "ai" | "ffmpeg_motion"
     video_submode: str = "auto"  # "auto" | "t2v" | "i2v" | "flf2v"
     model_id: Optional[str] = None
+    video_lora_id: Optional[str] = None
+    video_lora_scale: float = 1.0
     prompt: str = ""
     negative_prompt: str = ""
     image_rel: Optional[str] = None
@@ -766,6 +768,8 @@ def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
             mode=req.mode,
             video_submode=sub,
             model_id=req.model_id,
+            video_lora_id=req.video_lora_id,
+            video_lora_scale=req.video_lora_scale,
             prompt=req.prompt,
             negative_prompt=req.negative_prompt,
             image_path=img_p,

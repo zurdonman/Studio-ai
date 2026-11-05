@@ -710,6 +710,114 @@ def test_official_model_specs_prevent_hallucination_and_incompatible_flf2v(temp_
     assert "Wan 2.1 VACE" in r_bad_flf.json()["detail"]
 
 
+def test_video_speed_loras_and_steps_reset_controls(temp_studio_env, monkeypatch):
+    import numpy as np
+    from studio.catalog import DEFAULT_CATALOG, catalog_manager
+    from studio.engines.video_engine import _prepare_wan_lora_state_dict, _sync_video_lora_on_handle
+
+    client, _ = temp_studio_env
+
+    # 1) Controles UI de pasos seguros, slider, botón resetear y selector de LoRA de vídeo presentes en index.html
+    html = client.get("/").text
+    assert 'id="vid-steps-slider"' in html
+    assert 'id="btn-reset-vid-steps"' in html
+    assert 'id="btn-steps-fast-safe"' in html
+    assert 'id="vid-lora-select"' in html
+
+    # 2) Verificar LoRAs aceleradores reales para Wan 2.2 TI2V-5B y Wan 2.1 1.3B en el catálogo
+    loras = {m["id"]: m for m in DEFAULT_CATALOG if m["category"] == "lora" and m.get("lora_target") == "video"}
+    assert "lora-wan22-ti2v-5b-turbo" in loras
+    assert "lora-wan22-ti2v-5b-fastwan" in loras
+    assert "lora-wan21-1.3b-rcm-turbo" in loras
+    turbo5b = loras["lora-wan22-ti2v-5b-turbo"]
+    assert "wan22-ti2v-5b" in turbo5b["compatible_models"]
+    assert turbo5b["recommended_steps"] == 6
+    assert turbo5b["recommended_cfg"] == 1.0
+    assert (
+        turbo5b["artifacts"][0]["filename"]
+        == "LoRAs/Wan22-Turbo/Wan22_TI2V_5B_Turbo_lora_rank_64_fp16.safetensors"
+    )
+
+    # 3) _prepare_wan_lora_state_dict normaliza prefijos desnudos y aplica .alpha fuera de blocks.*
+    fake_down = np.ones((4, 16), dtype=np.float32)
+    raw_sd = {
+        "blocks.0.self_attn.q.lora_down.weight": fake_down,
+        "blocks.0.self_attn.q.lora_up.weight": np.ones((16, 4), dtype=np.float32),
+        "text_embedding.0.lora_down.weight": fake_down.copy(),
+        "text_embedding.0.lora_up.weight": np.ones((16, 4), dtype=np.float32),
+        "text_embedding.0.alpha": np.float32(2.0),  # rank=4 -> escala 0.5
+        "vace_blocks.0.proj.lora_down.weight": fake_down,
+    }
+    clean_sd = _prepare_wan_lora_state_dict(raw_sd)
+    assert "diffusion_model.blocks.0.self_attn.q.lora_down.weight" in clean_sd
+    assert "diffusion_model.text_embedding.0.alpha" not in clean_sd
+    assert "diffusion_model.vace_blocks.0.proj.lora_down.weight" not in clean_sd
+    assert np.allclose(clean_sd["diffusion_model.text_embedding.0.lora_down.weight"], 0.5)
+
+    # 4) _sync_video_lora_on_handle activa, ajusta escala y desactiva limpiamente un LoRA con CPU Offload
+    lora_id = "lora-wan22-ti2v-5b-turbo"
+    m_dir = catalog_manager.model_dir(lora_id)
+    art = turbo5b["artifacts"][0]
+    target_sf = m_dir / art["subdir"] / art["filename"]
+    target_sf.parent.mkdir(parents=True, exist_ok=True)
+    target_sf.write_bytes(b"fake_safetensors")
+    catalog_manager.marker_file(lora_id).write_text("{}", encoding="utf-8")
+    assert catalog_manager.is_downloaded(lora_id) is True
+
+    class MockLoraPipe:
+        def __init__(self):
+            self.hooks_removed = 0
+            self.offloaded = 0
+            self.loaded_sd = None
+            self.adapter_weights = None
+            self.unloaded = 0
+            self.vae = None
+
+        def remove_all_hooks(self):
+            self.hooks_removed += 1
+
+        def enable_model_cpu_offload(self):
+            self.offloaded += 1
+
+        def load_lora_weights(self, sd_or_dir, **kwargs):
+            self.loaded_sd = sd_or_dir
+
+        def set_adapters(self, names, adapter_weights=None):
+            self.adapter_weights = (names, adapter_weights)
+
+        def unload_lora_weights(self):
+            self.unloaded += 1
+
+    import types, sys
+
+    fake_st = types.ModuleType("safetensors")
+    fake_st_torch = types.ModuleType("safetensors.torch")
+    fake_st_torch.load_file = lambda _p, device="cpu": raw_sd
+    fake_st.torch = fake_st_torch
+    monkeypatch.setitem(sys.modules, "safetensors", fake_st)
+    monkeypatch.setitem(sys.modules, "safetensors.torch", fake_st_torch)
+
+    mpipe = MockLoraPipe()
+    handle = {
+        "engine": "wan_ti2v",
+        "min_vram_gb": 13.5,
+        "defn": catalog_manager.get_definition("wan22-ti2v-5b"),
+    }
+
+    res_l = _sync_video_lora_on_handle(handle, mpipe, lora_id, video_lora_scale=0.85)
+    assert res_l is not None and res_l["id"] == lora_id
+    assert handle["active_lora_id"] == lora_id
+    assert mpipe.adapter_weights == (["vid_speed_lora"], [0.85])
+    assert mpipe.offloaded == 1
+
+    # Desactivar LoRA restaura pesos base y vuelve a activar CPU Offload
+    _sync_video_lora_on_handle(handle, mpipe, None)
+    assert handle["active_lora_id"] is None
+    assert mpipe.unloaded == 1
+    assert mpipe.offloaded == 2
+
+
+
 
 
 

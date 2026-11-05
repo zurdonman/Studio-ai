@@ -748,6 +748,142 @@
     }
   }
 
+  function populateVideoLoraSelect(modelId) {
+    const loraBox = $("vid-lora-box");
+    const loraSel = $("vid-lora-select");
+    const scaleWrap = $("vid-lora-scale-wrap");
+    const dlBtn = $("btn-dl-vid-lora");
+    if (!loraBox || !loraSel) return;
+
+    const compatLoras = state.catalog.filter(
+      (m) =>
+        m.category === "lora" &&
+        m.lora_target === "video" &&
+        (!Array.isArray(m.compatible_models) || m.compatible_models.includes(modelId))
+    );
+
+    if (compatLoras.length === 0) {
+      loraBox.hidden = true;
+      loraSel.innerHTML = `<option value="">Sin LoRA acelerador</option>`;
+      loraSel.value = "";
+      if (scaleWrap) scaleWrap.hidden = true;
+      if (dlBtn) dlBtn.hidden = true;
+      return;
+    }
+
+    const prev = loraSel.value;
+    loraBox.hidden = false;
+    loraSel.innerHTML =
+      `<option value="">Sin LoRA acelerador (Modo Oficial Estándar)</option>` +
+      compatLoras
+        .map((l) => {
+          const tag = l.downloaded ? "📦 En disco" : `⬇️ ${l.estimated_gb} GB · auto-descarga`;
+          return `<option value="${escapeHtml(l.id)}">[${escapeHtml(tag)}] ${escapeHtml(l.name)}</option>`;
+        })
+        .join("");
+
+    if (prev && compatLoras.some((l) => l.id === prev)) {
+      loraSel.value = prev;
+    } else {
+      loraSel.value = "";
+    }
+
+    const chosen = compatLoras.find((l) => l.id === loraSel.value);
+    if (scaleWrap) scaleWrap.hidden = !chosen;
+    if (dlBtn) {
+      dlBtn.hidden = !chosen || Boolean(chosen.downloaded);
+      if (chosen && !chosen.downloaded) {
+        dlBtn.textContent = `⬇️ Pre-descargar (${chosen.estimated_gb} GB)`;
+      }
+    }
+  }
+
+  function resetVideoStepsToRecommended() {
+    const mid = $("select-video-model") ? $("select-video-model").value : "";
+    const m = state.catalog.find((x) => x.id === mid);
+    const spec = (m && m.official_spec) || {};
+    const lid = $("vid-lora-select") ? $("vid-lora-select").value : "";
+    const loraObj = lid ? state.catalog.find((x) => x.id === lid) : null;
+
+    const recSteps = loraObj
+      ? Number(loraObj.recommended_steps || 6)
+      : Number(spec.default_steps || (m && m.default_steps) || 45);
+    const recCfg = loraObj
+      ? Number(loraObj.recommended_cfg || 1.0)
+      : Number(spec.default_cfg || (m && m.default_cfg) || 5.0);
+
+    if ($("vid-steps")) $("vid-steps").value = recSteps;
+    if ($("vid-steps-slider")) $("vid-steps-slider").value = recSteps;
+    if ($("vid-cfg")) $("vid-cfg").value = recCfg;
+    if (loraObj && $("vid-lora-scale")) {
+      $("vid-lora-scale").value = loraObj.default_lora_scale || 1.0;
+    }
+    updateVideoStepsSafetyNote();
+  }
+
+  function updateVideoStepsSafetyNote() {
+    const noteEl = $("vid-steps-safety-note");
+    const fastBtn = $("btn-steps-fast-safe");
+    const slider = $("vid-steps-slider");
+    const numInput = $("vid-steps");
+    if (!noteEl || !numInput) return;
+
+    const mid = $("select-video-model") ? $("select-video-model").value : "";
+    const m = state.catalog.find((x) => x.id === mid);
+    const spec = (m && m.official_spec) || {};
+    const lid = $("vid-lora-select") ? $("vid-lora-select").value : "";
+    const loraObj = lid ? state.catalog.find((x) => x.id === lid) : null;
+
+    const steps = Number(numInput.value || 45);
+    const cfg = Number(($("vid-cfg") && $("vid-cfg").value) || 5.0);
+    if (slider) slider.value = Math.max(4, Math.min(55, steps));
+
+    const fastSafe = Number(spec.fast_safe_steps || 28);
+    const minSafe = Number(spec.min_safe_steps || 22);
+    const defSteps = Number(spec.default_steps || (m && m.default_steps) || 45);
+
+    if (fastBtn) {
+      if (loraObj || defSteps <= 10) {
+        fastBtn.hidden = true;
+      } else {
+        fastBtn.hidden = false;
+        fastBtn.textContent = `⚡ Rápido seguro (${fastSafe})`;
+      }
+    }
+
+    if (loraObj) {
+      const dlBtn = $("btn-dl-vid-lora");
+      if (dlBtn) dlBtn.hidden = Boolean(loraObj.downloaded);
+      if (steps <= 10) {
+        const estMin = Math.max(0.6, Math.round(steps * (mid.includes("5b") ? 0.2 : 0.08) * 10) / 10);
+        noteEl.className = "vid-steps-note turbo";
+        noteEl.textContent = `⚡ LoRA Acelerador activo (${steps} pasos · CFG ${cfg}): genera el clip ~12× más rápido (~${estMin} min en GPU L4) sin deformar.`;
+      } else {
+        noteEl.className = "vid-steps-note warn";
+        noteEl.textContent = `⚠️ Con el LoRA Acelerador activo lo ideal son 4–8 pasos y CFG 1.0 (más pasos pueden sobresaturar). Pulsa «↺ Resetear pasos».`;
+      }
+      return;
+    }
+
+    if (defSteps <= 10) {
+      noteEl.className = "vid-steps-note turbo";
+      noteEl.textContent = `⚡ Modelo ya destilado de fábrica (${steps} pasos · CFG ${cfg}): velocidad máxima nativa (~1 min en L4).`;
+      return;
+    }
+
+    if (steps < minSafe) {
+      noteEl.className = "vid-steps-note warn";
+      noteEl.textContent = `⚠️ Menos de ${minSafe} pasos sin LoRA puede deformar piernas/brazos o dejar borrones. Usa ≥${fastSafe} pasos, pulsa «↺ Resetear pasos» o elige arriba el ⚡ LoRA Turbo (6 pasos).`;
+    } else if (steps < defSteps - 4) {
+      const savedPct = Math.max(5, Math.round((1 - steps / defSteps) * 100));
+      noteEl.className = "vid-steps-note ok";
+      noteEl.textContent = `✅ Zona rápida segura (${steps} pasos): ahorras ~${savedPct}% de tiempo respecto a ${defSteps} pasos sin deformar el movimiento.`;
+    } else {
+      noteEl.className = "vid-steps-note ok";
+      noteEl.textContent = `✅ Valor oficial predeterminado (${steps} pasos): máxima precisión de anatomía y movimiento recomendada por el fabricante.`;
+    }
+  }
+
   function applyVideoModelDefaults(modelId) {
     const m = state.catalog.find((x) => x.id === modelId);
     if (!m) return;
@@ -766,6 +902,7 @@
     }
     const spec = m.official_spec || {};
     updateModelPresetsAndSpecBar(m);
+    populateVideoLoraSelect(modelId);
 
     const curW = Number($("vid-width").value || 1280);
     const curH = Number($("vid-height").value || 704);
@@ -784,12 +921,7 @@
     if (spec.default_fps || m.default_fps) {
       $("vid-fps").value = spec.default_fps || m.default_fps;
     }
-    if (spec.default_steps || m.default_steps) {
-      $("vid-steps").value = spec.default_steps || m.default_steps;
-    }
-    if ($("vid-cfg") && (spec.default_cfg || m.default_cfg)) {
-      $("vid-cfg").value = spec.default_cfg || m.default_cfg;
-    }
+    resetVideoStepsToRecommended();
     syncVideoPrepareButtonLabel();
     syncVideoSubmodeUI();
   }
@@ -868,6 +1000,11 @@
         });
       });
     }
+    const curSelVid = $("select-video-model") ? $("select-video-model").value : "";
+    if (curSelVid) {
+      populateVideoLoraSelect(curSelVid);
+      updateVideoStepsSafetyNote();
+    }
     syncVideoPrepareButtonLabel();
     renderVideoCompatBanner();
   }
@@ -877,7 +1014,12 @@
     const filtered = state.catalog.filter((m) => {
       if (state.catOnlyCompat && m.compatibility && !m.compatibility.compatible) return false;
       if (state.catalogFilter === "all") return true;
-      if (state.catalogFilter === "image") return m.category === "image" || m.category === "lora";
+      if (state.catalogFilter === "image") {
+        return m.category === "image" || (m.category === "lora" && (m.lora_target || "image") === "image");
+      }
+      if (state.catalogFilter === "video") {
+        return m.category === "video" || (m.category === "lora" && m.lora_target === "video");
+      }
       return m.category === state.catalogFilter;
     });
 
@@ -912,7 +1054,14 @@
           : "";
 
         let btns = "";
-        if (!m.builtin_no_download) {
+        if (m.category === "lora") {
+          if (!m.downloaded) {
+            btns += `<button class="btn btn-primary btn-sm" data-dl="${escapeHtml(m.id)}">⬇ Descargar LoRA (${m.estimated_gb} GB)</button>`;
+          } else {
+            btns += `<span class="mc-tag ok">✅ Listo en disco (actívalo en ${m.lora_target === "video" ? "2. Vídeo" : "1. Imagen"})</span>`;
+            btns += `<button class="btn btn-danger btn-sm" data-del="${escapeHtml(m.id)}">🗑 Borrar de disco</button>`;
+          }
+        } else if (!m.builtin_no_download) {
           if (!m.downloaded) {
             btns += `<button class="btn btn-secondary btn-sm" data-dl="${escapeHtml(m.id)}">⬇ Descargar a disco</button>`;
             btns += `<button class="btn btn-primary btn-sm" data-dl-load="${escapeHtml(m.id)}">⚡ Descargar + Cargar</button>`;
@@ -1807,11 +1956,15 @@
       flf2v: "Frame a Frame (Inicio → Fin)",
     };
     const subTxt = meta.video_submode ? subMap[meta.video_submode] || meta.video_submode : "Vídeo";
+    const loraHtml = meta.active_lora_name
+      ? `<span><strong>LoRA:</strong> ${escapeHtml(meta.active_lora_name.split("(")[0].trim())}</span>`
+      : "";
     $("vid-provenance").innerHTML = `
       <span><strong>Motor:</strong> ${escapeHtml(meta.model_name || meta.model_id)}</span>
+      ${loraHtml}
       <span><strong>Modo:</strong> ${escapeHtml(subTxt)}</span>
-      <span><strong>Duración:</strong> ${meta.duration_seconds}s</span>
-      <span><strong>Resolución:</strong> ${meta.width}×${meta.height} @ ${meta.fps}fps</span>
+      <span><strong>Pasos / CFG:</strong> ${meta.steps || "?"}p · CFG ${meta.guidance_scale || "?"}</span>
+      <span><strong>Resolución:</strong> ${meta.width}×${meta.height} @ ${meta.fps}fps (${meta.duration_seconds}s)</span>
       <span><strong>Tiempo:</strong> ${meta.elapsed_seconds}s</span>
     `;
   }
@@ -2306,10 +2459,77 @@
     if ($("btn-restore-official-vid")) {
       $("btn-restore-official-vid").addEventListener("click", () => {
         const mid = $("select-video-model") ? $("select-video-model").value : null;
+        if ($("vid-lora-select")) $("vid-lora-select").value = "";
         if (mid) {
           applyVideoModelDefaults(mid);
-          toast("Restaurados los parámetros oficiales del modelo.", "success");
+          toast("Restaurados todos los parámetros oficiales del modelo.", "success");
         }
+      });
+    }
+
+    if ($("vid-lora-select")) {
+      $("vid-lora-select").addEventListener("change", () => {
+        const lid = $("vid-lora-select").value;
+        const loraObj = lid ? state.catalog.find((x) => x.id === lid) : null;
+        if ($("vid-lora-scale-wrap")) $("vid-lora-scale-wrap").hidden = !loraObj;
+        if ($("btn-dl-vid-lora")) {
+          $("btn-dl-vid-lora").hidden = !loraObj || Boolean(loraObj.downloaded);
+          if (loraObj && !loraObj.downloaded) {
+            $("btn-dl-vid-lora").textContent = `⬇️ Pre-descargar (${loraObj.estimated_gb} GB)`;
+          }
+        }
+        resetVideoStepsToRecommended();
+        if (loraObj) {
+          toast(
+            `LoRA «${loraObj.name.split("(")[0].trim()}» seleccionado: ajustados automáticamente ${loraObj.recommended_steps || 6} pasos y CFG ${loraObj.recommended_cfg || 1.0}.`,
+            "success"
+          );
+        }
+      });
+    }
+
+    if ($("btn-dl-vid-lora")) {
+      $("btn-dl-vid-lora").addEventListener("click", () => {
+        const lid = $("vid-lora-select") ? $("vid-lora-select").value : "";
+        if (lid) downloadModel(lid);
+      });
+    }
+
+    if ($("vid-steps-slider")) {
+      $("vid-steps-slider").addEventListener("input", (ev) => {
+        if ($("vid-steps")) $("vid-steps").value = ev.target.value;
+        updateVideoStepsSafetyNote();
+      });
+    }
+
+    if ($("vid-steps")) {
+      $("vid-steps").addEventListener("input", () => {
+        updateVideoStepsSafetyNote();
+      });
+    }
+
+    if ($("vid-cfg")) {
+      $("vid-cfg").addEventListener("input", () => {
+        updateVideoStepsSafetyNote();
+      });
+    }
+
+    if ($("btn-steps-fast-safe")) {
+      $("btn-steps-fast-safe").addEventListener("click", () => {
+        const mid = $("select-video-model") ? $("select-video-model").value : "";
+        const m = state.catalog.find((x) => x.id === mid);
+        const fastSafe = Number((m && m.official_spec && m.official_spec.fast_safe_steps) || 28);
+        if ($("vid-steps")) $("vid-steps").value = fastSafe;
+        if ($("vid-steps-slider")) $("vid-steps-slider").value = fastSafe;
+        updateVideoStepsSafetyNote();
+        toast(`Ajustados ${fastSafe} pasos (modo rápido dentro del rango seguro sin deformar).`, "success");
+      });
+    }
+
+    if ($("btn-reset-vid-steps")) {
+      $("btn-reset-vid-steps").addEventListener("click", () => {
+        resetVideoStepsToRecommended();
+        toast("Pasos y CFG devueltos al valor predeterminado recomendado.", "success");
       });
     }
 
@@ -2417,12 +2637,17 @@
           }
         }
 
+        const chosenVidLora = $("vid-lora-select") ? $("vid-lora-select").value || null : null;
+        const chosenVidLoraScale = $("vid-lora-scale") ? Number($("vid-lora-scale").value || 1.0) : 1.0;
+
         const res = await api("/api/video/generate", {
           method: "POST",
           body: JSON.stringify({
             mode: effectiveMode,
             video_submode: effectiveSubmode,
             model_id: chosenVidModel || null,
+            video_lora_id: effectiveMode === "ai" ? chosenVidLora : null,
+            video_lora_scale: chosenVidLoraScale,
             prompt: $("vid-prompt").value,
             negative_prompt: $("vid-neg-prompt") ? $("vid-neg-prompt").value : "",
             image_rel: effectiveSubmode === "t2v" ? null : startRel,
