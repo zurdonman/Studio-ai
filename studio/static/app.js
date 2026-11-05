@@ -24,6 +24,7 @@
     lastVideoResult: null,
     lastMontageResult: null,
     videoMode: "ai", // "ai" | "ffmpeg_motion"
+    videoSubmode: "i2v", // "i2v" | "flf2v" | "t2v" | "ffmpeg"
     timeline: [], // [{ media_rel, media_url, filename, type, duration, motion, audio_rel, fit_to_audio }]
     mask: {
       enabled: false,
@@ -439,11 +440,13 @@
   function formatVideoModes(modes) {
     if (!Array.isArray(modes) || modes.length === 0) return [];
     const map = {
-      i2v: "Imagen → Vídeo",
-      t2v: "Texto → Vídeo",
+      i2v: "🖼️ Imagen → Vídeo",
+      t2v: "📝 Texto → Vídeo",
+      flf2v: "🎞️ Frame a Frame",
       av: "🔊 Vídeo + Audio",
+      audio_video: "🔊 Vídeo + Audio",
     };
-    return modes.map((k) => map[k] || k);
+    return modes.map((k) => ({ key: k, label: map[k] || k }));
   }
 
   function syncGpuPillsUI() {
@@ -517,30 +520,169 @@
     }
   }
 
+  function setVideoSubmode(submode) {
+    state.videoSubmode = submode;
+    if (submode === "ffmpeg") {
+      state.videoMode = "ffmpeg_motion";
+    } else {
+      state.videoMode = "ai";
+    }
+    syncVideoSubmodeUI();
+    populateVideoModelSelect();
+  }
+
+  function syncVideoSubmodeUI() {
+    const sub = state.videoSubmode || "i2v";
+    document.querySelectorAll(".vsub-card").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.submode === sub);
+    });
+
+    const isFfmpeg = sub === "ffmpeg";
+    const isT2v = sub === "t2v";
+    const isFlf = sub === "flf2v";
+    const ffmpegTwoFrames = isFfmpeg && $("chk-ffmpeg-two-frames") && $("chk-ffmpeg-two-frames").checked;
+    const showEndSlot = isFlf || ffmpegTwoFrames;
+
+    if ($("vid-frames-area")) $("vid-frames-area").hidden = isT2v;
+    if ($("vid-t2v-note")) $("vid-t2v-note").hidden = !isT2v;
+    if ($("vid-slot-end")) $("vid-slot-end").hidden = !showEndSlot;
+    if ($("vid-swap-col")) $("vid-swap-col").hidden = !showEndSlot;
+    if ($("vid-start-label")) {
+      $("vid-start-label").textContent = showEndSlot ? "1️⃣ Fotograma Inicial (Inicio)" : "🖼️ Imagen Inicial";
+    }
+
+    if ($("vid-ai-fields")) $("vid-ai-fields").hidden = isFfmpeg;
+    if ($("vid-ai-steps-row")) $("vid-ai-steps-row").hidden = isFfmpeg;
+    if ($("vid-ffmpeg-fields")) $("vid-ffmpeg-fields").hidden = !isFfmpeg;
+
+    const pInput = $("vid-prompt");
+    const pLabel = $("vid-prompt-label");
+    if (pInput && pLabel) {
+      if (isT2v) {
+        pLabel.textContent = "Descripción completa de la escena (Texto a Vídeo)";
+        pInput.placeholder =
+          "Ej: Un bebé riendo y bailando junto a un gato naranja en un salón soleado, luz natural cinematográfica, 24 fps...";
+      } else if (isFlf) {
+        pLabel.textContent = "Cómo debe ocurrir la transición del Fotograma Inicial al Final";
+        pInput.placeholder =
+          "Ej: La cámara avanza suavemente mientras el personaje gira y la iluminación pasa del día al atardecer...";
+      } else {
+        pLabel.textContent = "Prompt de movimiento sobre tu imagen";
+        pInput.placeholder =
+          "Ej: La cámara se acerca suavemente, brisa ligera en el cabello, movimiento natural fluido...";
+      }
+    }
+
+    const runBtn = $("btn-run-video");
+    if (runBtn) {
+      if (isFfmpeg) {
+        runBtn.textContent = ffmpegTwoFrames
+          ? "⚡ Crear Transición FFmpeg Inicio → Fin (0 GB)"
+          : "⚡ Crear Clip FFmpeg Instantáneo (0 GB)";
+      } else if (isFlf) {
+        runBtn.textContent = "🎞️ Generar Vídeo Frame a Frame (Inicio → Fin)";
+      } else if (isT2v) {
+        runBtn.textContent = "📝 Generar Vídeo desde Texto";
+      } else {
+        runBtn.textContent = "🖼️ Generar Vídeo desde Imagen";
+      }
+    }
+
+    updateVideoSourceThumb();
+    updateVideoEndThumb();
+    renderVideoCompatBanner();
+  }
+
+  function renderVideoCompatBanner() {
+    const banner = $("vid-submode-compat-banner");
+    const sel = $("select-video-model");
+    if (!banner || !sel) return;
+
+    const sub = state.videoSubmode;
+    if (sub === "ffmpeg") {
+      banner.hidden = true;
+      return;
+    }
+
+    const curModel = state.catalog.find((m) => m.id === sel.value);
+    if (!curModel || curModel.engine === "ffmpeg_motion") {
+      if (curModel && curModel.engine === "ffmpeg_motion") {
+        banner.hidden = false;
+        banner.innerHTML = `
+          <div>ℹ️ Tienes elegido el motor <strong>FFmpeg (0 GB CPU)</strong> arriba. Para generar con IA elige un modelo GPU como <strong>Wan 2.2 TI2V-5B</strong>, <strong>LTX-Video 0.9.5</strong> o <strong>Wan 2.1 VACE 1.3B</strong>.</div>
+        `;
+      } else {
+        banner.hidden = true;
+      }
+      return;
+    }
+
+    const modes = Array.isArray(curModel.video_modes) ? curModel.video_modes : ["i2v", "t2v"];
+    if (modes.includes(sub)) {
+      banner.hidden = true;
+      return;
+    }
+
+    const subNameMap = {
+      flf2v: "Frame a Frame (Inicio → Fin)",
+      i2v: "Imagen a Vídeo",
+      t2v: "Texto a Vídeo",
+    };
+    const compatCandidates = state.catalog.filter(
+      (m) =>
+        m.category === "video" &&
+        m.engine !== "ffmpeg_motion" &&
+        Array.isArray(m.video_modes) &&
+        m.video_modes.includes(sub) &&
+        (!m.compatibility || m.compatibility.compatible)
+    );
+
+    const btnsHtml = compatCandidates
+      .slice(0, 3)
+      .map(
+        (c) =>
+          `<button type="button" class="btn btn-secondary btn-xs" data-pick-compat="${escapeHtml(c.id)}">Elegir ${escapeHtml(
+            c.name.split("(")[0].trim()
+          )}</button>`
+      )
+      .join("");
+
+    banner.hidden = false;
+    banner.innerHTML = `
+      <div>⚠️ <strong>«${escapeHtml(curModel.name)}»</strong> no incluye el modo <strong>${escapeHtml(
+      subNameMap[sub] || sub
+    )}</strong>. Cámbialo con 1 clic a un modelo compatible:</div>
+      <div class="vid-compat-actions">${btnsHtml}</div>
+    `;
+    banner.querySelectorAll("[data-pick-compat]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const targetId = b.dataset.pickCompat;
+        sel.value = targetId;
+        applyVideoModelDefaults(targetId);
+        populateVideoModelSelect();
+        renderVideoCompatBanner();
+        toast("Modelo compatible seleccionado. Pulsa «Descargar y Cargar» si aún no está en VRAM.");
+      });
+    });
+  }
+
   function applyVideoModelDefaults(modelId) {
     const m = state.catalog.find((x) => x.id === modelId);
     if (!m) return;
     if (m.engine === "ffmpeg_motion") {
-      state.videoMode = "ffmpeg_motion";
-      $("vmode-ai").classList.remove("active");
-      $("vmode-ffmpeg").classList.add("active");
-      $("vid-ai-fields").hidden = true;
-      $("vid-ai-steps-row").hidden = true;
-      $("vid-ffmpeg-fields").hidden = false;
+      setVideoSubmode("ffmpeg");
       $("vid-fps").value = 24;
       return;
     }
-    if (state.videoMode === "ffmpeg_motion") {
+    if (state.videoSubmode === "ffmpeg") {
+      const modes = Array.isArray(m.video_modes) ? m.video_modes : ["i2v"];
       state.videoMode = "ai";
-      $("vmode-ai").classList.add("active");
-      $("vmode-ffmpeg").classList.remove("active");
-      $("vid-ai-fields").hidden = false;
-      $("vid-ai-steps-row").hidden = false;
-      $("vid-ffmpeg-fields").hidden = true;
+      state.videoSubmode = modes.includes("i2v") ? "i2v" : modes[0] || "t2v";
     }
     if (m.default_fps) $("vid-fps").value = m.default_fps;
     if (m.default_steps) $("vid-steps").value = m.default_steps;
     syncVideoPrepareButtonLabel();
+    syncVideoSubmodeUI();
   }
 
   function populateVideoModelSelect() {
@@ -574,13 +716,17 @@
     }
 
     const activeId = sel.value;
+    const curSub = state.videoSubmode;
     if (cardsBox) {
       cardsBox.innerHTML = vModels
         .map((m) => {
           const comp = m.compatibility || {};
           const tier = comp.tier || "good";
           const modes = formatVideoModes(m.video_modes)
-            .map((lbl) => `<span class="vm-mode-pill">${escapeHtml(lbl)}</span>`)
+            .map(
+              (mo) =>
+                `<span class="vmc-mode-chip ${mo.key === curSub ? "highlight" : ""}">${escapeHtml(mo.label)}</span>`
+            )
             .join("");
           const diskTxt = m.builtin_no_download
             ? "0 GB (integrado)"
@@ -596,11 +742,9 @@
               </div>
               <div class="vm-card-meta">
                 <span class="gpu-sticker ${escapeHtml(tier)}">${escapeHtml(comp.label || comp.sticker || "")}</span>
-              </div>
-              <div class="vm-card-meta">
-                ${modes}
                 <span>· ${escapeHtml(diskTxt)}</span>
               </div>
+              <div class="vmc-modes-row">${modes}</div>
             </div>
           `;
         })
@@ -616,6 +760,7 @@
       });
     }
     syncVideoPrepareButtonLabel();
+    renderVideoCompatBanner();
   }
 
   function renderCatalog() {
@@ -643,7 +788,7 @@
           : `Peso descarga: ~${m.estimated_gb} GB (Libre: ${m.free_disk_gb} GB)`;
 
         const modeTags = formatVideoModes(m.video_modes)
-          .map((lbl) => `<span class="mc-tag">${escapeHtml(lbl)}</span>`)
+          .map((mo) => `<span class="mc-tag">${escapeHtml(mo.label)}</span>`)
           .join("");
 
         const matrixHtml = Array.isArray(m.gpu_matrix)
@@ -1372,7 +1517,8 @@
           <div class="asset-mini-btns">
             <button class="mini-btn" data-act="base" data-idx="${idx}">Base</button>
             <button class="mini-btn" data-act="ref" data-idx="${idx}">+Ref</button>
-            <button class="mini-btn" data-act="vid" data-idx="${idx}">Vídeo</button>
+            <button class="mini-btn" data-act="vid" data-idx="${idx}" title="Enviar como Imagen Inicial de Vídeo">🎬 Inicio</button>
+            <button class="mini-btn" data-act="vidend" data-idx="${idx}" title="Enviar como Fotograma Final (Frame a Frame)">🏁 Fin</button>
             <button class="mini-btn" data-act="mon" data-idx="${idx}">+Montaje</button>
           </div>
         </div>
@@ -1395,8 +1541,16 @@
           toast(`Añadida en Referencia ${targetSlot + 1}`);
         } else if (act === "vid") {
           switchTab("tab-video");
+          if (state.videoSubmode === "t2v") setVideoSubmode("i2v");
           $("vid-source-image").value = asset.rel_path;
           updateVideoSourceThumb();
+          toast(`Cargada como Imagen Inicial: ${asset.filename}`);
+        } else if (act === "vidend") {
+          switchTab("tab-video");
+          setVideoSubmode("flf2v");
+          $("vid-end-image").value = asset.rel_path;
+          updateVideoEndThumb();
+          toast(`Cargada como Fotograma Final (Frame a Frame): ${asset.filename}`);
         } else if (act === "mon") {
           addShotToTimeline(asset);
         }
@@ -1412,17 +1566,41 @@
     ];
     const imgSel = $("vid-source-image");
     const prevImg = imgSel.value;
+    const emptyHint =
+      allImgs.length === 0
+        ? "-- Pulsa «📤 Subir imagen» arriba o crea una en 1. Imagen --"
+        : "-- Elige una imagen inicial --";
     imgSel.innerHTML =
-      `<option value="">-- Sin imagen inicial (modo Texto → Vídeo) --</option>` +
+      `<option value="">${emptyHint}</option>` +
       allImgs
         .map((im) => `<option value="${escapeHtml(im.rel_path)}">${escapeHtml(im.filename)}</option>`)
         .join("");
     if (prevImg && allImgs.some((i) => i.rel_path === prevImg)) {
       imgSel.value = prevImg;
-    } else if (allImgs.length > 0 && !imgSel.value && prevImg !== "") {
+    } else if (allImgs.length > 0 && !imgSel.value) {
       imgSel.value = allImgs[0].rel_path;
     }
     updateVideoSourceThumb();
+
+    const endSel = $("vid-end-image");
+    if (endSel) {
+      const prevEnd = endSel.value;
+      const endHint =
+        allImgs.length === 0
+          ? "-- Pulsa «📤 Subir final» para el Fotograma Final --"
+          : "-- Elige el Fotograma Final (Destino) --";
+      endSel.innerHTML =
+        `<option value="">${endHint}</option>` +
+        allImgs
+          .map((im) => `<option value="${escapeHtml(im.rel_path)}">${escapeHtml(im.filename)}</option>`)
+          .join("");
+      if (prevEnd && allImgs.some((i) => i.rel_path === prevEnd)) {
+        endSel.value = prevEnd;
+      } else if (allImgs.length >= 2 && !endSel.value) {
+        endSel.value = allImgs[1].rel_path;
+      }
+      updateVideoEndThumb();
+    }
 
     const allAudio = [
       ...state.assets.audio,
@@ -1471,10 +1649,12 @@
   }
 
   function updateVideoSourceThumb() {
-    const rel = $("vid-source-image").value;
+    const sel = $("vid-source-image");
     const box = $("vid-source-preview-box");
+    if (!sel || !box) return;
+    const rel = sel.value;
     if (!rel) {
-      box.innerHTML = `<span class="muted">Sin imagen inicial · Se generará Vídeo desde tu Prompt (Texto → Vídeo)</span>`;
+      box.innerHTML = `<span class="muted">Pulsa «📤 Subir imagen» arriba o elige una generada en 1. Imagen</span>`;
       return;
     }
     box.innerHTML = `<img id="vid-src-thumb-img" src="/media/${escapeHtml(rel)}" alt="Origen vídeo" />`;
@@ -1497,6 +1677,18 @@
     }
   }
 
+  function updateVideoEndThumb() {
+    const sel = $("vid-end-image");
+    const box = $("vid-end-preview-box");
+    if (!sel || !box) return;
+    const rel = sel.value;
+    if (!rel) {
+      box.innerHTML = `<span class="muted">Pulsa «📤 Subir final» o selecciona la imagen de destino</span>`;
+      return;
+    }
+    box.innerHTML = `<img src="/media/${escapeHtml(rel)}" alt="Fotograma final" />`;
+  }
+
   function showVideoResult(meta) {
     state.lastVideoResult = meta;
     $("vid-result-empty").hidden = true;
@@ -1505,8 +1697,15 @@
     player.src = `${meta.media_url}?t=${Date.now()}`;
     $("btn-vid-download").href = meta.media_url;
     $("btn-vid-download").download = meta.filename;
+    const subMap = {
+      t2v: "Texto → Vídeo",
+      i2v: "Imagen → Vídeo",
+      flf2v: "Frame a Frame (Inicio → Fin)",
+    };
+    const subTxt = meta.video_submode ? subMap[meta.video_submode] || meta.video_submode : "Vídeo";
     $("vid-provenance").innerHTML = `
       <span><strong>Motor:</strong> ${escapeHtml(meta.model_name || meta.model_id)}</span>
+      <span><strong>Modo:</strong> ${escapeHtml(subTxt)}</span>
       <span><strong>Duración:</strong> ${meta.duration_seconds}s</span>
       <span><strong>Resolución:</strong> ${meta.width}×${meta.height} @ ${meta.fps}fps</span>
       <span><strong>Tiempo:</strong> ${meta.elapsed_seconds}s</span>
@@ -1938,6 +2137,7 @@
     $("btn-res-to-video").addEventListener("click", () => {
       if (state.lastImageResult) {
         switchTab("tab-video");
+        if (state.videoSubmode === "t2v") setVideoSubmode("i2v");
         $("vid-source-image").value = `outputs/images/${state.lastImageResult.filename}`;
         updateVideoSourceThumb();
       }
@@ -1967,6 +2167,37 @@
     });
     $("btn-unload-video").addEventListener("click", () => unloadFromMemory("video"));
     $("vid-source-image").addEventListener("change", updateVideoSourceThumb);
+    if ($("vid-end-image")) {
+      $("vid-end-image").addEventListener("change", updateVideoEndThumb);
+    }
+    if ($("btn-vid-swap-frames")) {
+      $("btn-vid-swap-frames").addEventListener("click", () => {
+        const a = $("vid-source-image").value;
+        const b = $("vid-end-image").value;
+        $("vid-source-image").value = b;
+        $("vid-end-image").value = a;
+        updateVideoSourceThumb();
+        updateVideoEndThumb();
+      });
+    }
+    if ($("chk-ffmpeg-two-frames")) {
+      $("chk-ffmpeg-two-frames").addEventListener("change", () => syncVideoSubmodeUI());
+    }
+
+    document.querySelectorAll(".vsub-card").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const sub = btn.dataset.submode || "i2v";
+        setVideoSubmode(sub);
+        if (sub === "ffmpeg") {
+          $("vid-width").value = 1280;
+          $("vid-height").value = 720;
+          $("vid-fps").value = 24;
+        } else {
+          $("vid-width").value = 832;
+          $("vid-height").value = 480;
+        }
+      });
+    });
 
     document.querySelectorAll(".vid-preset-chip").forEach((chip) => {
       chip.addEventListener("click", () => {
@@ -2009,43 +2240,77 @@
         const asset = await uploadFile(f);
         $("vid-source-image").value = asset.rel_path;
         updateVideoSourceThumb();
+        toast(`Imagen inicial lista: ${asset.filename}`, "success");
       } catch (e) {
         toast(e.message, "error");
       }
       ev.target.value = "";
     });
 
-    document.querySelectorAll("[data-vmode]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.videoMode = btn.dataset.vmode;
-        $("vmode-ai").classList.toggle("active", state.videoMode === "ai");
-        $("vmode-ffmpeg").classList.toggle("active", state.videoMode === "ffmpeg_motion");
-        $("vid-ai-fields").hidden = state.videoMode !== "ai";
-        $("vid-ai-steps-row").hidden = state.videoMode !== "ai";
-        $("vid-ffmpeg-fields").hidden = state.videoMode !== "ffmpeg_motion";
-        if (state.videoMode === "ffmpeg_motion") {
-          $("vid-width").value = 1280;
-          $("vid-height").value = 720;
-          $("vid-fps").value = 24;
-        } else {
-          $("vid-width").value = 832;
-          $("vid-height").value = 480;
-          $("vid-fps").value = 16;
+    if ($("input-vid-upload-end-img")) {
+      $("input-vid-upload-end-img").addEventListener("change", async (ev) => {
+        const f = ev.target.files[0];
+        if (!f) return;
+        try {
+          const asset = await uploadFile(f);
+          if ($("vid-end-image")) $("vid-end-image").value = asset.rel_path;
+          updateVideoEndThumb();
+          toast(`Fotograma final listo: ${asset.filename}`, "success");
+        } catch (e) {
+          toast(e.message, "error");
         }
+        ev.target.value = "";
       });
-    });
+    }
 
     $("btn-run-video").addEventListener("click", async () => {
       try {
         const chosenVidModel = $("select-video-model").value;
+        const sub = state.videoSubmode || "i2v";
         const effectiveMode =
-          chosenVidModel === "ffmpeg-motion-cpu" ? "ffmpeg_motion" : state.videoMode;
+          chosenVidModel === "ffmpeg-motion-cpu" || sub === "ffmpeg" ? "ffmpeg_motion" : "ai";
+
+        let effectiveSubmode = sub;
+        const startRel = $("vid-source-image").value || null;
+        let endRel = $("vid-end-image") ? $("vid-end-image").value || null : null;
+
+        if (effectiveMode === "ffmpeg_motion") {
+          const ffTwo = $("chk-ffmpeg-two-frames") && $("chk-ffmpeg-two-frames").checked;
+          effectiveSubmode = ffTwo && endRel ? "flf2v" : "i2v";
+          if (!startRel) {
+            toast("Sube o elige una imagen inicial con «📤 Subir imagen».", "error");
+            return;
+          }
+          if (!ffTwo) endRel = null;
+        } else if (effectiveSubmode === "t2v") {
+          if (!($("vid-prompt").value || "").trim()) {
+            toast("Escribe una descripción en el prompt para Texto a Vídeo.", "error");
+            return;
+          }
+        } else if (effectiveSubmode === "i2v") {
+          if (!startRel) {
+            toast("Modo Imagen a Vídeo: sube o elige una imagen inicial (o cambia a «Texto a Vídeo»).", "error");
+            return;
+          }
+          endRel = null;
+        } else if (effectiveSubmode === "flf2v") {
+          if (!startRel || !endRel) {
+            toast(
+              "Modo Frame a Frame: sube o elige tanto el Fotograma Inicial como el Fotograma Final.",
+              "error"
+            );
+            return;
+          }
+        }
+
         const res = await api("/api/video/generate", {
           method: "POST",
           body: JSON.stringify({
             mode: effectiveMode,
+            video_submode: effectiveSubmode,
             prompt: $("vid-prompt").value,
-            image_rel: $("vid-source-image").value || null,
+            image_rel: effectiveSubmode === "t2v" ? null : startRel,
+            end_image_rel: effectiveSubmode === "flf2v" ? endRel : null,
             audio_rel: $("vid-source-audio").value || null,
             width: Number($("vid-width").value || 832),
             height: Number($("vid-height").value || 480),
@@ -2282,6 +2547,7 @@
     setupMaskCanvas();
     bindEvents();
     await Promise.all([loadCatalog(), loadVoices(), loadAssets()]);
+    syncVideoSubmodeUI();
     startAdaptivePolling();
   }
 

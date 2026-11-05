@@ -389,5 +389,204 @@ def test_gpu_filter_stickers_artifact_patterns_and_hf_search(temp_studio_env):
     assert r_del.json()["hf_auth"]["has_token"] is False
 
 
+def test_wan_pipeline_switching_strips_image_encoder_and_preserves_expand_timesteps():
+    from studio.engines.video_engine import _switch_pipeline_class
+
+    class DummyVae:
+        def __init__(self):
+            self.slicing = False
+            self.tiling = False
+
+        def enable_slicing(self):
+            self.slicing = True
+
+        def enable_tiling(self):
+            self.tiling = True
+
+    class MockWanImageToVideoPipeline:
+        def __init__(
+            self,
+            tokenizer,
+            text_encoder,
+            vae,
+            scheduler,
+            image_processor=None,
+            image_encoder=None,
+            transformer=None,
+            transformer_2=None,
+            boundary_ratio=None,
+            expand_timesteps=False,
+        ):
+            self.vae = vae
+            self.offloaded = False
+            self.hooks_removed = False
+            self.components = {
+                "tokenizer": tokenizer,
+                "text_encoder": text_encoder,
+                "vae": vae,
+                "scheduler": scheduler,
+                "image_processor": image_processor,
+                "image_encoder": image_encoder,
+                "transformer": transformer,
+                "transformer_2": transformer_2,
+            }
+            self.config = {
+                "_class_name": "WanImageToVideoPipeline",
+                "boundary_ratio": boundary_ratio,
+                "expand_timesteps": expand_timesteps,
+            }
+
+        def remove_all_hooks(self):
+            self.hooks_removed = True
+
+        def enable_model_cpu_offload(self):
+            self.offloaded = True
+
+    class MockWanPipeline:
+        # Firma idéntica a diffusers==0.42.1 WanPipeline.__init__ (NO acepta image_encoder ni image_processor)
+        def __init__(
+            self,
+            tokenizer,
+            text_encoder,
+            vae,
+            scheduler,
+            transformer=None,
+            transformer_2=None,
+            boundary_ratio=None,
+            expand_timesteps=False,
+        ):
+            self.vae = vae
+            self.offloaded = False
+            self.hooks_removed = False
+            self.components = {
+                "tokenizer": tokenizer,
+                "text_encoder": text_encoder,
+                "vae": vae,
+                "scheduler": scheduler,
+                "transformer": transformer,
+                "transformer_2": transformer_2,
+            }
+            self.config = {
+                "_class_name": "WanPipeline",
+                "boundary_ratio": boundary_ratio,
+                "expand_timesteps": expand_timesteps,
+            }
+
+        def remove_all_hooks(self):
+            self.hooks_removed = True
+
+        def enable_model_cpu_offload(self):
+            self.offloaded = True
+
+    vae = DummyVae()
+    pipe_i2v = MockWanImageToVideoPipeline(
+        tokenizer="tok",
+        text_encoder="te",
+        vae=vae,
+        scheduler="sched",
+        image_processor="clip_proc",
+        image_encoder="clip_enc",
+        transformer="dit_5b",
+        expand_timesteps=True,
+    )
+    handle = {
+        "pipe": pipe_i2v,
+        "all_components": dict(pipe_i2v.components),
+        "extra_init_kwargs": {"expand_timesteps": True, "boundary_ratio": None},
+        "min_vram_gb": 13.5,
+    }
+
+    # 1) Conmutar de I2V -> T2V sin fallar por 'image_encoder' y preservando expand_timesteps=True
+    pipe_t2v = _switch_pipeline_class(handle, MockWanPipeline, vram_total_gb=22.5)
+    assert isinstance(pipe_t2v, MockWanPipeline)
+    assert pipe_i2v.hooks_removed is True
+    assert pipe_t2v.offloaded is True
+    assert pipe_t2v.vae.slicing is True
+    assert pipe_t2v.vae.tiling is True
+    assert pipe_t2v.config["expand_timesteps"] is True
+    assert pipe_t2v.components["transformer"] == "dit_5b"
+
+    # 2) Conmutar de vuelta T2V -> I2V recuperando intactos image_encoder e image_processor
+    pipe_back = _switch_pipeline_class(handle, MockWanImageToVideoPipeline, vram_total_gb=22.5)
+    assert isinstance(pipe_back, MockWanImageToVideoPipeline)
+    assert pipe_back.components["image_encoder"] == "clip_enc"
+    assert pipe_back.components["image_processor"] == "clip_proc"
+    assert pipe_back.config["expand_timesteps"] is True
+    assert pipe_back.offloaded is True
+
+
+def test_video_three_modes_t2v_i2v_and_frame_to_frame(temp_studio_env):
+    from PIL import Image
+    from studio.catalog import DEFAULT_CATALOG
+
+    client, _ = temp_studio_env
+
+    # Verificar que el catálogo ofrece modelos con soporte explícito de t2v, i2v y flf2v (Frame a Frame)
+    vdefs = {m["id"]: m for m in DEFAULT_CATALOG if m["category"] == "video"}
+    assert set(vdefs["ltx-video-2b"]["video_modes"]) >= {"t2v", "i2v", "flf2v"}
+    assert set(vdefs["wan21-vace-1.3b"]["video_modes"]) >= {"t2v", "i2v", "flf2v"}
+    assert set(vdefs["skyreels-v2-i2v-1.3b"]["video_modes"]) >= {"i2v", "flf2v"}
+    assert "wan21-flf2v-14b-720p" in vdefs
+    assert "flf2v" in vdefs["wan21-flf2v-14b-720p"]["video_modes"]
+
+    # Subir Fotograma Inicial (azul) y Fotograma Final (naranja)
+    def _png_bytes(rgb):
+        buf = io.BytesIO()
+        Image.new("RGB", (640, 360), rgb).save(buf, format="PNG")
+        return buf.getvalue()
+
+    up1 = client.post(
+        "/api/assets/upload",
+        files={"file": ("frame_inicio.png", _png_bytes((30, 90, 210)), "image/png")},
+    ).json()["asset"]
+    up2 = client.post(
+        "/api/assets/upload",
+        files={"file": ("frame_final.png", _png_bytes((220, 110, 35)), "image/png")},
+    ).json()["asset"]
+
+    # Validación 400 si falta imagen en i2v o falta fotograma final en flf2v
+    r_err_i2v = client.post("/api/video/generate", json={"mode": "ai", "video_submode": "i2v", "prompt": "hola"})
+    assert r_err_i2v.status_code == 400
+    r_err_flf = client.post(
+        "/api/video/generate",
+        json={"mode": "ai", "video_submode": "flf2v", "image_rel": up1["rel_path"], "prompt": "transición"},
+    )
+    assert r_err_flf.status_code == 400
+
+    # Ejecución real de Frame a Frame (Inicio -> Fin) en CPU con FFmpeg xfade
+    r_ok = client.post(
+        "/api/video/generate",
+        json={
+            "mode": "ffmpeg_motion",
+            "video_submode": "flf2v",
+            "image_rel": up1["rel_path"],
+            "end_image_rel": up2["rel_path"],
+            "width": 640,
+            "height": 360,
+            "duration_sec": 2.0,
+            "fps": 24,
+            "motion_style": "pan_right",
+        },
+    )
+    assert r_ok.status_code == 200
+    job_id = r_ok.json()["job"]["id"]
+
+    deadline = time.time() + 25.0
+    final_job = None
+    while time.time() < deadline:
+        st = client.get("/api/status").json()
+        found = next((j for j in st["jobs"] if j["id"] == job_id), None)
+        if found and found["status"] in ("completed", "failed"):
+            final_job = found
+            break
+        time.sleep(0.25)
+
+    assert final_job is not None, "El trabajo Frame a Frame no terminó a tiempo"
+    assert final_job["status"] == "completed", final_job.get("error")
+    assert final_job["result"]["video_submode"] == "flf2v"
+    assert final_job["result"]["duration_seconds"] >= 1.5
+
+
+
 
 

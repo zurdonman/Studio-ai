@@ -145,9 +145,11 @@ class ImageGenReq(BaseModel):
 
 class VideoGenReq(BaseModel):
     mode: str = "ai"  # "ai" | "ffmpeg_motion"
+    video_submode: str = "auto"  # "auto" | "t2v" | "i2v" | "flf2v"
     prompt: str = ""
     negative_prompt: str = ""
     image_rel: Optional[str] = None
+    end_image_rel: Optional[str] = None
     audio_rel: Optional[str] = None
     width: int = 832
     height: int = 480
@@ -712,21 +714,47 @@ def api_generate_image(req: ImageGenReq) -> Dict[str, Any]:
 @app.post("/api/video/generate")
 def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
     img_p = _resolve_media_rel(req.image_rel)
+    end_img_p = _resolve_media_rel(req.end_image_rel)
     aud_p = _resolve_media_rel(req.audio_rel)
 
+    sub = (req.video_submode or "auto").strip().lower()
+    if sub == "i2v" and img_p is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Modo «Imagen a Vídeo»: sube o elige una imagen inicial (o cambia arriba a «Texto a Vídeo»).",
+        )
+    if sub == "flf2v" and (img_p is None or end_img_p is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Modo «Frame a Frame (Inicio → Fin)»: sube o elige tanto el Fotograma Inicial como el Fotograma Final.",
+        )
+    if req.mode == "ffmpeg_motion" and img_p is None:
+        raise HTTPException(
+            status_code=400,
+            detail="La animación FFmpeg (0 GB) necesita al menos una imagen inicial.",
+        )
+
+    sub_labels = {
+        "t2v": "Texto→Vídeo",
+        "i2v": "Imagen→Vídeo",
+        "flf2v": "Frame a Frame",
+    }
+    sub_tag = sub_labels.get(sub, "Vídeo IA")
     label = (
-        f"Clip FFmpeg ({req.motion_style})"
+        f"Clip FFmpeg ({'Frame→Frame' if end_img_p else req.motion_style})"
         if req.mode == "ffmpeg_motion"
-        else f"Vídeo IA: {(req.prompt or 'Imagen a vídeo')[:38]}"
+        else f"{sub_tag}: {(req.prompt or 'Animación IA')[:36]}"
     )
     job = job_manager.submit(
         kind="video",
         title=label,
         fn=lambda j: generate_video_clip(
             mode=req.mode,
+            video_submode=sub,
             prompt=req.prompt,
             negative_prompt=req.negative_prompt,
             image_path=img_p,
+            end_image_path=end_img_p,
             audio_path=aud_p,
             width=req.width,
             height=req.height,

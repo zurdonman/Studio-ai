@@ -164,11 +164,15 @@ def create_motion_clip_from_image(
     fps: int = 24,
     motion: str = "zoom_in",
     audio_path: Optional[Path] = None,
+    end_image_path: Optional[Path] = None,
     job: Optional[JobRecord] = None,
 ) -> Dict[str, Any]:
-    """Convierte una imagen fija en un clip MP4 H.264 BT.709 con movimiento suave opcional y/o audio."""
+    """Convierte una imagen fija (o un par Inicio → Fin) en un clip MP4 H.264 BT.709 con movimiento suave y/o audio."""
     ffmpeg_bin = get_ffmpeg_bin()
     verify_image_file(image_path)
+    has_end = end_image_path is not None and end_image_path.exists()
+    if has_end:
+        verify_image_file(end_image_path)
 
     # Asegurar dimensiones pares para yuv420p
     width = max(256, (int(width) // 2) * 2)
@@ -180,73 +184,139 @@ def create_motion_clip_from_image(
         if a_info["duration_seconds"] > 0.2:
             duration_sec = max(duration_sec, a_info["duration_seconds"])
 
-    duration_sec = max(0.5, min(120.0, float(duration_sec)))
+    duration_sec = max(1.0 if has_end else 0.5, min(120.0, float(duration_sec)))
     total_frames = max(12, int(round(duration_sec * fps)))
 
-    # Construir filtro de vídeo seguro y nítido
     base_pad = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
     )
-    if motion == "zoom_in":
-        vf = (
-            f"{base_pad},scale={width*2}:{height*2},"
-            f"zoompan=z='min(zoom+0.0012,1.18)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-            f":d={total_frames}:s={width}x{height}:fps={fps},format=yuv420p"
-        )
-    elif motion == "zoom_out":
-        vf = (
-            f"{base_pad},scale={width*2}:{height*2},"
-            f"zoompan=z='if(eq(on,1),1.18,max(1.0,zoom-0.0012))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-            f":d={total_frames}:s={width}x{height}:fps={fps},format=yuv420p"
-        )
-    elif motion == "pan_right":
-        vf = (
-            f"{base_pad},scale={int(width*1.24)}:{int(height*1.24)},"
-            f"zoompan=z='1.12':x='(iw-iw/zoom)*(on/{max(1, total_frames)})':y='(ih-ih/zoom)/2'"
-            f":d={total_frames}:s={width}x{height}:fps={fps},format=yuv420p"
-        )
-    else:
-        vf = f"{base_pad},fps={fps},format=yuv420p"
 
-    cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "error"]
-    if motion in ("zoom_in", "zoom_out", "pan_right"):
-        cmd += ["-i", str(image_path)]
-    else:
-        cmd += ["-loop", "1", "-t", f"{duration_sec:.2f}", "-i", str(image_path)]
+    if has_end and end_image_path is not None:
+        # Transición Frame a Frame en CPU: ligero movimiento en ambas fotos + xfade suave en el tramo central
+        fade_dur = max(0.35, min(duration_sec * 0.45, 2.5))
+        seg_dur = (duration_sec + fade_dur) / 2.0
+        offset = max(0.1, seg_dur - fade_dur)
+        xfade_name = "smoothleft" if motion == "pan_right" else "fade"
+        fc = (
+            f"[0:v]{base_pad},fps={fps},format=yuv420p[v0];"
+            f"[1:v]{base_pad},fps={fps},format=yuv420p[v1];"
+            f"[v0][v1]xfade=transition={xfade_name}:duration={fade_dur:.2f}:offset={offset:.2f},format=yuv420p[vout]"
+        )
+        cmd = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-loop",
+            "1",
+            "-t",
+            f"{seg_dur:.2f}",
+            "-i",
+            str(image_path),
+            "-loop",
+            "1",
+            "-t",
+            f"{seg_dur:.2f}",
+            "-i",
+            str(end_image_path),
+        ]
+        if audio_path and audio_path.exists():
+            cmd += ["-i", str(audio_path)]
+        else:
+            cmd += ["-f", "lavfi", "-t", f"{duration_sec:.2f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
 
-    if audio_path and audio_path.exists():
-        cmd += ["-i", str(audio_path)]
+        cmd += [
+            "-filter_complex",
+            fc,
+            "-map",
+            "[vout]",
+            "-map",
+            "2:a:0",
+            "-t",
+            f"{duration_sec:.2f}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-colorspace",
+            "bt709",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            "-y",
+            str(output_mp4),
+        ]
     else:
-        cmd += ["-f", "lavfi", "-t", f"{duration_sec:.2f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+        if motion == "zoom_in":
+            vf = (
+                f"{base_pad},scale={width*2}:{height*2},"
+                f"zoompan=z='min(zoom+0.0012,1.18)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                f":d={total_frames}:s={width}x{height}:fps={fps},format=yuv420p"
+            )
+        elif motion == "zoom_out":
+            vf = (
+                f"{base_pad},scale={width*2}:{height*2},"
+                f"zoompan=z='if(eq(on,1),1.18,max(1.0,zoom-0.0012))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                f":d={total_frames}:s={width}x{height}:fps={fps},format=yuv420p"
+            )
+        elif motion == "pan_right":
+            vf = (
+                f"{base_pad},scale={int(width*1.24)}:{int(height*1.24)},"
+                f"zoompan=z='1.12':x='(iw-iw/zoom)*(on/{max(1, total_frames)})':y='(ih-ih/zoom)/2'"
+                f":d={total_frames}:s={width}x{height}:fps={fps},format=yuv420p"
+            )
+        else:
+            vf = f"{base_pad},fps={fps},format=yuv420p"
 
-    cmd += [
-        "-t",
-        f"{duration_sec:.2f}",
-        "-vf",
-        vf,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "20",
-        "-colorspace",
-        "bt709",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-ar",
-        "44100",
-        "-ac",
-        "2",
-        "-movflags",
-        "+faststart",
-        "-shortest",
-        "-y",
-        str(output_mp4),
-    ]
+        cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "error"]
+        if motion in ("zoom_in", "zoom_out", "pan_right"):
+            cmd += ["-i", str(image_path)]
+        else:
+            cmd += ["-loop", "1", "-t", f"{duration_sec:.2f}", "-i", str(image_path)]
+
+        if audio_path and audio_path.exists():
+            cmd += ["-i", str(audio_path)]
+        else:
+            cmd += ["-f", "lavfi", "-t", f"{duration_sec:.2f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+
+        cmd += [
+            "-t",
+            f"{duration_sec:.2f}",
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-colorspace",
+            "bt709",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            "-y",
+            str(output_mp4),
+        ]
 
     if job:
         job.log(

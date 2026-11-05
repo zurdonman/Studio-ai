@@ -293,18 +293,18 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "ltx-video-2b",
-        "name": "LTX-Video 2B (Lightricks · Imagen y Texto a Vídeo Ultrarrápido)",
+        "name": "LTX-Video 0.9.5 2B (Texto, Imagen y Frame a Frame · Ultrarrápido)",
         "category": "video",
         "is_default": False,
-        "badge": "Ultrarrápido · T4 y L4",
-        "video_modes": ["i2v", "t2v"],
+        "badge": "3 en 1 ★ · T2V + I2V + Frame a Frame",
+        "video_modes": ["t2v", "i2v", "flf2v"],
         "default_fps": 24,
         "default_steps": 30,
         "description": (
-            "El modelo DiT más rápido de Lightricks (solo descarga los tensores Diffusers limpios, sin duplicados). "
-            "Genera clips fluidos a 24 fps en segundos tanto en L4 como en T4."
+            "Versión 0.9.5 de Lightricks con soporte nativo de Texto a Vídeo, Imagen a Vídeo y Frame a Frame (Inicio → Fin). "
+            "Descarga limpia (23.6 GB) y velocidad sobresaliente en L4 y T4."
         ),
-        "estimated_gb": 26.5,
+        "estimated_gb": 23.6,
         "min_vram_gb": 9.5,
         "recommended_vram_gb": 15.0,
         "l4_seconds_hint": "22–45 s / clip",
@@ -312,7 +312,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "artifacts": [
             {
                 "role": "base",
-                "repo_id": "Lightricks/LTX-Video",
+                "repo_id": "Lightricks/LTX-Video-0.9.5",
                 "subdir": "base",
                 "filename": None,
                 "verify_file": "model_index.json",
@@ -351,16 +351,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "wan21-vace-1.3b",
-        "name": "Wan 2.1 VACE 1.3B (Referencia / Imagen a Vídeo Ligero)",
+        "name": "Wan 2.1 VACE 1.3B (Frame a Frame + Imagen + Texto a Vídeo)",
         "category": "video",
         "is_default": False,
-        "badge": "17.7 GB · Ligero T4/L4",
-        "video_modes": ["i2v", "t2v"],
+        "badge": "17.7 GB · 3 en 1 Ligero T4/L4",
+        "video_modes": ["t2v", "i2v", "flf2v"],
         "default_fps": 16,
         "default_steps": 28,
         "description": (
-            "Versión compacta 1.3B de Wan VACE para animar personajes u objetos de una imagen de referencia "
-            "o crear clips desde texto ocupando muy poca VRAM."
+            "Modelo todoterreno 1.3B de Wan VACE: hace Frame a Frame (transición exacta de imagen inicial a imagen final), "
+            "Imagen a Vídeo simple y Texto a Vídeo ocupando muy poca VRAM."
         ),
         "estimated_gb": 17.7,
         "min_vram_gb": 8.0,
@@ -380,16 +380,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "skyreels-v2-i2v-1.3b",
-        "name": "SkyReels V2 I2V 1.3B 540P (Imagen a Vídeo Cinematográfico)",
+        "name": "SkyReels V2 1.3B 540P (Imagen a Vídeo y Frame a Frame)",
         "category": "video",
         "is_default": False,
-        "badge": "Cine 540p · 24 fps",
-        "video_modes": ["i2v"],
+        "badge": "Cine 540p · I2V + Frame a Frame",
+        "video_modes": ["i2v", "flf2v"],
         "default_fps": 24,
         "default_steps": 30,
         "description": (
-            "Modelo especializado en movimiento cinematográfico natural a partir de una imagen (540p, 24 fps). "
-            "Corre con gran soltura en L4 y cabe con offload en T4."
+            "Modelo especializado en movimiento cinematográfico natural a 540p y 24 fps, con soporte tanto de "
+            "Imagen a Vídeo simple como de Frame a Frame (fotograma inicial y final)."
         ),
         "estimated_gb": 29.8,
         "min_vram_gb": 9.5,
@@ -467,16 +467,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "ltx-2-19b-av",
-        "name": "LTX-2 19B Audio+Vídeo (Genera Vídeo y Sonido Sincronizado)",
+        "name": "LTX-2 19B Audio+Vídeo (T2V, I2V, Frame a Frame y Sonido)",
         "category": "video",
         "is_default": False,
-        "badge": "Vídeo + Audio · A100 Recomendado",
-        "video_modes": ["i2v", "t2v", "audio_video"],
+        "badge": "Vídeo + Audio + Frame a Frame · A100",
+        "video_modes": ["t2v", "i2v", "flf2v", "av"],
         "default_fps": 24,
         "default_steps": 25,
         "description": (
-            "Modelo multimodal de 19B de Lightricks que genera vídeo y pista de audio ambiental/efectos a la vez. "
-            "Óptimo en A100/H100; en L4 funciona lento mediante CPU Offload intenso."
+            "Modelo multimodal de 19B de Lightricks que genera vídeo (desde texto, 1 imagen o Frame a Frame) "
+            "y pista de audio sincronizada a la vez. Óptimo en A100/H100."
         ),
         "estimated_gb": 58.0,
         "min_vram_gb": 21.5,
@@ -496,16 +496,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "wan21-i2v-14b-480p",
-        "name": "Wan 2.1 I2V 14B 480P (Alta Precisión · A100 / L4 Lento)",
+        "name": "Wan 2.1 I2V 14B 480P (Imagen a Vídeo y Frame a Frame · A100)",
         "category": "video",
         "is_default": False,
-        "badge": "14B Pesado · Óptimo A100",
-        "video_modes": ["i2v"],
+        "badge": "14B · I2V + Frame a Frame",
+        "video_modes": ["i2v", "flf2v"],
         "default_fps": 16,
         "default_steps": 25,
         "description": (
-            "Modelo grande de 14B parámetros para animación detallada de imágenes. "
-            "Diseñado para A100 (40/80 GB); en L4 requiere offload secuencial y tarda varios minutos."
+            "Modelo grande de 14B parámetros para animación detallada de 1 imagen o transición Frame a Frame. "
+            "Diseñado para A100 (40/80 GB); en L4 usa offload secuencial."
         ),
         "estimated_gb": 68.0,
         "min_vram_gb": 21.5,
@@ -524,12 +524,41 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "wan21-flf2v-14b-720p",
+        "name": "Wan 2.1 FLF2V 14B 720P (Especialista Dedicado Frame a Frame · A100)",
+        "category": "video",
+        "is_default": False,
+        "badge": "Especialista Frame a Frame 720p · A100",
+        "video_modes": ["flf2v", "i2v"],
+        "default_fps": 16,
+        "default_steps": 28,
+        "description": (
+            "Entrenado específicamente por Alibaba Wan-AI para interpolar la escena completa entre un Fotograma Inicial "
+            "y un Fotograma Final en alta definición 720p. Recomendado en A100/H100."
+        ),
+        "estimated_gb": 88.0,
+        "min_vram_gb": 24.0,
+        "recommended_vram_gb": 42.0,
+        "l4_seconds_hint": "Requiere A100 (40/80 GB)",
+        "engine": "wan_i2v_14b",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Wan-AI/Wan2.1-FLF2V-14B-720P-diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
         "id": "wan22-i2v-a14b",
         "name": "Wan 2.2 I2V-A14B MoE (27B Dos Expertos · Exclusivo A100/H100)",
         "category": "video",
         "is_default": False,
         "badge": "Gama Alta · Solo A100 / H100",
-        "video_modes": ["i2v"],
+        "video_modes": ["i2v", "flf2v"],
         "default_fps": 24,
         "default_steps": 28,
         "description": (
@@ -554,12 +583,12 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "ffmpeg-motion-cpu",
-        "name": "Animación de Cámara Instantánea FFmpeg (Zoom / Paneo · 0 GB)",
+        "name": "Animación Instantánea FFmpeg (Zoom / Paneo / Transición 2 Fotos · 0 GB)",
         "category": "video",
         "is_default": False,
         "builtin_no_download": True,
         "badge": "0 GB · Instantáneo CPU/GPU",
-        "video_modes": ["i2v"],
+        "video_modes": ["i2v", "flf2v"],
         "default_fps": 24,
         "default_steps": 1,
         "description": (

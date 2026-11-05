@@ -29,7 +29,13 @@ from studio.memory_manager import (
 )
 
 
-def _apply_best_offload(pipe: Any, vram_total_gb: float, min_vram_gb: float, job: Optional[JobRecord] = None, pct: float = 90.0) -> None:
+def _apply_best_offload(
+    pipe: Any,
+    vram_total_gb: float,
+    min_vram_gb: float,
+    job: Optional[JobRecord] = None,
+    pct: float = 90.0,
+) -> None:
     if hasattr(pipe, "remove_all_hooks"):
         try:
             pipe.remove_all_hooks()
@@ -48,10 +54,10 @@ def _apply_best_offload(pipe: Any, vram_total_gb: float, min_vram_gb: float, job
         if job:
             job.log("Activando CPU Offload inteligente...", progress=pct, step="Activando CPU Offload...")
         pipe.enable_model_cpu_offload()
-    else:
+    elif hasattr(pipe, "to"):
         pipe.to("cuda")
 
-    if hasattr(pipe, "vae"):
+    if hasattr(pipe, "vae") and pipe.vae is not None:
         if hasattr(pipe.vae, "enable_slicing"):
             try:
                 pipe.vae.enable_slicing()
@@ -64,34 +70,144 @@ def _apply_best_offload(pipe: Any, vram_total_gb: float, min_vram_gb: float, job
                 pass
 
 
+def _switch_pipeline_class(
+    handle: Dict[str, Any],
+    target_cls: Any,
+    vram_total_gb: Optional[float] = None,
+) -> Any:
+    """
+    Conmuta entre clases hermanas de Diffusers (ej. WanImageToVideoPipeline <-> WanPipeline)
+    filtrando estrictamente los argumentos admitidos por target_cls.__init__ para evitar
+    TypeError ('image_encoder', 'image_processor', etc.), conservando dtypes mixtos
+    (VAE float32 + Transformer bfloat16), preservando flags de configuración como
+    expand_timesteps=True / boundary_ratio, y reactivando CPU Offload sin duplicar RAM.
+    """
+    pipe = handle["pipe"]
+    if isinstance(pipe, target_cls):
+        return pipe
+
+    if hasattr(pipe, "remove_all_hooks"):
+        try:
+            pipe.remove_all_hooks()
+        except Exception:
+            pass
+
+    saved_components: Dict[str, Any] = dict(handle.get("all_components") or {})
+    cur_components: Dict[str, Any] = dict(getattr(pipe, "components", {}) or {})
+    for k, v in cur_components.items():
+        if v is not None or k not in saved_components:
+            saved_components[k] = v
+    handle["all_components"] = saved_components
+
+    cfg_dict: Dict[str, Any] = {}
+    raw_cfg = getattr(pipe, "config", None)
+    if isinstance(raw_cfg, dict):
+        for k, v in raw_cfg.items():
+            if not str(k).startswith("_"):
+                cfg_dict[k] = v
+
+    extra_init: Dict[str, Any] = dict(handle.get("extra_init_kwargs") or {})
+    merged_candidates: Dict[str, Any] = {
+        **cfg_dict,
+        **extra_init,
+        **saved_components,
+    }
+
+    sig = inspect.signature(target_cls.__init__)
+    accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    if accepts_var_kw:
+        valid_kwargs = merged_candidates
+    else:
+        allowed = {
+            name
+            for name, param in sig.parameters.items()
+            if name != "self"
+            and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        valid_kwargs = {k: v for k, v in merged_candidates.items() if k in allowed}
+
+    new_pipe = target_cls(**valid_kwargs)
+    if vram_total_gb is None:
+        vram_total_gb = float(query_gpu_info().get("vram_total_gb", 22.0))
+    _apply_best_offload(new_pipe, vram_total_gb, float(handle.get("min_vram_gb", 14.0)))
+    handle["pipe"] = new_pipe
+    return new_pipe
+
+
+def _read_model_index_json(base_dir: Path) -> Dict[str, Any]:
+    idx_file = base_dir / "model_index.json"
+    if idx_file.exists():
+        try:
+            return json.loads(idx_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
 def _instantiate_video_pipeline(engine: str, base_dir: Path) -> Dict[str, Any]:
     """Instancia la clase exacta de Diffusers con los tipos precisos (ej. VAE float32 en Wan/Sana/SkyReels)."""
     import torch  # type: ignore
     import diffusers  # type: ignore
 
     bdir = str(base_dir)
+    idx_cfg = _read_model_index_json(base_dir)
 
     if engine == "wan_ti2v":
         from diffusers import AutoencoderKLWan, WanImageToVideoPipeline, WanPipeline  # type: ignore
 
         vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
-        # Wan2.2-TI2V-5B soporta tanto I2V (expand_timesteps=True) como T2V compartiendo componentes
-        pipe_i2v = WanImageToVideoPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
-        return {"pipe": pipe_i2v, "i2v_cls": WanImageToVideoPipeline, "t2v_cls": WanPipeline, "active_mode": "i2v"}
+        exp_ts = bool(idx_cfg.get("expand_timesteps", True))
+        b_ratio = idx_cfg.get("boundary_ratio", None)
+        pipe_i2v = WanImageToVideoPipeline.from_pretrained(
+            bdir,
+            vae=vae,
+            torch_dtype=torch.bfloat16,
+            expand_timesteps=exp_ts,
+            boundary_ratio=b_ratio,
+        )
+        return {
+            "pipe": pipe_i2v,
+            "all_components": dict(pipe_i2v.components),
+            "extra_init_kwargs": {"expand_timesteps": exp_ts, "boundary_ratio": b_ratio},
+            "i2v_cls": WanImageToVideoPipeline,
+            "t2v_cls": WanPipeline,
+            "flf2v_cls": None,  # Wan 2.2 TI2V (expand_timesteps=True) no condiciona last_image
+            "supported_submodes": ["t2v", "i2v"],
+            "active_mode": "i2v",
+        }
 
     if engine == "wan_t2v":
         from diffusers import AutoencoderKLWan, WanPipeline  # type: ignore
 
         vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
         pipe = WanPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
-        return {"pipe": pipe, "i2v_cls": None, "t2v_cls": WanPipeline, "active_mode": "t2v"}
+        return {
+            "pipe": pipe,
+            "all_components": dict(pipe.components),
+            "extra_init_kwargs": {},
+            "i2v_cls": None,
+            "t2v_cls": WanPipeline,
+            "flf2v_cls": None,
+            "supported_submodes": ["t2v"],
+            "active_mode": "t2v",
+        }
 
     if engine == "wan_vace":
-        from diffusers import AutoencoderKLWan, WanVACEPipeline  # type: ignore
+        from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanVACEPipeline  # type: ignore
 
         vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
         pipe = WanVACEPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
-        return {"pipe": pipe, "i2v_cls": WanVACEPipeline, "t2v_cls": WanVACEPipeline, "active_mode": "both"}
+        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=3.0)
+        return {
+            "pipe": pipe,
+            "all_components": dict(pipe.components),
+            "extra_init_kwargs": {},
+            "i2v_cls": WanVACEPipeline,
+            "t2v_cls": WanVACEPipeline,
+            "flf2v_cls": WanVACEPipeline,
+            "supported_submodes": ["t2v", "i2v", "flf2v"],
+            "active_mode": "unified",
+        }
 
     if engine == "wan_i2v_14b":
         from diffusers import AutoencoderKLWan, WanImageToVideoPipeline  # type: ignore
@@ -105,27 +221,64 @@ def _instantiate_video_pipeline(engine: str, base_dir: Path) -> Dict[str, Any]:
                 bdir, subfolder="image_encoder", torch_dtype=torch.float32
             )
         pipe = WanImageToVideoPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16, **extra_kw)
-        return {"pipe": pipe, "i2v_cls": WanImageToVideoPipeline, "t2v_cls": None, "active_mode": "i2v"}
+        return {
+            "pipe": pipe,
+            "all_components": dict(pipe.components),
+            "extra_init_kwargs": {},
+            "i2v_cls": WanImageToVideoPipeline,
+            "t2v_cls": None,
+            "flf2v_cls": WanImageToVideoPipeline,
+            "supported_submodes": ["i2v", "flf2v"],
+            "active_mode": "i2v",
+        }
 
     if engine == "ltx_video":
-        from diffusers import LTXImageToVideoPipeline, LTXPipeline  # type: ignore
+        from diffusers import LTXConditionPipeline  # type: ignore
 
-        pipe_i2v = LTXImageToVideoPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
-        return {"pipe": pipe_i2v, "i2v_cls": LTXImageToVideoPipeline, "t2v_cls": LTXPipeline, "active_mode": "i2v"}
+        # LTXConditionPipeline soporta nativamente T2V (sin conditions), I2V (frame 0) y Frame a Frame (frame 0 + N-1)
+        pipe = LTXConditionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+        return {
+            "pipe": pipe,
+            "all_components": dict(pipe.components),
+            "extra_init_kwargs": {},
+            "i2v_cls": LTXConditionPipeline,
+            "t2v_cls": LTXConditionPipeline,
+            "flf2v_cls": LTXConditionPipeline,
+            "supported_submodes": ["t2v", "i2v", "flf2v"],
+            "active_mode": "unified",
+        }
 
     if engine == "ltx2_av":
-        from diffusers import LTX2ImageToVideoPipeline, LTX2Pipeline  # type: ignore
+        from diffusers import LTX2ConditionPipeline, LTX2Pipeline  # type: ignore
 
-        pipe_i2v = LTX2ImageToVideoPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
-        return {"pipe": pipe_i2v, "i2v_cls": LTX2ImageToVideoPipeline, "t2v_cls": LTX2Pipeline, "active_mode": "i2v"}
+        pipe_cond = LTX2ConditionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+        return {
+            "pipe": pipe_cond,
+            "all_components": dict(pipe_cond.components),
+            "extra_init_kwargs": {},
+            "i2v_cls": LTX2ConditionPipeline,
+            "t2v_cls": LTX2Pipeline,
+            "flf2v_cls": LTX2ConditionPipeline,
+            "supported_submodes": ["t2v", "i2v", "flf2v"],
+            "active_mode": "i2v",
+        }
 
     if engine == "sana_video":
         from diffusers import SanaImageToVideoPipeline, SanaVideoPipeline  # type: ignore
 
         pipe_i2v = SanaImageToVideoPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
-        if hasattr(pipe_i2v, "vae"):
+        if hasattr(pipe_i2v, "vae") and pipe_i2v.vae is not None:
             pipe_i2v.vae.to(torch.float32)
-        return {"pipe": pipe_i2v, "i2v_cls": SanaImageToVideoPipeline, "t2v_cls": SanaVideoPipeline, "active_mode": "i2v"}
+        return {
+            "pipe": pipe_i2v,
+            "all_components": dict(pipe_i2v.components),
+            "extra_init_kwargs": {},
+            "i2v_cls": SanaImageToVideoPipeline,
+            "t2v_cls": SanaVideoPipeline,
+            "flf2v_cls": None,
+            "supported_submodes": ["t2v", "i2v"],
+            "active_mode": "i2v",
+        }
 
     if engine == "skyreels_v2":
         from diffusers import AutoencoderKLWan, SkyReelsV2ImageToVideoPipeline, UniPCMultistepScheduler  # type: ignore
@@ -133,17 +286,54 @@ def _instantiate_video_pipeline(engine: str, base_dir: Path) -> Dict[str, Any]:
         vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
         pipe = SkyReelsV2ImageToVideoPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
         pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=5.0)
-        return {"pipe": pipe, "i2v_cls": SkyReelsV2ImageToVideoPipeline, "t2v_cls": None, "active_mode": "i2v"}
+        return {
+            "pipe": pipe,
+            "all_components": dict(pipe.components),
+            "extra_init_kwargs": {},
+            "i2v_cls": SkyReelsV2ImageToVideoPipeline,
+            "t2v_cls": None,
+            "flf2v_cls": SkyReelsV2ImageToVideoPipeline,
+            "supported_submodes": ["i2v", "flf2v"],
+            "active_mode": "i2v",
+        }
 
     if engine == "cogvideox_i2v":
         from diffusers import CogVideoXImageToVideoPipeline  # type: ignore
 
         pipe = CogVideoXImageToVideoPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
-        return {"pipe": pipe, "i2v_cls": CogVideoXImageToVideoPipeline, "t2v_cls": None, "active_mode": "i2v"}
+        return {
+            "pipe": pipe,
+            "all_components": dict(pipe.components),
+            "extra_init_kwargs": {},
+            "i2v_cls": CogVideoXImageToVideoPipeline,
+            "t2v_cls": None,
+            "flf2v_cls": None,
+            "supported_submodes": ["i2v"],
+            "active_mode": "i2v",
+        }
 
-    # Fallback genérico para cualquier modelo Diffusers importado desde el Explorador HF
+    # Fallback genérico para cualquier modelo Diffusers importado desde el Explorador HF en vivo
     pipe = diffusers.DiffusionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
-    return {"pipe": pipe, "i2v_cls": None, "t2v_cls": None, "active_mode": "auto"}
+    call_params = inspect.signature(pipe.__call__).parameters
+    sup: List[str] = []
+    if "image" in call_params or "conditions" in call_params or "video" in call_params:
+        sup.append("i2v")
+    if "last_image" in call_params or "conditions" in call_params:
+        sup.append("flf2v")
+    # Comprobar si image es opcional para permitir t2v
+    img_p = call_params.get("image")
+    if img_p is None or img_p.default is not inspect.Parameter.empty:
+        sup.append("t2v")
+    return {
+        "pipe": pipe,
+        "all_components": dict(getattr(pipe, "components", {}) or {}),
+        "extra_init_kwargs": {},
+        "i2v_cls": type(pipe) if "i2v" in sup else None,
+        "t2v_cls": type(pipe) if "t2v" in sup else None,
+        "flf2v_cls": type(pipe) if "flf2v" in sup else None,
+        "supported_submodes": sup or ["t2v", "i2v"],
+        "active_mode": "unified",
+    }
 
 
 def load_video_model_into_memory(
@@ -190,7 +380,7 @@ def load_video_model_into_memory(
     if not torch.cuda.is_available():
         raise RuntimeError(
             "No hay GPU activa en este entorno (modo CPU). "
-            "Puedes usar «Animación de Cámara Instantánea FFmpeg (0 GB)» o ejecutar en Google Colab con GPU."
+            "Puedes usar «Animación Instantánea FFmpeg (0 GB)» o ejecutar en Google Colab con GPU."
         )
 
     if not catalog_manager.is_downloaded(model_id):
@@ -299,7 +489,6 @@ def _write_float_audio_wav(audio_arr: Any, sample_rate: int, wav_path: Path) -> 
 
     arr = np.squeeze(arr)
     if arr.ndim == 2:
-        # Asegurar forma (samples, channels)
         if arr.shape[0] <= 2 and arr.shape[1] > arr.shape[0]:
             arr = arr.T
         channels = arr.shape[1]
@@ -382,9 +571,11 @@ def _frames_to_mp4(
 
 def generate_video_clip(
     mode: str = "ai",  # "ai" | "ffmpeg_motion"
+    video_submode: str = "auto",  # "auto" | "t2v" | "i2v" | "flf2v"
     prompt: str = "",
     negative_prompt: str = "",
     image_path: Optional[Path] = None,
+    end_image_path: Optional[Path] = None,
     audio_path: Optional[Path] = None,
     width: int = 832,
     height: int = 480,
@@ -396,18 +587,56 @@ def generate_video_clip(
     motion_style: str = "zoom_in",
     job: Optional[JobRecord] = None,
 ) -> Dict[str, Any]:
-    """Genera un clip de vídeo con el modelo de IA activo o con animación FFmpeg (CPU, 0 VRAM)."""
+    """
+    Genera un clip de vídeo soportando los 3 modos creativos:
+      - Texto a Vídeo (t2v)
+      - Imagen a Vídeo simple (i2v)
+      - Frame a Frame: Inicio → Fin (flf2v)
+    además de Animación de Cámara / Transición instantánea con FFmpeg (0 GB VRAM).
+    """
     t0 = time.time()
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    has_start_img = bool(image_path and image_path.exists())
+    has_end_img = bool(end_image_path and end_image_path.exists())
+
+    # Resolver submodo efectivo cuando llega en "auto"
+    submode = (video_submode or "auto").strip().lower()
+    if submode not in ("t2v", "i2v", "flf2v"):
+        if has_start_img and has_end_img:
+            submode = "flf2v"
+        elif has_start_img:
+            submode = "i2v"
+        else:
+            submode = "t2v"
+
+    if submode == "t2v":
+        has_start_img = False
+        has_end_img = False
+    elif submode == "i2v":
+        if not has_start_img:
+            raise ValueError(
+                "Modo «Imagen a Vídeo»: sube o selecciona una imagen inicial antes de generar "
+                "(o cambia arriba a la pestaña «Texto a Vídeo»)."
+            )
+        has_end_img = False
+    elif submode == "flf2v":
+        if not has_start_img or not has_end_img:
+            raise ValueError(
+                "Modo «Frame a Frame (Inicio → Fin)»: sube o selecciona tanto el Fotograma Inicial como el Fotograma Final."
+            )
+
     if mode == "ffmpeg_motion":
-        if not image_path or not image_path.exists():
-            raise ValueError("Selecciona o sube una imagen inicial para crear el clip animado con FFmpeg.")
+        if not has_start_img or image_path is None:
+            raise ValueError(
+                "La animación de cámara con FFmpeg necesita al menos una imagen inicial (sube una foto o cambia a IA Texto a Vídeo)."
+            )
         out_name = f"clip_ffmpeg_{ts_slug}.mp4"
         out_path = VIDEOS_OUT_DIR / out_name
         info = create_motion_clip_from_image(
             image_path=image_path,
+            end_image_path=end_image_path if has_end_img else None,
             output_mp4=out_path,
             duration_sec=duration_sec,
             width=width,
@@ -417,14 +646,16 @@ def generate_video_clip(
             audio_path=audio_path,
             job=job,
         )
+        label_mode = "Transición Frame→Frame" if has_end_img else f"Movimiento {motion_style}"
         meta = {
             "id": out_path.stem,
             "filename": out_name,
             "media_url": f"/media/outputs/videos/{out_name}",
             "type": "video",
+            "video_submode": "flf2v" if has_end_img else "i2v",
             "model_id": "ffmpeg-motion-cpu",
-            "model_name": f"Animación FFmpeg ({motion_style})",
-            "prompt": prompt or f"Movimiento {motion_style} sobre {image_path.name}",
+            "model_name": f"Animación FFmpeg ({label_mode})",
+            "prompt": prompt or f"{label_mode} sobre {image_path.name}",
             "duration_seconds": info["duration_seconds"],
             "width": info["width"] or width,
             "height": info["height"] or height,
@@ -443,46 +674,43 @@ def generate_video_clip(
     if not slot:
         raise RuntimeError(
             "No hay ningún modelo de vídeo cargado en RAM/VRAM. "
-            "Elige un modelo arriba y pulsa «Descargar y Cargar» (o usa el botón de Animación FFmpeg 0 GB)."
+            "Elige un modelo arriba y pulsa «Descargar y Cargar» (o usa «Cámara FFmpeg 0 GB»)."
         )
 
     import torch  # type: ignore
 
     handle = slot["handle"]
-    pipe = handle["pipe"]
     engine = handle.get("engine", "generic_diffusers_video")
-    has_img = bool(image_path and image_path.exists())
+    supported = handle.get("supported_submodes") or ["t2v", "i2v"]
 
-    # Conmutar limpiamente entre variante I2V y T2V en modelos híbridos (Wan 2.2 TI2V, LTX, LTX-2, Sana)
-    if has_img and handle.get("active_mode") == "t2v":
-        if handle.get("i2v_cls") is None:
-            # Si el usuario cargó un modelo puro T2V (ej. Wan 2.1 T2V 1.3B) pero dejó una imagen marcada, avisar
-            if job:
-                job.log(
-                    f"Aviso: «{slot['name']}» es un modelo Texto→Vídeo puro; generará guiado por tu prompt.",
-                    level="warning",
-                )
-            has_img = False
-        else:
-            if hasattr(pipe, "remove_all_hooks"):
-                pipe.remove_all_hooks()
-            pipe = handle["i2v_cls"](**pipe.components)
-            vram_total = float(query_gpu_info().get("vram_total_gb", 22.0))
-            _apply_best_offload(pipe, vram_total, float(handle.get("min_vram_gb", 14.0)))
-            handle["pipe"] = pipe
-            handle["active_mode"] = "i2v"
-    elif not has_img and handle.get("active_mode") == "i2v":
-        if handle.get("t2v_cls") is None:
+    # Validar y conmutar la clase de pipeline exacta según submodo ("t2v", "i2v", "flf2v")
+    if submode == "flf2v":
+        target_cls = handle.get("flf2v_cls")
+        if target_cls is None or "flf2v" not in supported:
             raise ValueError(
-                f"El modelo activo («{slot['name']}») requiere una imagen inicial (modo Imagen → Vídeo). "
-                "Selecciona una de tus fotos arriba o elige un modelo compatible con Texto → Vídeo (ej. Wan 2.2 TI2V, LTX-Video o SANA-Video)."
+                f"El modelo cargado («{slot['name']}») no soporta Frame a Frame (Inicio → Fin) nativo. "
+                "Para Frame a Frame con IA carga «LTX-Video 0.9.5 2B», «Wan 2.1 VACE 1.3B» o «SkyReels V2 1.3B» "
+                "(o usa «Cámara FFmpeg 0 GB» para transición instantánea)."
             )
-        if hasattr(pipe, "remove_all_hooks"):
-            pipe.remove_all_hooks()
-        pipe = handle["t2v_cls"](**pipe.components)
-        vram_total = float(query_gpu_info().get("vram_total_gb", 22.0))
-        _apply_best_offload(pipe, vram_total, float(handle.get("min_vram_gb", 14.0)))
-        handle["pipe"] = pipe
+        pipe = _switch_pipeline_class(handle, target_cls)
+        handle["active_mode"] = "flf2v"
+    elif submode == "i2v":
+        target_cls = handle.get("i2v_cls")
+        if target_cls is None or "i2v" not in supported:
+            raise ValueError(
+                f"El modelo cargado («{slot['name']}») es exclusivo de Texto a Vídeo y no recibe imagen inicial. "
+                "Cambia a «Texto a Vídeo» o carga «Wan 2.2 TI2V-5B», «LTX-Video 0.9.5 2B» o «Wan 2.1 VACE 1.3B»."
+            )
+        pipe = _switch_pipeline_class(handle, target_cls)
+        handle["active_mode"] = "i2v"
+    else:  # submode == "t2v"
+        target_cls = handle.get("t2v_cls")
+        if target_cls is None or "t2v" not in supported:
+            raise ValueError(
+                f"El modelo cargado («{slot['name']}») requiere una imagen inicial y no soporta Texto a Vídeo puro. "
+                "Cambia a «Imagen a Vídeo» o carga «Wan 2.2 TI2V-5B», «LTX-Video 0.9.5 2B» o «SANA-Video 2B»."
+            )
+        pipe = _switch_pipeline_class(handle, target_cls)
         handle["active_mode"] = "t2v"
 
     actual_seed = int(seed) if int(seed) > 0 else random.randint(1, 2_147_483_647)
@@ -499,14 +727,18 @@ def generate_video_clip(
     steps = max(4, min(60, int(steps)))
 
     img_pil: Optional[Image.Image] = None
-    if has_img and image_path is not None:
+    end_pil: Optional[Image.Image] = None
+    if has_start_img and image_path is not None:
         raw_img = Image.open(image_path).convert("RGB")
-        # Si la foto es vertical pero las dimensiones quedaron horizontales por defecto, invertir orientación para no deformar
         if raw_img.height > raw_img.width * 1.12 and width > height:
             width, height = height, width
         elif raw_img.width > raw_img.height * 1.12 and height > width:
             width, height = height, width
         img_pil = raw_img.resize((width, height), Image.Resampling.LANCZOS)
+
+    if has_end_img and end_image_path is not None:
+        raw_end = Image.open(end_image_path).convert("RGB")
+        end_pil = _fit_and_crop_rgb(raw_end, width, height)
 
     # Alinear fotogramas a 8*k + 1 (cumple simultáneamente 8k+1 de LTX/LTX-2 y 4k+1 de Wan/Sana/CogVideoX/SkyReels)
     raw_frames = max(17, int(round(duration_sec * fps)))
@@ -515,6 +747,12 @@ def generate_video_clip(
     flush_ram_and_vram()
     generator = torch.Generator(device="cuda").manual_seed(actual_seed)
     step_ts = {"t": time.time()}
+
+    submode_es = {
+        "t2v": "Texto → Vídeo",
+        "i2v": "Imagen → Vídeo",
+        "flf2v": "Frame a Frame (Inicio → Fin)",
+    }.get(submode, submode)
 
     def _step_cb(_p: Any, idx: int, _ts: Any, kw: Dict[str, Any]) -> Dict[str, Any]:
         if job:
@@ -525,22 +763,27 @@ def generate_video_clip(
             cur = idx + 1
             pct = 12.0 + (cur / steps) * 76.0
             job.log(
-                f"Vídeo IA paso {cur}/{steps} ({dt:.2f} s/paso)",
+                f"Vídeo IA [{submode_es}] paso {cur}/{steps} ({dt:.2f} s/paso)",
                 progress=pct,
-                step=f"Generando fotogramas: paso {cur}/{steps}",
+                step=f"{submode_es}: paso {cur}/{steps}",
                 speed_text=f"{dt:.2f} s/paso",
             )
         return kw
 
     if job:
         job.log(
-            f"Generando vídeo con «{slot['name']}» ({width}×{height}, {num_frames} fotogramas @ {fps} fps, {steps} pasos, semilla {actual_seed})...",
+            f"Generando [{submode_es}] con «{slot['name']}» ({width}×{height}, {num_frames} fotogramas @ {fps} fps, {steps} pasos, semilla {actual_seed})...",
             progress=10.0,
-            step=f"Inferencia vídeo 0/{steps}...",
+            step=f"Inferencia {submode_es} 0/{steps}...",
         )
 
     call_sig = inspect.signature(pipe.__call__).parameters
-    clean_prompt = (prompt or "").strip() or "cinematic smooth camera motion, natural subtle movement, high detail"
+    default_prompt_by_mode = {
+        "t2v": "cinematic high quality video, natural smooth motion, rich detail",
+        "i2v": "cinematic smooth camera motion, natural subtle movement, high detail",
+        "flf2v": "smooth natural cinematic transition from the first scene to the final scene, coherent motion",
+    }
+    clean_prompt = (prompt or "").strip() or default_prompt_by_mode.get(submode, default_prompt_by_mode["i2v"])
     default_neg = (
         negative_prompt.strip()
         or "worst quality, blurry, jittery, distorted, static, deformed, overexposed, artifacts"
@@ -565,11 +808,46 @@ def generate_video_clip(
     if "callback_on_step_end" in call_sig:
         kwargs["callback_on_step_end"] = _step_cb
 
-    if img_pil is not None:
-        if "reference_images" in call_sig and "image" not in call_sig:
-            kwargs["reference_images"] = [img_pil]
-        elif "image" in call_sig:
-            kwargs["image"] = img_pil
+    # Condicionamiento específico según arquitectura y submodo (T2V / I2V / FLF2V)
+    if engine == "wan_vace":
+        if submode == "i2v" and img_pil is not None:
+            neutral = Image.new("RGB", (width, height), (128, 128, 128))
+            m_keep = Image.new("L", (width, height), 0)
+            m_gen = Image.new("L", (width, height), 255)
+            kwargs["video"] = [img_pil] + [neutral] * (num_frames - 1)
+            kwargs["mask"] = [m_keep] + [m_gen] * (num_frames - 1)
+        elif submode == "flf2v" and img_pil is not None and end_pil is not None:
+            neutral = Image.new("RGB", (width, height), (128, 128, 128))
+            m_keep = Image.new("L", (width, height), 0)
+            m_gen = Image.new("L", (width, height), 255)
+            kwargs["video"] = [img_pil] + [neutral] * max(1, num_frames - 2) + [end_pil]
+            kwargs["mask"] = [m_keep] + [m_gen] * max(1, num_frames - 2) + [m_keep]
+    elif engine == "ltx_video":
+        from diffusers.pipelines.ltx.pipeline_ltx_condition import LTXVideoCondition  # type: ignore
+
+        if submode == "i2v" and img_pil is not None:
+            kwargs["conditions"] = [LTXVideoCondition(image=img_pil, frame_index=0)]
+        elif submode == "flf2v" and img_pil is not None and end_pil is not None:
+            kwargs["conditions"] = [
+                LTXVideoCondition(image=img_pil, frame_index=0),
+                LTXVideoCondition(image=end_pil, frame_index=num_frames - 1),
+            ]
+    elif engine == "ltx2_av":
+        if submode in ("i2v", "flf2v") and img_pil is not None:
+            from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition  # type: ignore
+
+            conds = [LTX2VideoCondition(frames=img_pil, index=0, strength=1.0)]
+            if submode == "flf2v" and end_pil is not None:
+                conds.append(LTX2VideoCondition(frames=end_pil, index=-1, strength=1.0))
+            kwargs["conditions"] = conds
+    else:
+        if submode in ("i2v", "flf2v") and img_pil is not None:
+            if "reference_images" in call_sig and "image" not in call_sig:
+                kwargs["reference_images"] = [img_pil]
+            elif "image" in call_sig:
+                kwargs["image"] = img_pil
+        if submode == "flf2v" and end_pil is not None and "last_image" in call_sig:
+            kwargs["last_image"] = end_pil
 
     generated_audio_wav: Optional[Path] = None
     try:
@@ -581,15 +859,21 @@ def generate_video_clip(
             audio_out = res_tuple[1] if len(res_tuple) > 1 else None
             frames = video_out[0]
             if audio_out is not None and not (audio_path and audio_path.exists()):
-                sr = int(getattr(getattr(getattr(pipe, "vocoder", None), "config", None), "output_sampling_rate", 24000))
+                sr = int(
+                    getattr(getattr(getattr(pipe, "vocoder", None), "config", None), "output_sampling_rate", 24000)
+                )
                 generated_audio_wav = VIDEOS_OUT_DIR / f"_tmp_ltx2_audio_{ts_slug}.wav"
                 _write_float_audio_wav(audio_out[0], sr, generated_audio_wav)
         else:
             try:
                 output = pipe(**kwargs)
-            except TypeError:
-                kwargs.pop("callback_on_step_end", None)
-                output = pipe(**kwargs)
+            except TypeError as exc:
+                # Solo reintentar sin callback_on_step_end si la firma de una clase personalizada no lo aceptó
+                if "callback_on_step_end" in str(exc) and "callback_on_step_end" in kwargs:
+                    kwargs.pop("callback_on_step_end", None)
+                    output = pipe(**kwargs)
+                else:
+                    raise
             frames = output.frames[0] if hasattr(output, "frames") else output.images
 
         out_name = f"vid_{ts_slug}_{actual_seed % 10000:04d}.mp4"
@@ -610,6 +894,7 @@ def generate_video_clip(
         "filename": out_name,
         "media_url": f"/media/outputs/videos/{out_name}",
         "type": "video",
+        "video_submode": submode,
         "model_id": slot["model_id"],
         "model_name": slot["name"],
         "prompt": clean_prompt,
@@ -627,3 +912,17 @@ def generate_video_clip(
         json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return meta
+
+
+def _fit_and_crop_rgb(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    """Ajusta una imagen al aspect-ratio exacto (center-crop suave) sin deformarla para Frame Final."""
+    src_w, src_h = img.size
+    if src_w <= 0 or src_h <= 0:
+        return img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    scale = max(target_w / src_w, target_h / src_h)
+    new_w = max(target_w, int(round(src_w * scale)))
+    new_h = max(target_h, int(round(src_h * scale)))
+    resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    left = max(0, (new_w - target_w) // 2)
+    top = max(0, (new_h - target_h) // 2)
+    return resized.crop((left, top, left + target_w, top + target_h))

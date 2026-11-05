@@ -396,50 +396,105 @@
 
         <div class="two-col-studio">
           <div class="card">
-            <div class="card-header">
-              <h3>Origen del Clip y Ajustes</h3>
-              <div class="mode-switch">
-                <button class="mode-pill active" data-vmode="ai" id="vmode-ai">🤖 Vídeo IA (GPU)</button>
-                <button class="mode-pill" data-vmode="ffmpeg_motion" id="vmode-ffmpeg">⚡ Animación FFmpeg (0 GB)</button>
+            <div class="card-header" style="flex-wrap:wrap;gap:8px;">
+              <h3>Modo de Creación de Vídeo</h3>
+              <div class="preset-pills">
+                <button type="button" class="vid-preset-chip" data-vw="832" data-vh="480">16:9 (832×480)</button>
+                <button type="button" class="vid-preset-chip" data-vw="480" data-vh="832">9:16 Vertical (480×832)</button>
+                <button type="button" class="vid-preset-chip" data-vw="640" data-vh="640">1:1 (640×640)</button>
               </div>
             </div>
 
             <div class="form-stack">
-              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
-                <label class="field-label" style="margin:0;">Imagen inicial (opcional en modelos Texto → Vídeo)</label>
-                <div class="preset-pills">
-                  <button type="button" class="vid-preset-chip" data-vw="832" data-vh="480">16:9 (832×480)</button>
-                  <button type="button" class="vid-preset-chip" data-vw="480" data-vh="832">9:16 Vertical (480×832)</button>
-                  <button type="button" class="vid-preset-chip" data-vw="640" data-vh="640">1:1 (640×640)</button>
+              <!-- Selector prominente de los 3 modos IA + modo CPU FFmpeg -->
+              <div class="video-submode-grid" id="vid-submode-tabs">
+                <button type="button" class="vsub-card active" data-submode="i2v" id="vsub-i2v">
+                  <span class="vsub-icon">🖼️</span>
+                  <span class="vsub-title">Imagen a Vídeo</span>
+                  <span class="vsub-desc">Anima 1 foto inicial</span>
+                </button>
+                <button type="button" class="vsub-card" data-submode="flf2v" id="vsub-flf2v">
+                  <span class="vsub-icon">🎞️</span>
+                  <span class="vsub-title">Frame a Frame</span>
+                  <span class="vsub-desc">Foto Inicial → Foto Final</span>
+                </button>
+                <button type="button" class="vsub-card" data-submode="t2v" id="vsub-t2v">
+                  <span class="vsub-icon">📝</span>
+                  <span class="vsub-title">Texto a Vídeo</span>
+                  <span class="vsub-desc">Solo con descripción</span>
+                </button>
+                <button type="button" class="vsub-card" data-submode="ffmpeg" id="vsub-ffmpeg">
+                  <span class="vsub-icon">⚡</span>
+                  <span class="vsub-title">Cámara FFmpeg</span>
+                  <span class="vsub-desc">Instantáneo · 0 GB GPU</span>
+                </button>
+              </div>
+
+              <!-- Aviso automático si el modelo elegido no soporta el submodo actual -->
+              <div id="vid-submode-compat-banner" class="vid-compat-banner" hidden></div>
+
+              <!-- Bloque de selección de fotogramas (1 imagen en I2V, 2 imágenes Inicio→Fin en Frame a Frame) -->
+              <div id="vid-frames-area" class="vid-frames-area">
+                <div class="vid-frame-slot" id="vid-slot-start">
+                  <div class="vfs-head">
+                    <strong id="vid-start-label">🖼️ Imagen Inicial</strong>
+                    <label class="btn btn-secondary btn-xs file-btn">
+                      📤 Subir imagen
+                      <input type="file" id="input-vid-upload-img" accept="image/*" hidden />
+                    </label>
+                  </div>
+                  <select id="vid-source-image"></select>
+                  <div class="selected-thumb-box" id="vid-source-preview-box">
+                    <span class="muted">Sube una imagen con «📤 Subir imagen» o elige una generada arriba</span>
+                  </div>
+                </div>
+
+                <div class="vid-swap-col" id="vid-swap-col" hidden>
+                  <button type="button" class="btn btn-ghost btn-xs" id="btn-vid-swap-frames" title="Intercambiar Fotograma Inicial y Fotograma Final">
+                    ⇄ Invertir
+                  </button>
+                </div>
+
+                <div class="vid-frame-slot" id="vid-slot-end" hidden>
+                  <div class="vfs-head">
+                    <strong>🏁 Fotograma Final (Destino)</strong>
+                    <label class="btn btn-secondary btn-xs file-btn">
+                      📤 Subir final
+                      <input type="file" id="input-vid-upload-end-img" accept="image/*" hidden />
+                    </label>
+                  </div>
+                  <select id="vid-end-image"></select>
+                  <div class="selected-thumb-box" id="vid-end-preview-box">
+                    <span class="muted">Sube o elige la imagen donde debe terminar el vídeo</span>
+                  </div>
                 </div>
               </div>
-              <div class="row-gap">
-                <select id="vid-source-image" class="flex-1"></select>
-                <label class="btn btn-secondary btn-sm file-btn">
-                  📷 Subir otra
-                  <input type="file" id="input-vid-upload-img" accept="image/*" hidden />
-                </label>
-              </div>
-              <div class="selected-thumb-box" id="vid-source-preview-box">
-                <span class="muted">Selecciona una imagen arriba (o «Sin imagen» para Texto → Vídeo)</span>
+
+              <!-- Aviso limpio cuando está en Texto a Vídeo puro -->
+              <div id="vid-t2v-note" class="vid-t2v-note" hidden>
+                📝 <strong>Modo Texto a Vídeo activo:</strong> no necesitas subir ninguna imagen; escribe directamente la escena abajo y el modelo generará el clip desde cero.
               </div>
 
               <label class="field-label">Pista de voz / música opcional (se une al MP4)</label>
               <select id="vid-source-audio"></select>
 
               <div id="vid-ai-fields">
-                <label class="field-label">Prompt de movimiento / escena</label>
+                <label class="field-label" id="vid-prompt-label">Prompt de movimiento / escena</label>
                 <textarea id="vid-prompt" rows="2" placeholder="Ej: La cámara se acerca suavemente, brisa ligera en el cabello, iluminación cinematográfica natural..."></textarea>
               </div>
 
               <div id="vid-ffmpeg-fields" hidden>
-                <label class="field-label">Movimiento de cámara FFmpeg (instantáneo sin GPU)</label>
+                <label class="field-label">Movimiento / transición FFmpeg (instantáneo sin GPU)</label>
                 <select id="vid-motion-style">
                   <option value="zoom_in">Acercamiento suave (Zoom In)</option>
                   <option value="zoom_out">Alejamiento suave (Zoom Out)</option>
-                  <option value="pan_right">Paneo lateral suave</option>
-                  <option value="none">Plano fijo limpio BT.709</option>
+                  <option value="pan_right">Paneo / Deslizamiento lateral suave</option>
+                  <option value="none">Plano fijo / Fundido limpio BT.709</option>
                 </select>
+                <label class="check-row" style="margin-top:6px;">
+                  <input type="checkbox" id="chk-ffmpeg-two-frames" />
+                  <span>Usar también Fotograma Final (transición suave entre 2 fotos)</span>
+                </label>
               </div>
 
               <div class="params-grid-4">
