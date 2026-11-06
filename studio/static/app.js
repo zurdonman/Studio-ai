@@ -842,25 +842,46 @@
     syncLoraQualityPills();
   }
 
+  function getLoraRecommendedForSubmode(loraObj, submode) {
+    if (!loraObj) return null;
+    const isFlf = submode === "flf2v";
+    return {
+      steps: Number(
+        (isFlf && loraObj.flf2v_recommended_steps) || loraObj.recommended_steps || 6
+      ),
+      cfg: Number(
+        isFlf && loraObj.flf2v_recommended_cfg != null
+          ? loraObj.flf2v_recommended_cfg
+          : loraObj.recommended_cfg != null
+          ? loraObj.recommended_cfg
+          : 1.0
+      ),
+      scale: Number(
+        (isFlf && loraObj.flf2v_recommended_scale) || loraObj.default_lora_scale || 1.0
+      ),
+    };
+  }
+
   function resetVideoStepsToRecommended() {
     const mid = $("select-video-model") ? $("select-video-model").value : "";
     const m = state.catalog.find((x) => x.id === mid);
     const spec = (m && m.official_spec) || {};
     const lid = $("vid-lora-select") ? $("vid-lora-select").value : "";
     const loraObj = lid ? state.catalog.find((x) => x.id === lid) : null;
+    const loraRec = getLoraRecommendedForSubmode(loraObj, state.videoSubmode || "i2v");
 
-    const recSteps = loraObj
-      ? Number(loraObj.recommended_steps || 6)
+    const recSteps = loraRec
+      ? loraRec.steps
       : Number(spec.default_steps || (m && m.default_steps) || 45);
-    const recCfg = loraObj
-      ? Number(loraObj.recommended_cfg || 1.0)
+    const recCfg = loraRec
+      ? loraRec.cfg
       : Number(spec.default_cfg || (m && m.default_cfg) || 5.0);
 
     if ($("vid-steps")) $("vid-steps").value = recSteps;
     if ($("vid-steps-slider")) $("vid-steps-slider").value = recSteps;
     if ($("vid-cfg")) $("vid-cfg").value = recCfg;
-    if (loraObj && $("vid-lora-scale")) {
-      $("vid-lora-scale").value = loraObj.default_lora_scale || 1.0;
+    if (loraRec && $("vid-lora-scale")) {
+      $("vid-lora-scale").value = loraRec.scale;
     }
     updateVideoStepsSafetyNote();
   }
@@ -901,32 +922,49 @@
       const dlBtn = $("btn-dl-vid-lora");
       if (dlBtn) dlBtn.hidden = Boolean(loraObj.downloaded);
       if (steps <= 12) {
-        const secPerStep = mid.includes("5b") ? (cfg > 1.01 ? 24.0 : 13.5) : (cfg > 1.01 ? 7.5 : 4.2);
-        const estDiffMin = Math.max(0.5, Math.round((steps * secPerStep) / 6.0) / 10);
+        const isHeavy14b = mid.includes("14b") || mid.includes("13b");
+        const isMid5b = mid.includes("5b");
+        const secPerStep = isHeavy14b
+          ? cfg > 1.01
+            ? 27.0
+            : 15.5
+          : isMid5b
+          ? cfg > 1.01
+            ? 24.0
+            : 13.5
+          : cfg > 1.01
+          ? 5.5
+          : 3.4;
+        const estDiffMin = Math.max(0.4, Math.round((steps * secPerStep) / 6.0) / 10);
         noteEl.className = "vid-steps-note turbo";
         noteEl.textContent =
-          cfg > 1.01
+          state.videoSubmode === "flf2v"
+            ? `⚡ LoRA Bidireccional Frame a Frame (${steps} pasos · Fuerza ${scale} · CFG ${cfg}): interpola Inicio → Fin en ~${estDiffMin} min en L4 manteniendo visibilidad de ambos fotogramas.`
+            : cfg > 1.01
             ? `🎯 LoRA + Fidelidad Extra (${steps} pasos · Fuerza ${scale} · CFG ${cfg}): difusión en ~${estDiffMin} min en L4 con mayor nitidez y obediencia al prompt/pose.`
-            : `⚡ LoRA Acelerador activo (${steps} pasos · Fuerza ${scale} · CFG ${cfg}): difusión en ~${estDiffMin} min en GPU L4 (~12× más rápido) sin deformar.`;
+            : `⚡ LoRA Acelerador activo (${steps} pasos · Fuerza ${scale} · CFG ${cfg}): difusión en ~${estDiffMin} min en GPU L4 sin deformar.`;
       } else {
         noteEl.className = "vid-steps-note warn";
-        noteEl.textContent = `⚠️ Con el LoRA Acelerador activo lo ideal son 6–10 pasos (Fuerza 0.75–1.0). Pulsa «↺ Resetear pasos» o elige un modo arriba.`;
+        noteEl.textContent = `⚠️ Con el LoRA Acelerador activo lo ideal son 6–10 pasos (Fuerza 0.65–1.0). Pulsa «↺ Resetear pasos» o elige un modo arriba.`;
       }
       return;
     }
 
     if (defSteps <= 10) {
       noteEl.className = "vid-steps-note turbo";
-      noteEl.textContent = `⚡ Modelo ya destilado de fábrica (${steps} pasos · CFG ${cfg}): velocidad máxima nativa (~1 min en L4).`;
+      noteEl.textContent = `⚡ Modelo ya destilado de fábrica (${steps} pasos · CFG ${cfg}): velocidad máxima nativa (~45 s – 1 min en L4 sin necesitar LoRA externo).`;
       return;
     }
 
     if (steps < minSafe) {
       noteEl.className = "vid-steps-note warn";
-      noteEl.textContent = `⚠️ Menos de ${minSafe} pasos sin LoRA puede deformar piernas/brazos o dejar borrones. Usa ≥${fastSafe} pasos o pulsa «↺ Resetear pasos».`;
+      noteEl.textContent = `⚠️ Menos de ${minSafe} pasos sin LoRA puede deformar piernas/brazos o dejar borrones. Usa ≥${fastSafe} pasos o activa arriba un LoRA Bidireccional de 6–8 pasos.`;
     } else if (state.videoSubmode === "flf2v") {
+      const is14b = mid.includes("14b");
       noteEl.className = "vid-steps-note ok";
-      noteEl.textContent = `🎞️ Modo Frame a Frame bidireccional activo (${steps} pasos · CFG ${cfg} sin LoRA causal): interpola de forma continua entre ambas poses (~1.2–1.5 min en L4 con 1.3B) sin saltos en el último fotograma.`;
+      noteEl.textContent = is14b
+        ? `🎞️ Modo 14B Frame a Frame oficial (${steps} pasos · CFG ${cfg}): máxima calidad de transición; para producir ×5 más rápido (~1.6 min en L4) activa arriba el LoRA FusionX o LightX2V.`
+        : `🎞️ Modo Frame a Frame bidireccional (${steps} pasos · CFG ${cfg}): interpola de forma continua entre ambas poses (~1.2 min base, o ~25 s activando arriba un LoRA Bidireccional 1.3B).`;
     } else if (steps < defSteps - 4) {
       const savedPct = Math.max(5, Math.round((1 - steps / defSteps) * 100));
       noteEl.className = "vid-steps-note ok";
@@ -2534,8 +2572,9 @@
         }
         resetVideoStepsToRecommended();
         if (loraObj) {
+          const rec = getLoraRecommendedForSubmode(loraObj, state.videoSubmode || "i2v");
           toast(
-            `LoRA «${loraObj.name.split("(")[0].trim()}» seleccionado: ajustados automáticamente ${loraObj.recommended_steps || 6} pasos y CFG ${loraObj.recommended_cfg || 1.0}.`,
+            `LoRA «${loraObj.name.split("(")[0].trim()}» activo: ajustados ${rec.steps} pasos, Fuerza ${rec.scale} y CFG ${rec.cfg}.`,
             "success"
           );
         }

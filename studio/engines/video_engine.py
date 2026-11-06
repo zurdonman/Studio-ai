@@ -498,6 +498,146 @@ def _resolve_lora_safetensors_file(lora_id: str) -> Path:
     raise FileNotFoundError(f"No se encontró archivo .safetensors para el LoRA {lora_id}")
 
 
+def _resolve_fp8_transformer_file(defn: Dict[str, Any]) -> Path:
+    model_id = defn["id"]
+    m_dir = catalog_manager.model_dir(model_id)
+    for art in defn.get("artifacts", []):
+        if art.get("role") != "transformer_fp8":
+            continue
+        sub = m_dir / art["subdir"]
+        fn = art.get("filename") or art.get("verify_file")
+        if fn:
+            cand = sub / fn
+            if cand.exists():
+                return cand
+        if sub.exists():
+            found = sorted(sub.rglob("*.safetensors"))
+            if found:
+                return found[0]
+    raise FileNotFoundError(f"No se encontró el checkpoint FP8 del transformer para «{defn.get('name', model_id)}».")
+
+
+def _is_module_layerwise_fp8(module: Any) -> bool:
+    if module is None:
+        return False
+    for sub in module.modules():
+        dh = getattr(sub, "_diffusers_hook", None)
+        if dh is not None and callable(getattr(dh, "get_hook", None)) and dh.get_hook("layerwise_casting") is not None:
+            return True
+    return False
+
+
+def _enable_fp8_layerwise_casting_safe(transformer: Any) -> Any:
+    """
+    Activa almacenamiento FP8 (`float8_e4m3fn`, ~50 % menos VRAM) con cálculo `bfloat16` al vuelo
+    en las capas lineales del Transformer 13B/14B, garantizando que cualquier parámetro o buffer
+    excluido del hook (`scale_shift_table`, `patch_embedding`, `norm`, `pos_embed`, `proj_out`)
+    quede en `bfloat16`/`float32` y nunca en `float8` sin hook.
+    """
+    import torch  # type: ignore
+
+    fp8_dt = getattr(torch, "float8_e4m3fn", None)
+    if fp8_dt is None or not hasattr(transformer, "enable_layerwise_casting"):
+        return transformer.to(torch.bfloat16)
+
+    transformer.enable_layerwise_casting(
+        storage_dtype=fp8_dt,
+        compute_dtype=torch.bfloat16,
+    )
+    fp8_dtypes = tuple(
+        dt
+        for dt in (
+            getattr(torch, "float8_e4m3fn", None),
+            getattr(torch, "float8_e5m2", None),
+        )
+        if dt is not None
+    )
+    for mod in transformer.modules():
+        dh = getattr(mod, "_diffusers_hook", None)
+        has_lc = dh is not None and callable(getattr(dh, "get_hook", None)) and dh.get_hook("layerwise_casting") is not None
+        if not has_lc:
+            for p in mod.parameters(recurse=False):
+                if p.dtype in fp8_dtypes:
+                    p.data = p.data.to(torch.bfloat16)
+            for b in mod.buffers(recurse=False):
+                if b.dtype in fp8_dtypes:
+                    b.data = b.data.to(torch.bfloat16)
+    return transformer
+
+
+def _load_wan_fp8_single_file_transformer(
+    transformer_cls: Any,
+    sf_path: Path,
+    base_dir: Path,
+) -> Any:
+    """
+    Carga un transformer 14B cuantizado en un único archivo `.safetensors` FP8 (`e4m3fn`) usando
+    la configuración local Diffusers (`base/transformer/config.json`) sin duplicar RAM:
+      - Desescala pesos si incluyen tensores `.scale_weight` / `.weight_scale`.
+      - Preserva `img_emb.emb_pos` -> `condition_embedder.image_embedder.pos_embed` (514 tokens en FLF2V-14B),
+        que `convert_wan_transformer_to_diffusers` omite en Diffusers <=0.42.1.
+      - Activa `LayerwiseCastingHook(storage=float8_e4m3fn, compute=bfloat16)` para caber en L4 (22.5 GB VRAM)
+        manteniendo compatibilidad total con PEFT LoRAs rápidos (FusionX / LightX2V).
+    """
+    import safetensors.torch  # type: ignore
+    import torch  # type: ignore
+
+    raw_sd = safetensors.torch.load_file(str(sf_path), device="cpu")
+
+    # Extraer `img_emb.emb_pos` antes de `from_single_file` para inyectarlo intacto en FLF2V-14B (`pos_embed_seq_len=514`)
+    emb_pos_tensor = None
+    for emb_k in ("img_emb.emb_pos", "model.diffusion_model.img_emb.emb_pos"):
+        if emb_k in raw_sd:
+            emb_pos_tensor = raw_sd.pop(emb_k)
+            break
+
+    # Soportar opcionalmente checkpoints fp8_scaled aplicando el escalar y descartando claves auxiliares de escala
+    scale_suffixes = (".scale_weight", ".weight_scale")
+    aux_drop_suffixes = (".scale_input", ".input_scale", ".comfy_quant")
+    for k in list(raw_sd.keys()):
+        if k.endswith(aux_drop_suffixes):
+            raw_sd.pop(k, None)
+            continue
+        for sfx in scale_suffixes:
+            if k.endswith(sfx):
+                scale_val = raw_sd.pop(k)
+                w_key = f"{k[: -len(sfx)]}.weight"
+                if w_key in raw_sd:
+                    raw_sd[w_key] = (raw_sd[w_key].to(torch.bfloat16) * scale_val.to(torch.bfloat16)).to(
+                        getattr(torch, "float8_e4m3fn", torch.bfloat16)
+                    )
+                break
+
+    transformer = transformer_cls.from_single_file(
+        raw_sd,
+        config=str(base_dir),
+        subfolder="transformer",
+        torch_dtype=None,
+        local_files_only=True,
+    )
+    raw_sd.clear()
+
+    if emb_pos_tensor is not None:
+        img_emb_mod = getattr(getattr(transformer, "condition_embedder", None), "image_embedder", None)
+        pos_param = getattr(img_emb_mod, "pos_embed", None)
+        if pos_param is not None and tuple(pos_param.shape) == tuple(emb_pos_tensor.shape):
+            pos_param.data.copy_(emb_pos_tensor.to(device=pos_param.device, dtype=torch.bfloat16))
+
+    return _enable_fp8_layerwise_casting_safe(transformer)
+
+
+def _maybe_set_wan_flow_shift(pipe: Any, flow_shift: Optional[float]) -> None:
+    if flow_shift is None or not hasattr(pipe, "scheduler") or pipe.scheduler is None:
+        return
+    try:
+        from diffusers import UniPCMultistepScheduler  # type: ignore
+
+        if isinstance(pipe.scheduler, UniPCMultistepScheduler):
+            pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=float(flow_shift))
+    except Exception:
+        pass
+
+
 def _sync_video_lora_on_handle(
     handle: Dict[str, Any],
     pipe: Any,
@@ -526,6 +666,7 @@ def _sync_video_lora_on_handle(
                 except Exception:
                     pass
             pipe.unload_lora_weights()
+            _maybe_set_wan_flow_shift(pipe, handle.get("base_flow_shift"))
             _apply_best_offload(pipe, vram_total, min_vram)
             handle["active_lora_id"] = None
             handle["active_lora_scale"] = None
@@ -583,22 +724,65 @@ def _sync_video_lora_on_handle(
     if cur_id and hasattr(pipe, "unload_lora_weights"):
         pipe.unload_lora_weights()
 
+    transformer_mod = getattr(pipe, "transformer", None)
+    is_fp8_lc = _is_module_layerwise_fp8(transformer_mod)
+    torch_mod: Any = None
+    if is_fp8_lc:
+        import torch as _torch_mod  # type: ignore
+
+        torch_mod = _torch_mod
+
     engine = handle.get("engine", "")
-    if engine in ("wan_ti2v", "wan_t2v", "wan_vace", "wan_i2v_14b", "skyreels_v2"):
+    if engine in (
+        "wan_ti2v",
+        "wan_t2v",
+        "wan_vace",
+        "wan_vace_fp8",
+        "wan_i2v_14b",
+        "wan_i2v_14b_fp8",
+        "skyreels_v2",
+    ):
         import safetensors.torch  # type: ignore
 
         raw_sd = safetensors.torch.load_file(str(lora_file), device="cpu")
         clean_sd = _prepare_wan_lora_state_dict(raw_sd)
-        pipe.load_lora_weights(clean_sd, adapter_name="vid_speed_lora")
+        if is_fp8_lc and torch_mod is not None:
+            clean_sd = {
+                k: (v.to(torch_mod.bfloat16) if hasattr(v, "dtype") and v.is_floating_point() else v)
+                for k, v in clean_sd.items()
+            }
+            pipe.load_lora_weights(clean_sd, adapter_name="vid_speed_lora", low_cpu_mem_usage=True)
+        else:
+            pipe.load_lora_weights(clean_sd, adapter_name="vid_speed_lora")
     else:
-        pipe.load_lora_weights(
-            str(lora_file.parent),
-            weight_name=lora_file.name,
-            adapter_name="vid_speed_lora",
-        )
+        lora_kw: Dict[str, Any] = {
+            "weight_name": lora_file.name,
+            "adapter_name": "vid_speed_lora",
+        }
+        if is_fp8_lc:
+            lora_kw["low_cpu_mem_usage"] = True
+        pipe.load_lora_weights(str(lora_file.parent), **lora_kw)
+
+    if is_fp8_lc and transformer_mod is not None and torch_mod is not None:
+        try:
+            from diffusers.hooks.layerwise_casting import _disable_peft_input_autocast  # type: ignore
+
+            _disable_peft_input_autocast(transformer_mod)
+        except Exception:
+            pass
+        for mod_name, sub_mod in transformer_mod.named_modules():
+            if "lora_" in mod_name:
+                for p in sub_mod.parameters(recurse=False):
+                    if p.dtype != torch_mod.bfloat16:
+                        p.data = p.data.to(torch_mod.bfloat16)
 
     if hasattr(pipe, "set_adapters"):
         pipe.set_adapters(["vid_speed_lora"], adapter_weights=[eff_scale])
+
+    if lora_defn.get("recommended_flow_shift") is not None:
+        _maybe_set_wan_flow_shift(pipe, float(lora_defn["recommended_flow_shift"]))
+    elif handle.get("base_flow_shift") is not None:
+        _maybe_set_wan_flow_shift(pipe, float(handle["base_flow_shift"]))
 
     _apply_best_offload(pipe, vram_total, min_vram)
     handle["active_lora_id"] = clean_id
@@ -729,6 +913,7 @@ def _instantiate_video_pipeline(
             "pipe": pipe_i2v,
             "all_components": dict(pipe_i2v.components),
             "extra_init_kwargs": {"expand_timesteps": exp_ts, "boundary_ratio": b_ratio},
+            "base_flow_shift": flow_shift,
             "i2v_cls": WanImageToVideoPipeline,
             "t2v_cls": WanPipeline,
             "flf2v_cls": None,
@@ -747,6 +932,7 @@ def _instantiate_video_pipeline(
             "pipe": pipe,
             "all_components": dict(pipe.components),
             "extra_init_kwargs": {},
+            "base_flow_shift": flow_shift,
             "i2v_cls": None,
             "t2v_cls": WanPipeline,
             "flf2v_cls": None,
@@ -765,6 +951,35 @@ def _instantiate_video_pipeline(
             "pipe": pipe,
             "all_components": dict(pipe.components),
             "extra_init_kwargs": {},
+            "base_flow_shift": flow_shift,
+            "i2v_cls": WanVACEPipeline,
+            "t2v_cls": WanVACEPipeline,
+            "flf2v_cls": WanVACEPipeline,
+            "supported_submodes": ["t2v", "i2v", "flf2v"],
+            "active_mode": "unified",
+        }
+
+    if engine == "wan_vace_fp8":
+        from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanVACEPipeline, WanVACETransformer3DModel  # type: ignore
+
+        if not defn:
+            raise ValueError("Se requiere definición de modelo para cargar Wan VACE 14B FP8.")
+        sf_path = _resolve_fp8_transformer_file(defn)
+        vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
+        transformer = _load_wan_fp8_single_file_transformer(WanVACETransformer3DModel, sf_path, base_dir)
+        pipe = WanVACEPipeline.from_pretrained(
+            bdir,
+            vae=vae,
+            transformer=transformer,
+            torch_dtype=torch.bfloat16,
+        )
+        flow_shift = float(spec.get("flow_shift", 3.0))
+        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=flow_shift)
+        return {
+            "pipe": pipe,
+            "all_components": dict(pipe.components),
+            "extra_init_kwargs": {},
+            "base_flow_shift": flow_shift,
             "i2v_cls": WanVACEPipeline,
             "t2v_cls": WanVACEPipeline,
             "flf2v_cls": WanVACEPipeline,
@@ -788,6 +1003,7 @@ def _instantiate_video_pipeline(
             "pipe": pipe,
             "all_components": dict(pipe.components),
             "extra_init_kwargs": {},
+            "base_flow_shift": flow_shift,
             "i2v_cls": WanImageToVideoPipeline,
             "t2v_cls": None,
             "flf2v_cls": WanImageToVideoPipeline,
@@ -795,10 +1011,44 @@ def _instantiate_video_pipeline(
             "active_mode": "i2v",
         }
 
-    if engine == "ltx_video":
+    if engine == "wan_i2v_14b_fp8":
+        from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanImageToVideoPipeline, WanTransformer3DModel  # type: ignore
+
+        if not defn:
+            raise ValueError("Se requiere definición de modelo para cargar Wan 14B FP8.")
+        sf_path = _resolve_fp8_transformer_file(defn)
+        vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
+        transformer = _load_wan_fp8_single_file_transformer(WanTransformer3DModel, sf_path, base_dir)
+        pipe = WanImageToVideoPipeline.from_pretrained(
+            bdir,
+            vae=vae,
+            transformer=transformer,
+            torch_dtype=torch.bfloat16,
+        )
+        if getattr(pipe, "image_encoder", None) is not None:
+            pipe.image_encoder.to(torch.float32)
+        _attach_dual_image_flf2v_fix(pipe)
+        flow_shift = float(spec.get("flow_shift", 5.0))
+        if pipe.config.boundary_ratio is None:
+            pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=flow_shift)
+        return {
+            "pipe": pipe,
+            "all_components": dict(pipe.components),
+            "extra_init_kwargs": {},
+            "base_flow_shift": flow_shift,
+            "i2v_cls": WanImageToVideoPipeline,
+            "t2v_cls": None,
+            "flf2v_cls": WanImageToVideoPipeline,
+            "supported_submodes": ["i2v", "flf2v"],
+            "active_mode": "i2v",
+        }
+
+    if engine in ("ltx_video", "ltx_video_distilled"):
         from diffusers import LTXConditionPipeline  # type: ignore
 
         pipe = LTXConditionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+        if engine == "ltx_video_distilled" and getattr(pipe, "transformer", None) is not None:
+            _enable_fp8_layerwise_casting_safe(pipe.transformer)
         return {
             "pipe": pipe,
             "all_components": dict(pipe.components),
@@ -1357,8 +1607,8 @@ def generate_video_clip(
             }.get(submode, submode)
             raise ValueError(
                 f"El modelo «{target_defn['name']}» no está entrenado para el modo «{sub_es}». "
-                "Para transiciones fluidas Frame a Frame (Inicio → Fin) elige arriba «Wan 2.1 VACE 1.3B Oficial», "
-                "«Wan 2.1 Fun 1.3B InP», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
+                "Para transiciones fluidas Frame a Frame (Inicio → Fin) elige arriba «Wan 2.1 VACE 14B Quantized FP8», "
+                "«Wan 2.1 FLF2V 14B 720P Quantized FP8», «LTX-Video 0.9.8 13B Distilled» o «Wan 2.1 VACE 1.3B»."
             )
 
     infer_pct_start = 10.0
@@ -1451,7 +1701,11 @@ def generate_video_clip(
         eff_scale_now = float(video_lora_scale if video_lora_scale is not None else active_lora_defn.get("default_lora_scale", 1.0))
         safe_ceiling = max(base_max_lora_steps, 12 if eff_scale_now <= 0.80 else base_max_lora_steps)
         if steps > safe_ceiling:
-            rec_s = int(active_lora_defn.get("recommended_steps") or 6)
+            rec_s = int(
+                (active_lora_defn.get("flf2v_recommended_steps") if submode == "flf2v" else None)
+                or active_lora_defn.get("recommended_steps")
+                or 6
+            )
             if job:
                 job.log(
                     f"⚡ Ajuste anti-congelación: con el LoRA destilado activo se bajan los pasos de {steps} → {rec_s} "
@@ -1473,14 +1727,17 @@ def generate_video_clip(
         raw_start_img = Image.open(image_path).convert("RGB")
         img_size = raw_start_img.size
 
+    lora_rec_cfg = None
+    if active_lora_defn:
+        lora_rec_cfg = (
+            active_lora_defn.get("flf2v_recommended_cfg")
+            if submode == "flf2v" and active_lora_defn.get("flf2v_recommended_cfg") is not None
+            else active_lora_defn.get("recommended_cfg")
+        )
     eff_req_cfg = (
         guidance_scale
         if guidance_scale is not None
-        else (
-            float(active_lora_defn["recommended_cfg"])
-            if active_lora_defn and active_lora_defn.get("recommended_cfg") is not None
-            else None
-        )
+        else (float(lora_rec_cfg) if lora_rec_cfg is not None else None)
     )
     eff = compute_official_video_params(
         defn=defn,
@@ -1578,11 +1835,11 @@ def generate_video_clip(
     # Elegir negative_prompt oficial específico de la familia del modelo
     if (negative_prompt or "").strip():
         eff_neg = negative_prompt.strip()
-    elif engine in ("wan_ti2v", "wan_t2v", "wan_vace", "wan_i2v_14b", "skyreels_v2"):
+    elif engine in ("wan_ti2v", "wan_t2v", "wan_vace", "wan_vace_fp8", "wan_i2v_14b", "wan_i2v_14b_fp8", "skyreels_v2"):
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["wan"]
     elif engine == "sana_video":
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["sana"]
-    elif engine in ("ltx_video", "ltx2_av"):
+    elif engine in ("ltx_video", "ltx_video_distilled", "ltx2_av"):
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["ltx"]
     else:
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["default"]
@@ -1609,11 +1866,14 @@ def generate_video_clip(
         kwargs["callback_on_step_end"] = _step_cb
 
     # Condicionamiento específico verificado para cada arquitectura
-    if engine == "wan_vace":
+    if engine in ("wan_vace", "wan_vace_fp8"):
         try:
             from diffusers import UniPCMultistepScheduler  # type: ignore
 
-            vace_shift = 5.0 if (width * height > 500_000) else float(spec.get("flow_shift", 3.0))
+            if active_lora_defn and active_lora_defn.get("recommended_flow_shift") is not None:
+                vace_shift = float(active_lora_defn["recommended_flow_shift"])
+            else:
+                vace_shift = 5.0 if (width * height > 500_000) else float(spec.get("flow_shift", 3.0))
             pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=vace_shift)
         except Exception:
             pass
@@ -1631,8 +1891,20 @@ def generate_video_clip(
             m_gen = Image.new("L", (width, height), 255)
             kwargs["video"] = [img_pil] + [neutral] * max(1, num_frames - 2) + [end_pil]
             kwargs["mask"] = [m_keep] + [m_gen] * max(1, num_frames - 2) + [m_keep]
-    elif engine == "ltx_video":
+    elif engine in ("ltx_video", "ltx_video_distilled"):
         from diffusers.pipelines.ltx.pipeline_ltx_condition import LTXVideoCondition  # type: ignore
+
+        if engine == "ltx_video_distilled":
+            dist_ts = spec.get("distilled_timesteps")
+            if isinstance(dist_ts, list) and len(dist_ts) == int(steps) and "timesteps" in call_sig:
+                kwargs["timesteps"] = list(dist_ts)
+                kwargs.pop("num_inference_steps", None)
+            if "decode_timestep" in call_sig:
+                kwargs["decode_timestep"] = float(spec.get("decode_timestep", 0.05))
+            if "decode_noise_scale" in call_sig:
+                kwargs["decode_noise_scale"] = float(spec.get("decode_noise_scale", 0.025))
+            if "image_cond_noise_scale" in call_sig:
+                kwargs["image_cond_noise_scale"] = float(spec.get("image_cond_noise_scale", 0.0))
 
         if submode == "i2v" and img_pil is not None:
             kwargs["conditions"] = [LTXVideoCondition(image=img_pil, frame_index=0)]

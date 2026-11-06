@@ -1038,11 +1038,23 @@ def test_flf2v_dual_clip_fix_and_causal_lora_guardrails():
     from studio.catalog import DEFAULT_CATALOG
     from studio.engines.video_engine import _attach_dual_image_flf2v_fix
 
-    # 1) Todos los LoRAs causales / CFG=1.0 marcan incompatible_submodes=["flf2v"] para impedir saltos en el último frame
+    # 1) Los LoRAs causales (Self-Forcing) siguen bloqueados en Frame a Frame, mientras los nuevos LoRAs bidireccionales 14B/1.3B sí permiten flf2v
     loras = {m["id"]: m for m in DEFAULT_CATALOG if m["category"] == "lora" and m.get("lora_target") == "video"}
     assert "flf2v" in loras["lora-wan22-ti2v-5b-turbo"]["incompatible_submodes"]
     assert loras["lora-wan22-ti2v-5b-turbo"]["causal_attention"] is True
-    assert "flf2v" in loras["lora-wan21-1.3b-rcm-turbo"]["incompatible_submodes"]
+    assert "flf2v" in loras["lora-wan22-ti2v-5b-fastwan"]["incompatible_submodes"]
+
+    for bidir_id in (
+        "lora-wan21-14b-fusionx-phantom",
+        "lora-wan21-14b-fusionx-i2v",
+        "lora-wan21-14b-lightx2v-i2v",
+        "lora-wan21-14b-lightx2v-v2",
+        "lora-wan21-1.3b-bidirect2",
+        "lora-wan21-1.3b-rcm-turbo",
+    ):
+        assert bidir_id in loras
+        assert loras[bidir_id]["causal_attention"] is False
+        assert "flf2v" not in loras[bidir_id]["incompatible_submodes"]
 
     # 2) _attach_dual_image_flf2v_fix concatena (2, 257, 1280) -> (1, 514, 1280) cuando pos_embed_seq_len es None
     class FakeDualPipe:
@@ -1064,6 +1076,213 @@ def test_flf2v_dual_clip_fix_and_causal_lora_guardrails():
     p_514 = FakeDualPipe(pos_embed_seq_len=514)
     _attach_dual_image_flf2v_fix(p_514)
     assert p_514.encode_image(["img1", "img2"]).shape == (2, 257, 1280)
+
+
+def test_quantized_14b_distilled_13b_models_and_fp8_loader(monkeypatch, tmp_path):
+    import sys
+    import types
+    import numpy as np
+    from studio.catalog import (
+        DEFAULT_CATALOG,
+        _DIFFUSERS_VIDEO_ALLOW,
+        _matches_artifact_filters,
+        evaluate_gpu_tier,
+        resolve_gpu_profile,
+    )
+    from studio.engines.video_engine import (
+        _load_wan_fp8_single_file_transformer,
+        compute_official_video_params,
+    )
+
+    by_id = {m["id"]: m for m in DEFAULT_CATALOG}
+    prof_l4 = resolve_gpu_profile("L4")
+    prof_t4 = resolve_gpu_profile("T4")
+
+    # 1) Los 4 nuevos modelos grandes cuantizados/destilados (13B–14B) caben con sticker Excelente en GPU L4 (22.5 GB) y soportan flf2v
+    for mid in (
+        "wan21-vace-14b-fp8",
+        "wan21-flf2v-14b-fp8",
+        "wan21-fun-inp-14b-fp8",
+        "ltx-video-13b-distilled",
+    ):
+        assert mid in by_id
+        defn = by_id[mid]
+        assert "flf2v" in defn["video_modes"]
+        tier_l4 = evaluate_gpu_tier(defn, prof_l4)
+        assert tier_l4["compatible"] is True
+        assert tier_l4["tier"] == "excellent"
+
+    # En T4 (15 GB), los 14B FP8 marcan incompatible para que el selector salte automáticamente a VACE 1.3B
+    assert evaluate_gpu_tier(by_id["wan21-vace-14b-fp8"], prof_t4)["compatible"] is False
+    assert evaluate_gpu_tier(by_id["wan21-vace-1.3b"], prof_t4)["compatible"] is True
+
+    # 2) Todos los compatible_models de cada LoRA de vídeo apuntan a IDs reales del catálogo
+    for m in DEFAULT_CATALOG:
+        if m["category"] == "lora" and m.get("lora_target") == "video":
+            for target_id in m.get("compatible_models") or []:
+                assert target_id in by_id, f"{m['id']} referencia modelo inexistente {target_id}"
+
+    # 3) Filtros de descarga excluyen duplicados anidados de LTX-Video 0.9.8 13B (`vae/transformer/*`) y shards F32/BF16 en 14B FP8
+    ltx13_ignore = by_id["ltx-video-13b-distilled"]["artifacts"][0]["ignore_patterns"]
+    assert not _matches_artifact_filters(
+        "vae/transformer/diffusion_pytorch_model-00001-of-00006.safetensors",
+        _DIFFUSERS_VIDEO_ALLOW,
+        ltx13_ignore,
+        True,
+    )
+    assert _matches_artifact_filters(
+        "transformer/diffusion_pytorch_model-00001-of-00006.safetensors",
+        _DIFFUSERS_VIDEO_ALLOW,
+        ltx13_ignore,
+        True,
+    )
+
+    flf14_ignore = by_id["wan21-flf2v-14b-fp8"]["artifacts"][0]["ignore_patterns"]
+    assert not _matches_artifact_filters(
+        "transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+        _DIFFUSERS_VIDEO_ALLOW,
+        flf14_ignore,
+        True,
+    )
+    assert _matches_artifact_filters(
+        "transformer/config.json",
+        _DIFFUSERS_VIDEO_ALLOW,
+        flf14_ignore,
+        True,
+    )
+    assert _matches_artifact_filters(
+        "image_encoder/model.safetensors",
+        _DIFFUSERS_VIDEO_ALLOW,
+        flf14_ignore,
+        True,
+    )
+
+    # 4) Parámetros oficiales de LTX 13B Distilled (8 pasos @ CFG 1.0, regla 8k+1)
+    eff_ltx13 = compute_official_video_params(
+        defn=by_id["ltx-video-13b-distilled"],
+        req_width=896,
+        req_height=512,
+        req_duration_sec=4.0,
+        req_fps=24,
+        req_steps=8,
+        req_cfg=None,
+    )
+    assert eff_ltx13["steps"] == 8
+    assert eff_ltx13["guidance_scale"] == 1.0
+    assert eff_ltx13["num_frames"] == 97
+
+    # 5) Verificar que `_load_wan_fp8_single_file_transformer` inyecta `img_emb.emb_pos` (514 tokens FLF2V-14B),
+    #    desescala `.scale_weight` y convierte buffers excluidos del hook FP8 a bfloat16
+    class FakeParam:
+        def __init__(self, arr, dtype="float8_e4m3fn"):
+            self.arr = np.array(arr, dtype=np.float32)
+            self.dtype = dtype
+            self.device = "cpu"
+            self.shape = self.arr.shape
+
+        @property
+        def data(self):
+            return self
+
+        @data.setter
+        def data(self, other):
+            self.arr = other.arr.copy()
+            self.dtype = other.dtype
+
+        def to(self, dtype=None, device=None):
+            target_dt = dtype if dtype is not None else self.dtype
+            return FakeParam(self.arr.copy(), dtype=target_dt)
+
+        def copy_(self, other):
+            self.arr = other.arr.copy()
+            self.dtype = other.dtype
+
+        def __mul__(self, other):
+            return FakeParam(self.arr * other.arr, dtype=self.dtype)
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.float8_e4m3fn = "float8_e4m3fn"
+    fake_torch.float8_e5m2 = "float8_e5m2"
+    fake_torch.bfloat16 = "bfloat16"
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    fake_st = types.ModuleType("safetensors")
+    fake_st_torch = types.ModuleType("safetensors.torch")
+    saved_captured = {}
+
+    def _fake_load_file(_path, device="cpu"):
+        return {
+            "blocks.0.self_attn.q.weight": FakeParam([[2.0, 4.0]], dtype="float8_e4m3fn"),
+            "blocks.0.self_attn.q.scale_weight": FakeParam([0.5], dtype="bfloat16"),
+            "img_emb.emb_pos": FakeParam(np.full((1, 514, 8), 7.5, dtype=np.float32), dtype="float8_e4m3fn"),
+        }
+
+    fake_st_torch.load_file = _fake_load_file
+    fake_st.torch = fake_st_torch
+    monkeypatch.setitem(sys.modules, "safetensors", fake_st)
+    monkeypatch.setitem(sys.modules, "safetensors.torch", fake_st_torch)
+
+    class FakeSubMod:
+        def __init__(self, hooked, params):
+            self._params = params
+            self._diffusers_hook = (
+                types.SimpleNamespace(get_hook=lambda name: object() if (hooked and name == "layerwise_casting") else None)
+                if hooked
+                else None
+            )
+
+        def parameters(self, recurse=False):
+            return self._params
+
+        def buffers(self, recurse=False):
+            return []
+
+    class FakeTransformerCls:
+        @classmethod
+        def from_single_file(cls, sd, config=None, subfolder=None, torch_dtype=None, local_files_only=False):
+            saved_captured["sd"] = dict(sd)
+            saved_captured["subfolder"] = subfolder
+            pos_p = FakeParam(np.zeros((1, 514, 8), dtype=np.float32), dtype="float8_e4m3fn")
+            hooked_lin = FakeSubMod(True, [FakeParam([[1.0]], dtype="float8_e4m3fn")])
+            unhooked_norm = FakeSubMod(False, [FakeParam([1.0], dtype="float8_e4m3fn")])
+
+            class _Inst:
+                def __init__(self):
+                    self.lc_enabled = False
+                    self.condition_embedder = types.SimpleNamespace(
+                        image_embedder=types.SimpleNamespace(pos_embed=pos_p)
+                    )
+                    self._mods = [self, hooked_lin, unhooked_norm]
+
+                def enable_layerwise_casting(self, storage_dtype=None, compute_dtype=None):
+                    self.lc_enabled = (storage_dtype, compute_dtype)
+
+                def modules(self):
+                    return self._mods
+
+                def parameters(self, recurse=False):
+                    return [pos_p]
+
+                def buffers(self, recurse=False):
+                    return []
+
+            return _Inst()
+
+    sf_dummy = tmp_path / "wan_fp8.safetensors"
+    sf_dummy.write_bytes(b"fp8")
+    tr = _load_wan_fp8_single_file_transformer(FakeTransformerCls, sf_dummy, tmp_path)
+
+    assert tr.lc_enabled == ("float8_e4m3fn", "bfloat16")
+    # `.scale_weight` multiplicado: [[2.0, 4.0]] * 0.5 == [[1.0, 2.0]]
+    assert np.allclose(saved_captured["sd"]["blocks.0.self_attn.q.weight"].arr, [[1.0, 2.0]])
+    assert "img_emb.emb_pos" not in saved_captured["sd"]
+    # `pos_embed` recibió los 514 tokens de `img_emb.emb_pos` en bfloat16
+    assert np.allclose(tr.condition_embedder.image_embedder.pos_embed.arr, 7.5)
+    assert tr.condition_embedder.image_embedder.pos_embed.dtype == "bfloat16"
+    # Módulo CON hook mantiene float8_e4m3fn; módulo SIN hook sube a bfloat16
+    assert tr._mods[1]._params[0].dtype == "float8_e4m3fn"
+    assert tr._mods[2]._params[0].dtype == "bfloat16"
+
 
 
 
