@@ -1580,6 +1580,59 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             }
         ],
     },
+    # ==================== INSPECTOR DE COHERENCIA VISUAL (MCP / MULTI-FOTOGRAMA) ====================
+    {
+        "id": "qwen25-vl-3b-coherence",
+        "name": "Qwen 2.5 VL 3B Instruct 4-bit (★ Inspector Multimodal de Coherencia y Personajes · ~2.8 GB VRAM)",
+        "category": "vision",
+        "is_default": True,
+        "badge": "★ Inspector Coherencia MCP · 4-bit (~2.8 GB VRAM)",
+        "description": (
+            "Modelo multimodal de visión y lenguaje de Alibaba Qwen (3B parámetros en 4-bit NF4 con torre visual en BF16). "
+            "Analiza varios fotogramas a la vez para auditar si las personas, rostros, ropa, iluminación y escenario se mantienen idénticos, "
+            "y genera automáticamente el prompt de reparación para tu agente MCP."
+        ),
+        "estimated_gb": 6.4,
+        "min_vram_gb": 3.2,
+        "recommended_vram_gb": 6.0,
+        "l4_seconds_hint": "3–5 s / auditoría",
+        "engine": "qwen25_vl_coherence",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "config.json",
+                "allow_patterns": [
+                    "*.json",
+                    "*.safetensors",
+                    "*.txt",
+                    "*.tiktoken",
+                    "*.model",
+                    "*.jinja",
+                ],
+            }
+        ],
+    },
+    {
+        "id": "opencv-fast-coherence",
+        "name": "OpenCV + Métricas Fotométricas Rápidas (Color, Luz, Estructura y Nitidez · 0 GB)",
+        "category": "vision",
+        "is_default": False,
+        "builtin_no_download": True,
+        "badge": "0 GB · 0.12s Instantáneo CPU",
+        "description": (
+            "Filtro físico ultrarrápido en CPU con OpenCV (histogramas HSV/LAB, luminancia, keypoints ORB, SSIM y nitidez Laplaciana). "
+            "Detecta al instante saltos bruscos de iluminación, temperatura de color, proporción o desenfoque sin gastar VRAM."
+        ),
+        "estimated_gb": 0.0,
+        "min_vram_gb": 0.0,
+        "recommended_vram_gb": 0.0,
+        "l4_seconds_hint": "0.12 s",
+        "engine": "opencv_fast",
+        "artifacts": [],
+    },
 ]
 
 

@@ -97,6 +97,23 @@ BRIDGE_ONLY_LOCAL_PROPS: Dict[str, Dict[str, Any]] = {
             "description": "Opcional: ruta local en tu PC donde guardar el montaje MP4 final (ej. './montaje.mp4').",
         },
     },
+    "studio_analyze_coherence": {
+        "local_anchor_image_path": {
+            "type": "string",
+            "description": "Opcional: ruta local en tu PC/Termux del Fotograma Ancla #1 (se sube automáticamente a Colab).",
+        },
+        "local_candidate_image_paths": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Opcional: lista de rutas locales en tu PC/Termux de los fotogramas 2..N a auditar (se suben solos).",
+        },
+    },
+    "studio_export_session_log": {
+        "save_to_local_path": {
+            "type": "string",
+            "description": "Opcional: ruta local en tu PC/Termux donde guardar el archivo .md o .txt del log completo.",
+        },
+    },
 }
 
 DOWNLOAD_ASSET_TOOL_DEF: Dict[str, Any] = {
@@ -132,6 +149,7 @@ ASYNC_JOB_TOOLS = {
     "studio_generate_video",
     "studio_generate_speech",
     "studio_render_montage",
+    "studio_analyze_coherence",
 }
 
 
@@ -386,6 +404,7 @@ class StudioColabBridge:
                 ("local_image_path", "image_rel"),
                 ("local_end_image_path", "end_image_rel"),
                 ("local_audio_path", "audio_rel"),
+                ("local_anchor_image_path", "anchor_image_rel"),
             ]
             for local_key, remote_key in upload_single_map:
                 val = args.pop(local_key, None)
@@ -400,6 +419,14 @@ class StudioColabBridge:
                     up = self.upload_local_file(str(ref_p))
                     cur_refs.append(up["rel_path"])
                 args["reference_rels"] = cur_refs
+
+            local_cands = args.pop("local_candidate_image_paths", None)
+            if isinstance(local_cands, list) and local_cands:
+                cur_cands = list(args.get("candidate_image_rels") or [])
+                for cand_p in local_cands:
+                    up = self.upload_local_file(str(cand_p))
+                    cur_cands.append(up["rel_path"])
+                args["candidate_image_rels"] = cur_cands
 
             save_local = args.pop("save_to_local_path", None)
 
@@ -482,6 +509,21 @@ class StudioColabBridge:
                     "id": req_id,
                     "result": {
                         "content": [{"type": "text", "text": json.dumps(done_payload, indent=2, ensure_ascii=False)}],
+                        "isError": False,
+                    },
+                }
+
+            if isinstance(parsed_data, dict) and parsed_data.get("rel_path") and (save_local or self.out_dir):
+                local_saved = self.download_to_local(
+                    rel_path=str(parsed_data["rel_path"]),
+                    save_to_local_path=str(save_local) if save_local else None,
+                )
+                parsed_data["saved_local_path"] = local_saved
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [{"type": "text", "text": json.dumps(parsed_data, indent=2, ensure_ascii=False)}],
                         "isError": False,
                     },
                 }

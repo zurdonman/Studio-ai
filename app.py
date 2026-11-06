@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -33,6 +33,10 @@ from studio.config import (
     UPLOADS_DIR,
     VIDEOS_OUT_DIR,
     ensure_directories,
+)
+from studio.engines.coherence_engine import (
+    load_coherence_vlm_into_memory,
+    run_coherence_analysis,
 )
 from studio.engines.ffmpeg_utils import (
     probe_media_info,
@@ -54,6 +58,7 @@ from studio.engines.video_engine import (
     load_video_model_into_memory,
 )
 from studio.hardware import (
+    build_full_session_log_document,
     colab_console_log,
     hardware_tracker,
     query_gpu_info,
@@ -513,6 +518,18 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
                 job=j,
             ),
         )
+    elif cat == "vision":
+        if defn.get("builtin_no_download"):
+            return {"ok": True, "builtin": True, "message": "OpenCV integrado en CPU (0 GB, sin carga previa)."}
+        job = job_manager.submit(
+            kind="load_model",
+            title=f"Cargar inspector multimodal: {defn['name']}",
+            fn=lambda j: load_coherence_vlm_into_memory(
+                model_id=req.model_id,
+                auto_download=req.auto_download,
+                job=j,
+            ),
+        )
     else:
         raise HTTPException(status_code=400, detail=f"Categoría no soportada: {cat}")
 
@@ -523,7 +540,7 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
 def api_unload_memory(req: MemoryUnloadReq) -> Dict[str, Any]:
     if req.target == "all":
         info = memory_manager.unload_all()
-    elif req.target in ("image", "video", "tts"):
+    elif req.target in ("image", "video", "tts", "vision"):
         info = memory_manager.unload_slot(req.target)
     else:
         info = memory_manager.unload_by_model_id(req.target)
@@ -891,12 +908,80 @@ def api_render_montage(req: MontageRenderReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict()}
 
 
-# ==================== EXPORTAR ZIP Y APAGAR GPU ====================
+# ==================== COHERENCIA VISUAL, EXPORTAR LOG DE SESIÓN Y ZIP ====================
+
+
+class CoherenceAnalyzeReq(BaseModel):
+    anchor_image_rel: str
+    candidate_image_rels: List[str] = Field(min_length=1)
+    scene_goal: str = ""
+    mode: str = "hybrid_auto"
+    strictness_threshold: float = 78.0
+
+
+@app.post("/api/coherence/analyze")
+def api_analyze_coherence(req: CoherenceAnalyzeReq) -> Dict[str, Any]:
+    anchor_p = _resolve_media_rel(req.anchor_image_rel)
+    if not anchor_p:
+        raise HTTPException(status_code=400, detail=f"No se encontró la imagen ancla: {req.anchor_image_rel}")
+    cand_ps: List[Path] = []
+    for r in req.candidate_image_rels:
+        cp = _resolve_media_rel(r)
+        if not cp:
+            raise HTTPException(status_code=400, detail=f"No se encontró el fotograma candidato: {r}")
+        cand_ps.append(cp)
+
+    job = job_manager.submit(
+        kind="coherence",
+        title=f"Coherencia ({req.mode} · {len(cand_ps)} fotos vs {anchor_p.name})",
+        fn=lambda j: run_coherence_analysis(
+            anchor_path=anchor_p,
+            candidate_paths=cand_ps,
+            scene_goal=req.scene_goal,
+            mode=req.mode,
+            strictness_threshold=req.strictness_threshold,
+            job=j,
+        ),
+    )
+    return {"ok": True, "job": job.to_dict()}
+
+
+def _generate_current_session_report(fmt: str = "md") -> tuple[str, str]:
+    downloaded = [
+        {
+            "id": m["id"],
+            "name": m["name"],
+            "category": m["category"],
+            "disk_gb": catalog_manager.disk_usage_gb(m["id"]),
+        }
+        for m in catalog_manager.get_all_definitions()
+        if not m.get("builtin_no_download") and catalog_manager.is_downloaded(m["id"])
+    ]
+    return build_full_session_log_document(
+        jobs_list=job_manager.list_jobs(limit=500, include_logs=True),
+        loaded_summary=memory_manager.status_summary(),
+        downloaded_models=downloaded,
+        fmt=fmt,
+    )
+
+
+@app.get("/api/logs/export")
+def api_export_session_log(format: str = "md") -> Response:
+    """
+    Descarga un documento `.md` o `.txt` con TODO el registro de la sesión desde que se encendió
+    Studio IA hasta el instante actual (ideal en móvil para compartir con una IA sin límite de caracteres).
+    """
+    fmt = "txt" if str(format).lower() == "txt" else "md"
+    colab_console_log(f"Generando e imprimiendo documento completo de registro de sesión (.{fmt})...", icon="📄")
+    filename, content = _generate_current_session_report(fmt=fmt)
+    media_type = "text/plain; charset=utf-8" if fmt == "txt" else "text/markdown; charset=utf-8"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(content=content.encode("utf-8"), media_type=media_type, headers=headers)
 
 
 @app.get("/api/export/zip")
 def api_export_zip() -> StreamingResponse:
-    """Empaqueta todas las imágenes, vídeos, voces, montajes y metadatos en un .zip descargable."""
+    """Empaqueta todas las imágenes, vídeos, voces, montajes y el log completo de sesión en un .zip descargable."""
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -911,6 +996,11 @@ def api_export_zip() -> StreamingResponse:
             for fp in sorted(folder.iterdir()):
                 if fp.is_file():
                     zf.write(fp, arcname=f"{sub_name}/{fp.name}")
+        try:
+            log_fn, log_body = _generate_current_session_report(fmt="md")
+            zf.writestr(f"registro_sesion/{log_fn}", log_body.encode("utf-8"))
+        except Exception:
+            pass
     buf.seek(0)
     _export_tracker["last_export_ts"] = time.time()
     colab_console_log("Archivo .zip de resultados empaquetado y enviado al navegador.", icon="📦")

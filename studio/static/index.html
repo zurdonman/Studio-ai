@@ -44,7 +44,10 @@
     </div>
 
     <div class="topbar-actions">
-      <button class="btn btn-ghost btn-sm" id="btn-open-mcp-modal" title="Conecta tu agente de terminal (Claude Code, Codex, Cursor, Gemini CLI) a Studio IA mediante MCP">
+      <a class="btn btn-secondary btn-sm" href="/api/logs/export?format=md" id="btn-export-session-log" title="Descarga un documento .md completo con todo el registro desde que se encendió Studio IA hasta este instante">
+        📄 Imprimir Log
+      </a>
+      <button class="btn btn-ghost btn-sm" id="btn-open-mcp-modal" title="Conecta tu agente de terminal (Termux, DeepSeek, Qwen, Claude Code, Codex, Cursor) a Studio IA mediante MCP">
         🤖 Conectar MCP
       </button>
       <button class="btn btn-ghost btn-sm" id="btn-open-hf-token" title="Opcional: conecta tu Token de lectura de Hugging Face para descargas más rápidas y modelos con licencia">
@@ -797,6 +800,7 @@
             <button class="filter-chip active" data-cat="all">Todos</button>
             <button class="filter-chip" data-cat="video">🎬 Vídeo</button>
             <button class="filter-chip" data-cat="image">🖼️ Imagen + LoRAs</button>
+            <button class="filter-chip" data-cat="vision">👁️ Coherencia VL</button>
             <button class="filter-chip" data-cat="tts">🎙️ Voz / TTS</button>
           </div>
         </div>
@@ -900,6 +904,10 @@
         <div>
           <h3>Actividad y Registro en Vivo</h3>
           <span class="muted" id="active-jobs-label">Sin tareas en curso</span>
+        </div>
+        <div class="row-gap">
+          <a class="btn btn-ghost btn-sm" href="/api/logs/export?format=md" title="Descargar log completo desde el encendido en formato Markdown (.md)">📄 .MD</a>
+          <a class="btn btn-ghost btn-sm" href="/api/logs/export?format=txt" title="Descargar log completo desde el encendido en texto plano (.txt)">📄 .TXT</a>
         </div>
       </div>
 

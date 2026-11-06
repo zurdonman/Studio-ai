@@ -358,7 +358,10 @@ def generate_or_edit_image(
         )
 
     original_for_inpaint: Optional[Image.Image] = None
-    if base_image_path and base_image_path.exists():
+    has_base = bool(base_image_path and base_image_path.exists())
+    base_resolved = base_image_path.resolve() if has_base and base_image_path else None
+
+    if has_base and base_image_path:
         base_pil = (
             process_image_file_bt709(base_image_path)
             if use_ffmpeg_bt709
@@ -372,8 +375,13 @@ def generate_or_edit_image(
         base_pil.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
 
     refs_pil: List[Image.Image] = []
+    seen_resolved = {base_resolved} if base_resolved else set()
     for rpath in reference_paths or []:
         if rpath and rpath.exists():
+            rp_res = rpath.resolve()
+            if rp_res in seen_resolved:
+                continue
+            seen_resolved.add(rp_res)
             r_img = process_image_file_bt709(rpath) if use_ffmpeg_bt709 else Image.open(rpath).convert("RGB")
             if r_img.size[0] > 1024 or r_img.size[1] > 1024:
                 r_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
@@ -382,14 +390,21 @@ def generate_or_edit_image(
     has_mask = bool(mask_image_path and mask_image_path.exists() and original_for_inpaint is not None)
     if has_mask:
         mode_name = "inpainting_mascara"
+    elif has_base and refs_pil:
+        mode_name = f"multi_referencia ({1 + len(refs_pil)} imgs)"
     elif refs_pil:
-        mode_name = f"multi_referencia ({len(refs_pil)} ref)"
-    elif base_image_path and base_image_path.exists():
-        mode_name = "edicion_simple"
+        mode_name = f"referencia_ancla ({len(refs_pil)} ref)"
+    elif has_base:
+        mode_name = "edicion_anclada"
     else:
         mode_name = "lienzo_nuevo"
 
-    pipe_images: Any = [base_pil] + refs_pil if refs_pil else base_pil
+    if has_base:
+        pipe_images: Any = [base_pil] + refs_pil if refs_pil else base_pil
+    elif refs_pil:
+        pipe_images = refs_pil if len(refs_pil) > 1 else refs_pil[0]
+    else:
+        pipe_images = base_pil
     generator = torch.Generator(device="cuda").manual_seed(actual_seed)
 
     step_start = {"ts": time.time()}
@@ -418,6 +433,11 @@ def generate_or_edit_image(
         )
 
     call_sig = inspect.signature(pipe.__call__).parameters
+    if (has_base or refs_pil) and "image" not in call_sig:
+        raise ValueError(
+            f"El modelo actualmente cargado («{slot['name']}») es solo Texto→Imagen puro y NO admite imágenes de referencia ni anclas. "
+            "Carga o selecciona «qwen-image-edit-2511-pack» para mantener la identidad de personajes y editar fotogramas."
+        )
     effective_true_cfg = 1.0 if ("lightning" in active_names and not negative_prompt.strip()) else float(guidance_scale)
     effective_neg = (negative_prompt.strip() or " ") if effective_true_cfg > 1.0 else None
 

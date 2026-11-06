@@ -1577,6 +1577,171 @@ def test_termux_agent_guide_link_and_preconfigured_bridge(temp_studio_env, monke
     assert 'EMBEDDED_DEFAULT_URL = "http://testserver"' in r_br.text
 
 
+def test_session_log_export_md_and_txt_and_mcp_tool(temp_studio_env, monkeypatch, tmp_path):
+    import json
+    from studio.hardware import colab_console_log
+
+    client, _ = temp_studio_env
+    monkeypatch.setenv("STUDIO_MCP_TOKEN", "st_mcp_logtest")
+    colab_console_log("Evento de prueba para exportación completa de log", icon="🧪")
+
+    # 1) Botón «📄 Imprimir Log» de la Web (`/api/logs/export?format=md` y `?format=txt`)
+    r_md = client.get("/api/logs/export?format=md")
+    assert r_md.status_code == 200
+    assert "attachment; filename=\"studio_ia_log_" in r_md.headers.get("content-disposition", "")
+    assert "Registro Completo de Sesión — Studio IA" in r_md.text
+    assert "Servidor Studio IA encendido" in r_md.text
+    assert "Evento de prueba para exportación completa de log" in r_md.text
+
+    r_txt = client.get("/api/logs/export?format=txt")
+    assert r_txt.status_code == 200
+    assert r_txt.headers.get("content-disposition", "").endswith('.txt"')
+    assert "REGISTRO COMPLETO DE SESIÓN — STUDIO IA" in r_txt.text
+
+    # 2) Herramienta MCP `studio_export_session_log`
+    hdrs = {"Authorization": "Bearer st_mcp_logtest"}
+    r_mcp = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "studio_export_session_log", "arguments": {"format": "md"}},
+        },
+    ).json()["result"]
+    assert r_mcp["isError"] is False
+    log_payload = json.loads(r_mcp["content"][0]["text"])
+    assert log_payload["rel_path"].startswith("outputs/logs/studio_ia_log_")
+    assert client.get(log_payload["media_url"]).status_code == 200
+
+
+def test_coherence_engine_fast_cv_and_hybrid_vlm_and_mcp_repair_loop(temp_studio_env, monkeypatch, tmp_path):
+    import json
+    import cv2
+    import numpy as np
+    from studio.engines import coherence_engine
+    from studio.engines.coherence_engine import analyze_pair_fast_cv
+
+    client, _ = temp_studio_env
+    monkeypatch.setenv("STUDIO_MCP_TOKEN", "st_mcp_cohtest")
+    hdrs = {"Authorization": "Bearer st_mcp_cohtest"}
+
+    # Crear 3 fotogramas sintéticos con textura real (ancla cálida de restaurante, candidato coherente y candidato con deriva fuerte)
+    def _make_restaurant_scene(path, shirt_bgr, bg_bgr, size=(640, 480)):
+        w, h = size
+        canvas = np.full((h, w, 3), bg_bgr, dtype=np.uint8)
+        # Mesa, platos y detalles con bordes nítidos (para keypoints ORB y nitidez Laplaciana)
+        cv2.rectangle(canvas, (0, int(h * 0.65)), (w, h), (45, 70, 115), -1)
+        for x in range(40, w - 40, 60):
+            cv2.line(canvas, (x, 20), (x, int(h * 0.62)), (80, 110, 150), 2)
+        # Dos comensales
+        cv2.circle(canvas, (int(w * 0.35), int(h * 0.36)), 38, (150, 180, 220), -1)
+        cv2.rectangle(canvas, (int(w * 0.24), int(h * 0.44)), (int(w * 0.46), int(h * 0.66)), shirt_bgr, -1)
+        cv2.circle(canvas, (int(w * 0.68), int(h * 0.37)), 36, (145, 175, 215), -1)
+        cv2.rectangle(canvas, (int(w * 0.57), int(h * 0.45)), (int(w * 0.79), int(h * 0.66)), (60, 60, 180), -1)
+        cv2.ellipse(canvas, (int(w * 0.50), int(h * 0.75)), (75, 24), 0, 0, 360, (235, 235, 240), -1)
+        cv2.imwrite(str(path), canvas)
+
+    p_anchor = tmp_path / "rest_ancla.png"
+    p_good = tmp_path / "rest_coherente.png"
+    p_bad = tmp_path / "rest_deriva.png"
+    _make_restaurant_scene(p_anchor, shirt_bgr=(180, 95, 40), bg_bgr=(50, 95, 145), size=(640, 480))
+    _make_restaurant_scene(p_good, shirt_bgr=(178, 92, 42), bg_bgr=(52, 96, 143), size=(640, 480))
+    _make_restaurant_scene(p_bad, shirt_bgr=(30, 220, 40), bg_bgr=(210, 190, 30), size=(480, 640))  # Aspecto invertido + color cambiado
+
+    cv_ok = analyze_pair_fast_cv(p_anchor, p_good)
+    cv_bad = analyze_pair_fast_cv(p_anchor, p_bad)
+    assert cv_ok["cv_overall_score"] >= 82.0
+    assert cv_ok["aspect_ratio_compatible"] is True
+    assert cv_bad["cv_overall_score"] < 55.0
+    assert cv_bad["aspect_ratio_compatible"] is False
+    assert len(cv_bad["cv_warnings"]) >= 1
+
+    # Subir los 3 fotogramas a Studio IA
+    rels = []
+    for fp in (p_anchor, p_good, p_bad):
+        with open(fp, "rb") as fh:
+            up = client.post("/api/assets/upload", files={"file": (fp.name, fh, "image/png")}).json()
+            rels.append(up["asset"]["rel_path"])
+    rel_anchor, rel_good, rel_bad = rels
+
+    # 1) Probar `studio_analyze_coherence` en modo `fast_cv` vía MCP
+    r_fast = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_analyze_coherence",
+                "arguments": {
+                    "anchor_image_rel": rel_anchor,
+                    "candidate_image_rels": [rel_good, rel_bad],
+                    "mode": "fast_cv",
+                    "strictness_threshold": 78.0,
+                },
+            },
+        },
+    ).json()["result"]
+    assert r_fast["isError"] is False
+    fast_res = json.loads(r_fast["content"][0]["text"])["result"]
+    assert fast_res["all_consistent"] is False
+    assert fast_res["comparisons"][0]["verdict"] == "PASS"
+    assert fast_res["comparisons"][1]["verdict"] == "NEEDS_REPAIR"
+    rep_call = fast_res["comparisons"][1]["recommended_repair_tool_call"]
+    assert rep_call["tool"] == "studio_generate_or_edit_image"
+    assert rep_call["arguments"]["model_id"] == "qwen-image-edit-2511-pack"
+    assert rep_call["arguments"]["base_image_rel"] == rel_anchor
+
+    # 2) Probar Etapa 2 semántica simulando Qwen2.5-VL-3B detectando cambio de rostro en una escena donde el fondo sí coincidía
+    monkeypatch.setattr(coherence_engine, "load_coherence_vlm_into_memory", lambda **_kw: {"model_id": "qwen25-vl-3b-coherence"})
+    monkeypatch.setattr(
+        coherence_engine,
+        "analyze_pair_qwen_vl",
+        lambda **_kw: {
+            "same_people_count": True,
+            "character_identity_score": 48.0,  # ¡Cambió la cara aunque OpenCV vio el mismo fondo!
+            "clothing_hair_score": 52.0,
+            "environment_props_score": 94.0,
+            "flf2v_pose_transition_score": 85.0,
+            "vlm_overall_score": 61.8,
+            "anchor_characters_summary": "Hombre con gafas y camisa azul junto a mujer pelirroja.",
+            "drifts_detected": ["El hombre perdió las gafas y ahora parece otra persona con camiseta verde."],
+            "repair_edit_prompt": "Mantén exactamente al hombre con gafas y camisa azul y a la mujer pelirroja de la imagen original; cambia solo a que brindan con sus copas.",
+            "raw_vlm_response": "{}",
+            "elapsed_seconds": 0.1,
+        },
+    )
+    r_vlm = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_analyze_coherence",
+                "arguments": {
+                    "anchor_image_rel": rel_anchor,
+                    "candidate_image_rels": [rel_good],
+                    "mode": "vlm_qwen",
+                    "scene_goal": "dos amigos comiendo en un restaurante",
+                    "strictness_threshold": 78.0,
+                },
+            },
+        },
+    ).json()["result"]
+    assert r_vlm["isError"] is False
+    vlm_res = json.loads(r_vlm["content"][0]["text"])["result"]
+    assert vlm_res["vlm_semantic_used"] is True
+    assert vlm_res["all_consistent"] is False
+    assert vlm_res["comparisons"][0]["verdict"] == "NEEDS_REPAIR"
+    assert "gafas y camisa azul" in vlm_res["comparisons"][0]["recommended_repair_tool_call"]["arguments"]["prompt"]
+
+
+
 
 
 

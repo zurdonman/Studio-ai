@@ -31,9 +31,14 @@ from studio.config import (
     DATA_ROOT,
     IMAGES_OUT_DIR,
     MONTAGES_OUT_DIR,
+    OUTPUTS_DIR,
     UPLOADS_DIR,
     VIDEOS_OUT_DIR,
     ensure_directories,
+)
+from studio.engines.coherence_engine import (
+    load_coherence_vlm_into_memory,
+    run_coherence_analysis,
 )
 from studio.engines.ffmpeg_utils import probe_media_info, render_montage_mp4, verify_image_file
 from studio.engines.image_engine import (
@@ -43,7 +48,12 @@ from studio.engines.image_engine import (
 )
 from studio.engines.tts_engine import EDGE_TTS_VOICES, load_tts_model_into_memory, synthesize_voice
 from studio.engines.video_engine import generate_video_clip, load_video_model_into_memory
-from studio.hardware import colab_console_log, hardware_tracker, query_gpu_info
+from studio.hardware import (
+    build_full_session_log_document,
+    colab_console_log,
+    hardware_tracker,
+    query_gpu_info,
+)
 from studio.jobs import job_manager
 from studio.memory_manager import memory_manager
 
@@ -177,8 +187,16 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
      d) Prototipo rápido o GPU T4 (~25 s):
         `model_id="wan21-vace-1.3b"` + `video_lora_id="lora-wan21-1.3b-bidirect2"`
 
-4. GESTIÓN DE ESPACIO EN DISCO Y MEMORIA EN COLAB:
-   - Si una descarga avisa `DISK_SPACE_INSUFFICIENT`, consulta las sugerencias devueltas y usa `studio_free_memory_or_disk(action="delete_from_disk", model_id=...)` (preguntando antes al usuario si procede).
+4. CONSISTENCIA ESTRICTA DE PERSONAJES EN SECUENCIAS / VARIOS FOTOGRAMAS (OBLIGATORIO):
+   - NUNCA generes el Fotograma 2, 3, 4... desde cero (`Text-to-Image` sin referencia) cuando deban salir las mismas personas o el mismo lugar (ej. personas comiendo en un restaurante), porque cada llamada suelta inventará caras y ropa distintas.
+   - Sigue SIEMPRE este protocolo de 3 pasos para secuencias coherentes:
+     1) **Fotograma 1 = ANCLA MAESTRA (`anchor_image_rel`):** Genera únicamente el Fotograma 1 desde texto (o usa la foto subida por el usuario).
+     2) **Fotogramas 2..N = EDICIÓN ANCLADA (`qwen-image-edit-2511-pack`):** Llama a `studio_generate_or_edit_image` pasando SIEMPRE `model_id="qwen-image-edit-2511-pack"`, `base_image_rel=<anchor_image_rel>` y `reference_rels=[<anchor_image_rel>]`, pidiendo conservar exactamente los mismos rostros, peinados, ropa, mesa e iluminación y cambiar SOLO la pose/acción de ese instante.
+     3) **AUDITORÍA DE COHERENCIA (`studio_analyze_coherence`):** Antes de renderizar vídeo pesado, llama a `studio_analyze_coherence(anchor_image_rel=<anchor>, candidate_image_rels=[...], mode="hybrid_auto")` (combina OpenCV fotométrico 0.1s + Qwen2.5-VL-3B 4-bit semántico). Si algún fotograma sale `verdict="NEEDS_REPAIR"`, ejecuta directamente el `recommended_repair_tool_call` que te devuelve la herramienta para corregirlo.
+
+5. GESTIÓN DE ESPACIO EN DISCO, MEMORIA Y EXPORTACIÓN DE LOGS EN COLAB:
+   - Si una descarga avisa `DISK_SPACE_INSUFFICIENT`, consulta las sugerencias devueltas y usa `studio_free_memory_or_disk(action="delete_from_disk", target=...)` (preguntando antes al usuario si procede).
+   - Si el usuario pide el registro completo de lo ocurrido en la sesión, llama a `studio_export_session_log(format="md")`.
    - Todo lo que ejecutes se muestra EN TIEMPO REAL en la celda de Google Colab del usuario.
 """
 
@@ -232,6 +250,22 @@ MANUAL_RESOURCES: Dict[str, Dict[str, str]] = {
             "- Motores GPU locales: `kokoro-82m-tts`, `mms-tts-es`, `bark-voice-Cloning`.\n\n"
             "## 3. Montaje Final (`studio_render_montage`)\n"
             "- Combina planos (`images` y/o `videos`) con su `audio_rel` individual (`fit_to_audio=true` ajusta la duración del plano a la locución), `global_audio_rel` (música de fondo) y `fade_seconds`.\n"
+        ),
+    },
+    "studio://manual/character-consistency": {
+        "name": "Protocolo Oficial de Coherencia y Consistencia de Personajes (Ancla + Qwen2.5-VL + OpenCV)",
+        "mimeType": "text/markdown",
+        "content": (
+            "# Protocolo Anti-Deriva de Personajes para Storyboards y Frame a Frame\n\n"
+            "## ¿Por qué cambian las caras si generas fotogramas sueltos?\n"
+            "Si llamas a `studio_generate_or_edit_image` sin `base_image_rel` varias veces, el modelo crea actores distintos cada vez.\n\n"
+            "## Flujo obligatorio en 3 pasos\n"
+            "1. **Crear Fotograma 1 (Ancla):** `studio_generate_or_edit_image(model_id='qwen-image-edit-2511-pack', prompt='...')` → guarda su `rel_path` como `ANCHOR`.\n"
+            "2. **Derivar Fotogramas 2, 3, 4 desde `ANCHOR`:** `studio_generate_or_edit_image(model_id='qwen-image-edit-2511-pack', base_image_rel=ANCHOR, reference_rels=[ANCHOR], prompt='Mantén exactamente las mismas personas, rostros, ropa e iluminación; cambia solo la acción a: ...')`.\n"
+            "3. **Auditar con el Inspector Híbrido (`studio_analyze_coherence`):**\n"
+            "   - Etapa 1 (`OpenCV`, 0.1s, 0 GB VRAM): Verifica proporción, paleta HSV/LAB, iluminación y nitidez.\n"
+            "   - Etapa 2 (`Qwen2.5-VL-3B-Instruct` 4-bit, ~2.8 GB VRAM): Inspecciona semánticamente rostros, pelo, ropa, número de personas y viabilidad de transición.\n"
+            "   - Si devuelve `NEEDS_REPAIR`, ejecuta el `recommended_repair_tool_call` incluido en la respuesta antes de animar en `14B`.\n"
         ),
     },
 }
@@ -407,6 +441,7 @@ def _ok_result(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
     all_defs = catalog_manager.get_all_definitions()
     all_model_ids = [m["id"] for m in all_defs]
+    image_model_ids = [m["id"] for m in all_defs if m["category"] == "image"]
     video_model_ids = [m["id"] for m in all_defs if m["category"] == "video"]
     video_lora_ids = [""] + [m["id"] for m in all_defs if m["category"] == "lora" and m.get("lora_target") == "video"]
     image_lora_ids = [m["id"] for m in all_defs if m["category"] == "lora" and (m.get("lora_target") or "image") == "image"]
@@ -448,6 +483,8 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                             "video_flf2v",
                             "video_i2v",
                             "video_t2v",
+                            "consistent_keyframes",
+                            "coherence_check",
                             "image_create",
                             "image_edit",
                             "tts",
@@ -481,7 +518,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                 "properties": {
                     "category": {
                         "type": "string",
-                        "enum": ["all", "video", "image", "lora", "tts"],
+                        "enum": ["all", "video", "image", "vision", "lora", "tts"],
                         "default": "video",
                     },
                     "required_video_submode": {
@@ -543,7 +580,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                     "target": {
                         "type": "string",
                         "default": "all",
-                        "description": "Para `unload_vram`: 'all', 'video', 'image', 'tts' o un `model_id`. Para `delete_from_disk`: el `model_id` exacto a borrar.",
+                        "description": "Para `unload_vram`: 'all', 'video', 'image', 'vision', 'tts' o un `model_id`. Para `delete_from_disk`: el `model_id` exacto a borrar.",
                     },
                 },
                 "required": ["action"],
@@ -597,6 +634,15 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "model_id": {
+                        "type": "string",
+                        "enum": image_model_ids,
+                        "default": "qwen-image-edit-2511-pack",
+                        "description": (
+                            "Modelo de imagen verificado. Usa SIEMPRE `'qwen-image-edit-2511-pack'` cuando pases `base_image_rel` "
+                            "o `reference_rels` para mantener los mismos personajes y escenario entre fotogramas."
+                        ),
+                    },
                     "prompt": {
                         "type": "string",
                         "description": "Instrucción clara de qué generar o qué cambiar en la imagen.",
@@ -830,6 +876,72 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                 "required": ["job_id"],
             },
         },
+        {
+            "name": "studio_analyze_coherence",
+            "description": (
+                "Inspector híbrido de coherencia visual y consistencia de personajes (`OpenCV` fotométrico 0.1s + "
+                "`Qwen2.5-VL-3B-Instruct` 4-bit NF4 semántico). Compara el Fotograma Ancla (`anchor_image_rel`) frente a "
+                "uno o varios fotogramas candidatos (`candidate_image_rels`) verificando si las personas, rostros, pelo, "
+                "ropa, escenario e iluminación siguen siendo idénticos, y devuelve `recommended_repair_tool_call` listo "
+                "para regenerar automáticamente cualquier fotograma con deriva."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "anchor_image_rel": {
+                        "type": "string",
+                        "description": "`rel_path` en Colab del Fotograma Ancla #1 (la imagen maestra cuya identidad de personajes debe respetarse).",
+                    },
+                    "candidate_image_rels": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string"},
+                        "description": "Lista de `rel_path` de los fotogramas 2..N que quieres auditar frente al ancla.",
+                    },
+                    "scene_goal": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Contexto breve de la escena (ej. 'dos amigos comiendo en el mismo restaurante manteniendo rostros y ropa').",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["hybrid_auto", "vlm_qwen", "fast_cv"],
+                        "default": "hybrid_auto",
+                        "description": (
+                            "`'hybrid_auto'` (recomendado): ejecuta OpenCV (color, luz, aspecto, estructura) + Qwen2.5-VL-3B 4-bit en GPU (~2.8 GB VRAM). "
+                            "`'fast_cv'`: solo métricas físicas OpenCV instantáneas en CPU (0 GB VRAM)."
+                        ),
+                    },
+                    "strictness_threshold": {
+                        "type": "number",
+                        "default": 78.0,
+                        "minimum": 45.0,
+                        "maximum": 95.0,
+                        "description": "Puntuación mínima (0-100) para dar por válido (`PASS`) un fotograma.",
+                    },
+                    "wait": {"type": "boolean", "default": True},
+                },
+                "required": ["anchor_image_rel", "candidate_image_rels"],
+            },
+        },
+        {
+            "name": "studio_export_session_log",
+            "description": (
+                "Genera y guarda el registro completo de todo lo sucedido desde que se encendió Studio IA hasta este instante "
+                "(estado de GPU/disco, tabla de trabajos, logs internos, errores y consola cronológica) en `.md` o `.txt`."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "format": {
+                        "type": "string",
+                        "enum": ["md", "txt"],
+                        "default": "md",
+                        "description": "Formato del documento exportado (`'md'` Markdown estructurado o `'txt'` texto plano).",
+                    }
+                },
+            },
+        },
     ]
 
 
@@ -951,6 +1063,53 @@ def _compute_recommendation(task: str, priority: str) -> Dict[str, Any]:
                 "use_official_defaults": True,
             },
             "why_this_choice": "Modelo ligero 1.3B con LoRA rápido (6 pasos @ CFG 1.0, ~22 s en L4, compatible con T4).",
+        }
+
+    if task == "consistent_keyframes":
+        return {
+            "task": task,
+            "detected_gpu": gpu_info.get("gpu_name", "CPU"),
+            "free_disk_gb": free_disk,
+            "workflow_steps": [
+                {
+                    "step": 1,
+                    "action": "Generar Fotograma 1 (ANCLA) con `studio_generate_or_edit_image` (`model_id='qwen-image-edit-2511-pack'`).",
+                },
+                {
+                    "step": 2,
+                    "action": (
+                        "Generar Fotogramas 2..N llamando a `studio_generate_or_edit_image` con `model_id='qwen-image-edit-2511-pack'`, "
+                        "`base_image_rel=<rel_del_ancla>` y `reference_rels=[<rel_del_ancla>]`, cambiando SOLO la acción en el `prompt`."
+                    ),
+                },
+                {
+                    "step": 3,
+                    "action": "Auditar todos los fotogramas con `studio_analyze_coherence(mode='hybrid_auto')` y ejecutar `recommended_repair_tool_call` si alguno falla.",
+                },
+            ],
+            "recommended_tool": "studio_generate_or_edit_image",
+            "recommended_arguments": {
+                "model_id": "qwen-image-edit-2511-pack",
+                "use_official_defaults": True,
+                "use_lightning_lora": True,
+            },
+            "why_this_choice": "Anclar cada fotograma a la Imagen #1 en Qwen-Image-Edit 2511 + auditar con Qwen2.5-VL-3B evita que cambien caras o ropa.",
+        }
+
+    if task == "coherence_check":
+        return {
+            "task": task,
+            "detected_gpu": gpu_info.get("gpu_name", "CPU"),
+            "free_disk_gb": free_disk,
+            "recommended_tool": "studio_analyze_coherence",
+            "recommended_arguments": {
+                "mode": "hybrid_auto" if has_gpu else "fast_cv",
+                "strictness_threshold": 78.0,
+            },
+            "why_this_choice": (
+                "Combina filtro fotométrico instantáneo OpenCV (0.12s, color/luz/aspecto) + auditoría semántica de identidad "
+                "con Qwen2.5-VL-3B-Instruct en 4-bit (~2.8 GB VRAM, puede convivir en L4 junto a Qwen-Image-Edit)."
+            ),
         }
 
     if task in ("image_create", "image_edit"):
@@ -1131,6 +1290,14 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 title=f"[MCP] Preparar imagen: {defn['name']}",
                 fn=lambda j: load_image_model_into_memory(model_id=mid, auto_download=True, job=j),
             )
+        elif cat == "vision":
+            if defn.get("builtin_no_download"):
+                return _ok_result({"ok": True, "model_id": mid, "builtin": True})
+            job = job_manager.submit(
+                kind="load_model",
+                title=f"[MCP] Preparar inspector multimodal: {defn['name']}",
+                fn=lambda j: load_coherence_vlm_into_memory(model_id=mid, auto_download=True, job=j),
+            )
         else:
             job = job_manager.submit(
                 kind="load_model",
@@ -1149,7 +1316,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if action == "unload_vram":
             if target == "all":
                 info = memory_manager.unload_all()
-            elif target in ("image", "video", "tts"):
+            elif target in ("image", "video", "tts", "vision"):
                 info = memory_manager.unload_slot(target)
             else:
                 info = memory_manager.unload_by_model_id(target)
@@ -1159,7 +1326,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             )
             return _ok_result({"ok": True, "action": action, **info})
 
-        if target in ("", "all", "video", "image", "tts"):
+        if target in ("", "all", "video", "image", "tts", "vision"):
             return _guided_error(
                 "MISSING_MODEL_ID_FOR_DELETE",
                 "Para `delete_from_disk` debes indicar en `target` el `model_id` concreto a borrar del disco.",
@@ -1279,10 +1446,26 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         custom_loras = list(args.get("custom_lora_ids") or [])
         wait_flag = bool(args.get("wait", True))
 
-        job = job_manager.submit(
-            kind="image",
-            title=f"[MCP] Imagen Qwen: {prompt[:40]}",
-            fn=lambda j: generate_or_edit_image(
+        req_img_model = str(args.get("model_id") or "qwen-image-edit-2511-pack").strip()
+        # Protección anti-deriva: si hay imagen base o referencias ancla, forzar un modelo capaz de condicionar por imagen
+        if (base_p is not None or refs_p) and req_img_model == "qwen-image-2512-pack":
+            colab_console_log(
+                "[MCP Guardia] Se detectaron imágenes de referencia/ancla con `qwen-image-2512-pack` (solo T2I); "
+                "cambiando automáticamente a `qwen-image-edit-2511-pack` para preservar identidad de personajes.",
+                icon="🛡️",
+            )
+            req_img_model = "qwen-image-edit-2511-pack"
+
+        def _run_mcp_image(j: Any) -> Dict[str, Any]:
+            cur_slot = memory_manager.get_slot("image")
+            if not cur_slot or cur_slot.get("model_id") != req_img_model:
+                load_image_model_into_memory(
+                    model_id=req_img_model,
+                    extra_lora_ids=custom_loras,
+                    auto_download=True,
+                    job=j,
+                )
+            return generate_or_edit_image(
                 prompt=prompt,
                 base_image_path=base_p,
                 reference_paths=refs_p,
@@ -1296,7 +1479,12 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 custom_lora_ids=custom_loras,
                 use_ffmpeg_bt709=True,
                 job=j,
-            ),
+            )
+
+        job = job_manager.submit(
+            kind="image",
+            title=f"[MCP] Imagen ({req_img_model}): {prompt[:38]}",
+            fn=_run_mcp_image,
         )
         if not wait_flag:
             return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
@@ -1633,6 +1821,101 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             return _ok_result({"ok": True, "job": cancelled.to_dict(include_logs=True)})
         w_sec = float(args.get("wait_seconds") or 80.0)
         return _ok_result(_wait_for_job_bounded(jid, max_wait_seconds=w_sec))
+
+    # 14. Inspector híbrido de coherencia visual y consistencia de personajes (OpenCV + Qwen2.5-VL-3B)
+    if name == "studio_analyze_coherence":
+        cand_rels = list(args.get("candidate_image_rels") or [])
+        if not cand_rels:
+            return _guided_error(
+                "EMPTY_CANDIDATE_IMAGES",
+                "`candidate_image_rels` está vacío.",
+                "Pasa al menos un `rel_path` (o `local_candidate_image_paths` en `studio_mcp.py`) para compararlo contra `anchor_image_rel`.",
+            )
+        try:
+            anchor_p = _resolve_rel_safe(args.get("anchor_image_rel"))
+            if anchor_p is None:
+                return _guided_error(
+                    "MISSING_ANCHOR_IMAGE",
+                    "Falta `anchor_image_rel` (la imagen maestra del Fotograma #1).",
+                    "Pasa el `rel_path` del Fotograma #1 en `anchor_image_rel` (o `local_anchor_image_path` en el puente local).",
+                )
+            cand_ps: List[Path] = []
+            for r in cand_rels:
+                cp = _resolve_rel_safe(r)
+                if cp is not None:
+                    cand_ps.append(cp)
+        except (ValueError, FileNotFoundError) as exc:
+            return _guided_error(
+                "COHERENCE_IMAGE_NOT_FOUND",
+                str(exc),
+                "Verifica los `rel_path` con `studio_list_assets` o pasa rutas locales si usas `studio_mcp.py`.",
+            )
+
+        coh_mode = str(args.get("mode") or "hybrid_auto").strip().lower()
+        if coh_mode not in ("hybrid_auto", "vlm_qwen", "fast_cv"):
+            return _guided_error(
+                "INVALID_COHERENCE_MODE",
+                f"`mode='{coh_mode}'` no es válido.",
+                "Usa `'hybrid_auto'` (recomendado: OpenCV + Qwen2.5-VL-3B), `'vlm_qwen'` o `'fast_cv'`.",
+            )
+        scene_goal = str(args.get("scene_goal") or "")
+        thresh = float(args.get("strictness_threshold") or 78.0)
+        wait_flag = bool(args.get("wait", True))
+
+        job = job_manager.submit(
+            kind="coherence",
+            title=f"[MCP] Coherencia ({coh_mode} · {len(cand_ps)} fotos vs {anchor_p.name})",
+            fn=lambda j: run_coherence_analysis(
+                anchor_path=anchor_p,
+                candidate_paths=cand_ps,
+                scene_goal=scene_goal,
+                mode=coh_mode,
+                strictness_threshold=thresh,
+                job=j,
+            ),
+        )
+        if not wait_flag:
+            return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
+        return _ok_result(_wait_for_job_bounded(job.id))
+
+    # 15. Exportar documento completo de log de sesión (.md o .txt)
+    if name == "studio_export_session_log":
+        fmt = "txt" if str(args.get("format") or "md").lower() == "txt" else "md"
+        downloaded_models = [
+            {
+                "id": m["id"],
+                "name": m["name"],
+                "category": m["category"],
+                "disk_gb": catalog_manager.disk_usage_gb(m["id"]),
+            }
+            for m in catalog_manager.get_all_definitions()
+            if not m.get("builtin_no_download") and catalog_manager.is_downloaded(m["id"])
+        ]
+        log_filename, log_content = build_full_session_log_document(
+            jobs_list=job_manager.list_jobs(limit=500, include_logs=True),
+            loaded_summary=memory_manager.status_summary(),
+            downloaded_models=downloaded_models,
+            fmt=fmt,
+        )
+        logs_dir = OUTPUTS_DIR / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        out_fp = logs_dir / log_filename
+        out_fp.write_text(log_content, encoding="utf-8")
+        rel_log = f"outputs/logs/{log_filename}"
+        colab_console_log(
+            f"[MCP] Registro completo de sesión exportado: {rel_log} ({round(len(log_content.encode('utf-8')) / 1024, 1)} KB)",
+            icon="📄",
+        )
+        return _ok_result(
+            {
+                "ok": True,
+                "filename": log_filename,
+                "rel_path": rel_log,
+                "media_url": f"/media/{rel_log}",
+                "size_kb": round(len(log_content.encode("utf-8")) / 1024, 1),
+                "lines_count": log_content.count("\n"),
+            }
+        )
 
     return _guided_error(
         "UNKNOWN_TOOL",
@@ -2036,14 +2319,36 @@ python3 studio_mcp.py --cli studio_generate_video '{{
 }}'
 ```
 
-### 4) Generar Imagen o Editar Imagen local
+### 4) Crear Secuencia de Fotogramas con PERSONAJES 100% CONSISTENTES + Auditar con `studio_analyze_coherence`
+**¡REGLA CRÍTICA!** Nunca generes el Fotograma 2, 3, 4 desde cero si deben aparecer las mismas personas:
+1. Genera el Fotograma 1 (Ancla):
 ```bash
 python3 studio_mcp.py --cli studio_generate_or_edit_image '{{
-  "model_id": "qwen-image-2512",
+  "model_id": "qwen-image-edit-2511-pack",
   "use_official_defaults": true,
-  "prompt": "retrato fotográfico hiperrealista en estudio con luz lateral cálida"
+  "prompt": "dos amigos comiendo pasta en una mesa de restaurante cálido, fotografía cinematográfica realista"
 }}'
 ```
+2. Genera el Fotograma 2 anclado al Fotograma 1 (`base_image_rel` + `reference_rels`):
+```bash
+python3 studio_mcp.py --cli studio_generate_or_edit_image '{{
+  "model_id": "qwen-image-edit-2511-pack",
+  "base_image_rel": "outputs/images/FOTOGRAMA_1.png",
+  "reference_rels": ["outputs/images/FOTOGRAMA_1.png"],
+  "use_official_defaults": true,
+  "prompt": "Mantén exactamente las mismas dos personas, sus rostros, peinados, ropa, mesa y restaurante de la imagen original; cambia únicamente su acción para que ahora choquen sus copas brindando y sonriendo"
+}}'
+```
+3. Verifica la coherencia con `studio_analyze_coherence` (OpenCV + Qwen2.5-VL-3B 4-bit) antes de animar en vídeo:
+```bash
+python3 studio_mcp.py --cli studio_analyze_coherence '{{
+  "anchor_image_rel": "outputs/images/FOTOGRAMA_1.png",
+  "candidate_image_rels": ["outputs/images/FOTOGRAMA_2.png"],
+  "scene_goal": "mismas dos personas comiendo en el mismo restaurante",
+  "mode": "hybrid_auto"
+}}'
+```
+*(Si devuelve `"verdict": "NEEDS_REPAIR"`, ejecuta directamente el `"recommended_repair_tool_call"` devuelto).*
 
 ### 5) Generar Voz / Narración TTS (`studio_generate_speech`)
 ```bash
@@ -2067,9 +2372,10 @@ python3 studio_mcp.py --cli studio_render_montage '{{
 }}'
 ```
 
-### 7) Liberar VRAM o borrar un modelo del disco de Colab si falta espacio
+### 7) Liberar VRAM, borrar modelo del disco o descargar el Log Completo de Sesión (`.md`)
 ```bash
 python3 studio_mcp.py --cli studio_free_memory_or_disk '{{"action": "unload_vram", "target": "all"}}'
+python3 studio_mcp.py --cli studio_export_session_log '{{"format": "md"}}'
 ```
 
 ---

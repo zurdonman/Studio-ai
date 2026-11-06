@@ -2,10 +2,11 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import psutil
 
@@ -13,6 +14,13 @@ from studio.config import DATA_ROOT, STATE_DIR, is_colab_env
 
 CREDITS_STATE_FILE = STATE_DIR / "credits_state.json"
 SHUTDOWN_FLAG_FILE = STATE_DIR / "shutdown_requested.flag"
+
+_SESSION_BOOT_DT = datetime.now()
+_SESSION_LOG_LOCK = threading.Lock()
+_SESSION_LOG_MAX_LINES = 40000
+_SESSION_LOG_LINES: List[str] = [
+    f"[{_SESSION_BOOT_DT.strftime('%Y-%m-%d %H:%M:%S')}] 🎬 Servidor Studio IA encendido (inicio de registro de sesión)."
+]
 
 # Tarifas reales de unidades de cómputo por hora en Google Colab (editables en 1 clic desde la interfaz)
 GPU_RATES_DEFAULT = {
@@ -30,9 +38,28 @@ _LEGACY_AUTO_RATES = {4.82, 4.50}
 
 
 def colab_console_log(message: str, icon: str = "🔹") -> None:
-    """Imprime una línea limpia e inmediata en la celda de Google Colab (stdout sin buffer)."""
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {icon} {message}", flush=True)
+    """Imprime una línea inmediata en Google Colab y la archiva en el registro íntegro de sesión."""
+    now = datetime.now()
+    ts_short = now.strftime("%H:%M:%S")
+    ts_full = now.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts_short}] {icon} {message}", flush=True)
+
+    full_line = f"[{ts_full}] {icon} {message}"
+    with _SESSION_LOG_LOCK:
+        _SESSION_LOG_LINES.append(full_line)
+        if len(_SESSION_LOG_LINES) > _SESSION_LOG_MAX_LINES:
+            del _SESSION_LOG_LINES[: len(_SESSION_LOG_LINES) - _SESSION_LOG_MAX_LINES]
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            with open(STATE_DIR / "session_console.log", "a", encoding="utf-8") as fh:
+                fh.write(full_line + "\n")
+        except Exception:
+            pass
+
+
+def get_session_console_lines() -> List[str]:
+    with _SESSION_LOG_LOCK:
+        return list(_SESSION_LOG_LINES)
 
 
 def _classify_gpu_tier(gpu_name: str) -> str:
@@ -318,3 +345,124 @@ def request_colab_shutdown() -> Dict[str, Any]:
 
 
 hardware_tracker = HardwareAndCreditsTracker()
+
+
+def build_full_session_log_document(
+    jobs_list: List[Dict[str, Any]],
+    loaded_summary: List[Dict[str, Any]],
+    downloaded_models: List[Dict[str, Any]],
+    fmt: str = "md",
+) -> Tuple[str, str]:
+    """
+    Construye el informe completo de diagnóstico desde el encendido de Studio IA hasta el instante actual.
+    Devuelve `(filename, content_str)` en formato `.md` o `.txt`, ideal para compartir con una IA sin límite de portapapeles.
+    """
+    now = datetime.now()
+    ext = "txt" if str(fmt).lower() == "txt" else "md"
+    filename = f"studio_ia_log_{now.strftime('%Y%m%d_%H%M%S')}.{ext}"
+
+    hw = hardware_tracker.get_snapshot(active_jobs_count=sum(1 for j in jobs_list if j.get("status") == "running"))
+    gpu = hw["gpu"]
+    ram = hw["ram"]
+    disk = hw["disk"]
+    cred = hw["credits"]
+    console_lines = get_session_console_lines()
+    uptime_s = max(0, int((now - _SESSION_BOOT_DT).total_seconds()))
+    up_h, rem = divmod(uptime_s, 3600)
+    up_m, up_sec = divmod(rem, 60)
+
+    # Ordenar trabajos del más antiguo al más reciente para lectura cronológica natural
+    jobs_chrono = sorted(jobs_list, key=lambda x: float(x.get("created_ts") or x.get("created_at") or 0.0))
+
+    lines: List[str] = []
+    if ext == "md":
+        lines.append("# 📄 Registro Completo de Sesión — Studio IA")
+        lines.append("")
+        lines.append("## 1. Estado del Sistema y Entorno")
+        lines.append(f"- **Encendido de la aplicación:** `{_SESSION_BOOT_DT.strftime('%Y-%m-%d %H:%M:%S')}`")
+        lines.append(f"- **Exportado en:** `{now.strftime('%Y-%m-%d %H:%M:%S')}` (Tiempo activo: `{up_h}h {up_m}m {up_sec}s`)")
+        lines.append(f"- **Entorno:** `{'Google Colab' if hw['is_colab'] else 'Local / Sandbox'}`")
+        lines.append(
+            f"- **GPU:** `{gpu.get('gpu_name', 'CPU')}` · VRAM usada: `{gpu.get('vram_used_gb', 0)} / {gpu.get('vram_total_gb', 0)} GB` (`{gpu.get('vram_free_gb', 0)} GB` libres)"
+        )
+        lines.append(f"- **RAM Sistema:** `{ram['used_gb']} / {ram['total_gb']} GB` (`{ram['percent']}%`)")
+        lines.append(f"- **Disco (`{disk['path']}`):** Usado `{disk['used_gb']} GB` · Libre `{disk['free_gb']} GB` de `{disk['total_gb']} GB`")
+        lines.append(
+            f"- **Créditos Colab estimados:** Gastados `{cred['session_spent']} u` · Restantes `{cred['remaining_credits']} u` (tarifa `{cred['hourly_rate']} u/h`)"
+        )
+        lines.append(
+            "- **Modelos cargados ahora en RAM/VRAM:** "
+            + (
+                ", ".join(f"`{m.get('model_id')}` ({m.get('slot')})" for m in loaded_summary)
+                if loaded_summary
+                else "_Ninguno cargado actualmente_"
+            )
+        )
+        lines.append(
+            "- **Modelos descargados en disco:** "
+            + (
+                ", ".join(f"`{m.get('id')}` ({m.get('disk_gb')} GB)" for m in downloaded_models)
+                if downloaded_models
+                else "_Ninguno descargado en disco_"
+            )
+        )
+        lines.append("")
+        lines.append(f"## 2. Resumen de Tareas Ejecutadas ({len(jobs_chrono)} en total)")
+        if not jobs_chrono:
+            lines.append("_Aún no se ha lanzado ninguna tarea pesada en esta sesión._")
+        else:
+            lines.append("| # | Job ID | Estado | Duración | Tarea | Resultado / Error |")
+            lines.append("|---|---|---|---|---|---|")
+            for idx, j in enumerate(jobs_chrono, 1):
+                st = j.get("status", "?")
+                icon = {"completed": "✅", "failed": "❌", "cancelled": "🛑", "running": "⏳"}.get(st, "🔹")
+                el = f"{j.get('elapsed_seconds', 0)}s"
+                res_obj = j.get("result") or {}
+                err_str = j.get("error") or ""
+                outcome = err_str[:120] if err_str else (res_obj.get("rel_path") or res_obj.get("verdict") or "OK")
+                title_clean = str(j.get("title") or "").replace("|", "/")
+                outcome_clean = str(outcome).replace("|", "/").replace("\n", " ")
+                lines.append(f"| {idx} | `{j.get('id')}` | {icon} `{st}` | `{el}` | {title_clean} | `{outcome_clean}` |")
+        lines.append("")
+        lines.append("## 3. Detalle Paso a Paso por Tarea (Logs Internos y Errores)")
+        if not jobs_chrono:
+            lines.append("_Sin tareas registradas._")
+        else:
+            for idx, j in enumerate(jobs_chrono, 1):
+                lines.append(f"### Tarea {idx}: `{j.get('id')}` — {j.get('title')} (`{j.get('status')}`, {j.get('elapsed_seconds', 0)}s)")
+                if j.get("error"):
+                    lines.append(f"- **Error detectado:** `{j.get('error')}`")
+                if j.get("result"):
+                    lines.append(f"- **Resultado JSON:** `{json.dumps(j.get('result'), ensure_ascii=False)[:600]}`")
+                j_logs = j.get("logs") or []
+                if j_logs:
+                    lines.append("```text")
+                    for lg in j_logs:
+                        lines.append(f"[{lg.get('time', '')}] ({lg.get('level', 'info')}) {lg.get('message', '')}")
+                    lines.append("```")
+                lines.append("")
+        lines.append(f"## 4. Registro Cronológico Íntegro de Consola desde el Arranque ({len(console_lines)} líneas)")
+        lines.append("```text")
+        lines.extend(console_lines)
+        lines.append("```")
+    else:
+        lines.append("======================================================================")
+        lines.append("REGISTRO COMPLETO DE SESIÓN — STUDIO IA")
+        lines.append("======================================================================")
+        lines.append(f"Encendido: {_SESSION_BOOT_DT.strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Exportado: {now.strftime('%Y-%m-%d %H:%M:%S')} (Activo: {up_h}h {up_m}m {up_sec}s)")
+        lines.append(f"GPU: {gpu.get('gpu_name', 'CPU')} | VRAM: {gpu.get('vram_used_gb', 0)}/{gpu.get('vram_total_gb', 0)} GB")
+        lines.append(f"RAM: {ram['used_gb']}/{ram['total_gb']} GB | Disco libre: {disk['free_gb']} GB")
+        lines.append("")
+        lines.append(f"--- TAREAS EJECUTADAS ({len(jobs_chrono)}) ---")
+        for idx, j in enumerate(jobs_chrono, 1):
+            lines.append(f"[{idx}] {j.get('id')} | {j.get('status')} | {j.get('elapsed_seconds', 0)}s | {j.get('title')}")
+            if j.get("error"):
+                lines.append(f"    ERROR: {j.get('error')}")
+            for lg in j.get("logs") or []:
+                lines.append(f"    [{lg.get('time', '')}] {lg.get('message', '')}")
+        lines.append("")
+        lines.append(f"--- CONSOLA CRONOLÓGICA COMPLETA DESDE EL ENCENDIDO ({len(console_lines)} líneas) ---")
+        lines.extend(console_lines)
+
+    return filename, "\n".join(lines) + "\n"

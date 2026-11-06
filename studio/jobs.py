@@ -186,7 +186,7 @@ class JobManager:
         with self._lock:
             self._jobs[job.id] = job
             self._order.insert(0, job.id)
-            if len(self._order) > 100:
+            if len(self._order) > 500:
                 old_id = self._order.pop()
                 self._jobs.pop(old_id, None)
 
