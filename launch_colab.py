@@ -236,20 +236,15 @@ def main() -> None:
         f"🖥️  Hardware: {gpu.get('gpu_name', 'CPU')} · Disco libre: {disk.get('free_gb', '?')} GB · Tarifa: {cred.get('hourly_rate', 0)} u/h"
     )
     msg_lines.append("─" * 74)
-    msg_lines.append("🤖 CONECTOR MCP PARA TU AGENTE DE TERMINAL (Claude Code / Codex / Cursor):")
-    msg_lines.append(f"   • Endpoint MCP Remoto:  {base_ext}/mcp")
-    msg_lines.append(f"   • Token MCP Sesión:     {mcp_token}")
-    msg_lines.append("   • Linux / macOS / WSL (Puente Local recomendado · sube fotos y baja MP4 a tu PC):")
+    msg_lines.append("🤖 CONEXIÓN PARA TU AGENTE (Termux Android / DeepSeek / Qwen / Claude / Codex):")
+    msg_lines.append("   📱 [OPCIÓN MÁS FÁCIL - TERMUX / DEEPSEEK / QWEN] Copia este enlace único con token")
+    msg_lines.append("      y dáselo a tu agente en el chat («Lee con curl este enlace y conéctate»):")
+    msg_lines.append(f"      👉 {base_ext}/mcp/guia?token={mcp_token}")
+    msg_lines.append(f"   🔗 Endpoint MCP HTTP directo (con token en URL): {base_ext}/mcp?token={mcp_token}")
+    msg_lines.append(f"   🔑 Token suelto (si tu cliente lo pide aparte):   {mcp_token}")
+    msg_lines.append("   💻 Si usas Claude Code en PC (Mac/Linux/WSL):")
     msg_lines.append(
-        f'     curl -fsSL {base_ext}/mcp/bridge.py -o studio_mcp.py && (claude mcp remove studio-ia >/dev/null 2>&1 || true) && claude mcp add studio-ia -- python3 "$(pwd)/studio_mcp.py" --url {base_ext} --token {mcp_token} --out-dir "$(pwd)/salidas_studio"'
-    )
-    msg_lines.append("   • Windows PowerShell (Puente Local recomendado):")
-    msg_lines.append(
-        f'     curl.exe -fsSL {base_ext}/mcp/bridge.py -o studio_mcp.py; claude mcp remove studio-ia 2>$null; claude mcp add studio-ia -- python "$PWD\\studio_mcp.py" --url {base_ext} --token {mcp_token} --out-dir "$PWD\\salidas_studio"'
-    )
-    msg_lines.append("   • Alternativa HTTP directa (sin archivo local):")
-    msg_lines.append(
-        f'     (claude mcp remove studio-ia >/dev/null 2>&1 || true) && claude mcp add --transport http studio-ia {base_ext}/mcp --header "Authorization: Bearer {mcp_token}"'
+        f'     curl -fsSL "{base_ext}/mcp/bridge.py?token={mcp_token}" -o studio_mcp.py && (claude mcp remove studio-ia >/dev/null 2>&1 || true) && claude mcp add studio-ia -- python3 "$(pwd)/studio_mcp.py"'
     )
     msg_lines.append("─" * 74)
     msg_lines.append("📡 Debajo verás EN TIEMPO REAL todo lo que hagas tú en la Web o tu Agente vía MCP:")

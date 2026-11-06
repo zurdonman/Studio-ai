@@ -2962,6 +2962,8 @@
         try {
           const info = await api("/api/mcp/info");
           const cmds = info.commands || {};
+          if ($("mcp-cmd-agent-prompt")) $("mcp-cmd-agent-prompt").value = cmds.agent_chat_prompt || "";
+          if ($("mcp-url-with-token")) $("mcp-url-with-token").value = info.mcp_url_with_token || "";
           if ($("mcp-cmd-claude-stdio")) $("mcp-cmd-claude-stdio").value = cmds.claude_code_stdio || "";
           if ($("mcp-cmd-claude-ps")) $("mcp-cmd-claude-ps").value = cmds.claude_code_powershell || "";
           if ($("mcp-cmd-codex-stdio")) $("mcp-cmd-codex-stdio").value = cmds.codex_cli_stdio || "";

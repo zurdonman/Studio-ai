@@ -31,6 +31,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Cuando se descarga desde `/mcp/bridge.py?token=...`, el servidor rellena automáticamente estos valores
+# para que en Termux / Android / cualquier harness baste con ejecutar `python3 studio_mcp.py ...` sin repetir URL ni token.
+EMBEDDED_DEFAULT_URL = ""
+EMBEDDED_DEFAULT_TOKEN = ""
+EMBEDDED_DEFAULT_OUT_DIR = "./salidas_studio"
+
 
 BRIDGE_ONLY_LOCAL_PROPS: Dict[str, Dict[str, Any]] = {
     "studio_upload_file_base64": {
@@ -262,6 +268,12 @@ class StudioColabBridge:
         return str(dest)
 
     def send_stdout_message(self, obj: Dict[str, Any]) -> None:
+        if getattr(self, "_cli_mode", False):
+            if obj.get("method") == "notifications/progress":
+                p = obj.get("params") or {}
+                sys.stderr.write(f"[Progreso Colab {float(p.get('progress', 0)):.1f}%] {p.get('message', '')}\n")
+                sys.stderr.flush()
+            return
         raw = json.dumps(obj, ensure_ascii=False)
         if self._framing_mode == "lsp":
             b = raw.encode("utf-8")
@@ -564,21 +576,40 @@ class StudioColabBridge:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Puente MCP Local (stdio) para controlar Studio IA en Google Colab")
+    parser = argparse.ArgumentParser(
+        description="Puente MCP Local (stdio) y CLI directo (Termux / DeepSeek / Qwen) para Studio IA en Google Colab"
+    )
     parser.add_argument(
         "--url",
-        default=os.environ.get("STUDIO_IA_URL", "http://127.0.0.1:7860"),
+        default=os.environ.get("STUDIO_IA_URL") or EMBEDDED_DEFAULT_URL or "http://127.0.0.1:7860",
         help="URL pública de Studio IA en Colab (ej. https://xxxx.trycloudflare.com)",
     )
     parser.add_argument(
         "--token",
-        default=os.environ.get("STUDIO_MCP_TOKEN", ""),
+        default=os.environ.get("STUDIO_MCP_TOKEN") or EMBEDDED_DEFAULT_TOKEN or "",
         help="Token de seguridad MCP mostrado al arrancar Colab",
     )
     parser.add_argument(
         "--out-dir",
-        default=os.environ.get("STUDIO_OUT_DIR", ""),
-        help="Carpeta local opcional donde descargar automáticamente cada imagen/vídeo/audio generado",
+        default=os.environ.get("STUDIO_OUT_DIR") or EMBEDDED_DEFAULT_OUT_DIR or "",
+        help="Carpeta local donde descargar automáticamente cada imagen/vídeo/audio generado",
+    )
+    parser.add_argument(
+        "--list-tools",
+        action="store_true",
+        help="Modo CLI (Termux/Bash): imprime todas las herramientas disponibles y sus esquemas cerrados",
+    )
+    parser.add_argument(
+        "--cli",
+        metavar="TOOL_NAME",
+        default="",
+        help="Modo CLI directo para harnesses en Termux/Bash: ejecuta una herramienta (ej. --cli studio_get_state_and_manual)",
+    )
+    parser.add_argument(
+        "cli_json",
+        nargs="?",
+        default="{}",
+        help="JSON de argumentos cuando se usa --cli (ej. '{\"task\":\"video_flf2v\"}')",
     )
     args = parser.parse_args()
     bridge = StudioColabBridge(
@@ -586,6 +617,42 @@ def main() -> None:
         token=args.token,
         out_dir=args.out_dir or None,
     )
+
+    if args.list_tools:
+        bridge._cli_mode = True
+        resp = bridge.handle_jsonrpc_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        print(json.dumps(resp.get("result", resp), indent=2, ensure_ascii=False))
+        return
+
+    if args.cli:
+        bridge._cli_mode = True
+        try:
+            parsed_args = json.loads(args.cli_json) if args.cli_json.strip() else {}
+        except Exception as exc:
+            sys.stderr.write(f"JSON inválido en cli_json: {exc}\n")
+            sys.exit(2)
+        resp = bridge.handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": args.cli,
+                    "arguments": parsed_args,
+                    "_meta": {"progressToken": "cli-termux"},
+                },
+            }
+        )
+        if not resp or "error" in resp:
+            print(json.dumps(resp, indent=2, ensure_ascii=False))
+            sys.exit(1)
+        res = resp.get("result") or {}
+        texts = [c.get("text", "") for c in (res.get("content") or []) if c.get("type") == "text"]
+        print("\n".join(texts) if texts else json.dumps(res, indent=2, ensure_ascii=False))
+        if res.get("isError"):
+            sys.exit(1)
+        return
+
     bridge.serve_stdio()
 
 

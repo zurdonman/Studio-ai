@@ -77,18 +77,26 @@ def get_mcp_connection_details(request: Optional[Request] = None) -> Dict[str, A
 
     tok = get_expected_mcp_token()
     mcp_http_url = f"{pub}/mcp"
+    mcp_url_with_token = f"{pub}/mcp?token={tok}" if tok else mcp_http_url
     bridge_url = f"{pub}/mcp/bridge.py"
+    bridge_preconfigured_url = f"{pub}/mcp/bridge.py?token={tok}" if tok else bridge_url
+    agent_guide_url = f"{pub}/mcp/guia?token={tok}" if tok else f"{pub}/mcp/guia"
 
     tok_arg = f" --token {tok}" if tok else ""
     auth_hdr = f' --header "Authorization: Bearer {tok}"' if tok else ""
 
-    curl_bridge = f"curl -fsSL {bridge_url} -o studio_mcp.py"
+    curl_bridge = f'curl -fsSL "{bridge_preconfigured_url}" -o studio_mcp.py'
+    termux_one_liner = f'{curl_bridge} && python3 studio_mcp.py --cli studio_get_state_and_manual'
+    agent_chat_prompt = (
+        f"Conéctate a mi servidor Studio IA en Google Colab leyendo primero con curl este enlace oficial "
+        f"(incluye URL, token de sesión y el manual obligatorio sin inventar parámetros): {agent_guide_url}"
+    )
     claude_stdio = (
         f'{curl_bridge} && (claude mcp remove studio-ia >/dev/null 2>&1 || true) && '
         f'claude mcp add studio-ia -- python3 "$(pwd)/studio_mcp.py" --url {pub}{tok_arg} --out-dir "$(pwd)/salidas_studio"'
     )
     claude_powershell = (
-        f'curl.exe -fsSL {bridge_url} -o studio_mcp.py; claude mcp remove studio-ia 2>$null; '
+        f'curl.exe -fsSL "{bridge_preconfigured_url}" -o studio_mcp.py; claude mcp remove studio-ia 2>$null; '
         f'claude mcp add studio-ia -- python "$PWD\\studio_mcp.py" --url {pub}{tok_arg} --out-dir "$PWD\\salidas_studio"'
     )
     codex_stdio = (
@@ -121,11 +129,16 @@ def get_mcp_connection_details(request: Optional[Request] = None) -> Dict[str, A
     return {
         "base_url": pub,
         "mcp_endpoint": mcp_http_url,
+        "mcp_url_with_token": mcp_url_with_token,
+        "agent_guide_url": agent_guide_url,
         "bridge_script_url": bridge_url,
+        "bridge_preconfigured_url": bridge_preconfigured_url,
         "token_required": bool(tok),
         "token": tok,
         "commands": {
             "download_bridge": curl_bridge,
+            "termux_one_liner": termux_one_liner,
+            "agent_chat_prompt": agent_chat_prompt,
             "claude_code_stdio": claude_stdio,
             "claude_code_powershell": claude_powershell,
             "codex_cli_stdio": codex_stdio,
@@ -1912,14 +1925,162 @@ async def mcp_streamable_http_delete() -> Response:
 
 
 @mcp_router.get("/mcp/bridge.py")
-def mcp_download_bridge_script() -> PlainTextResponse:
-    """Sirve `studio_mcp.py` directamente desde Colab para descargarlo con un simple `curl -fsSL` en el PC."""
+def mcp_download_bridge_script(
+    request: Request,
+    token: Optional[str] = Query(default=None),
+) -> PlainTextResponse:
+    """
+    Sirve `studio_mcp.py` directamente desde Colab.
+    Si incluye `?token=st_mcp_...` válido, incrusta automáticamente `EMBEDDED_DEFAULT_URL` y `EMBEDDED_DEFAULT_TOKEN`
+    para que en Termux / Android / harnesses ligeros no haya que repetir `--url` ni `--token` en cada comando.
+    """
     if not BRIDGE_SCRIPT_PATH.exists():
         raise HTTPException(status_code=404, detail="No se encontró studio_mcp.py en el servidor.")
+    code = BRIDGE_SCRIPT_PATH.read_text(encoding="utf-8")
+    expected = get_expected_mcp_token()
+    details = get_mcp_connection_details(request)
+    pub = details["base_url"]
+    if not expected or (token and secrets.compare_digest(token.strip(), expected)):
+        code = code.replace('EMBEDDED_DEFAULT_URL = ""', f"EMBEDDED_DEFAULT_URL = {json.dumps(pub)}", 1)
+        if expected:
+            code = code.replace('EMBEDDED_DEFAULT_TOKEN = ""', f"EMBEDDED_DEFAULT_TOKEN = {json.dumps(expected)}", 1)
     return PlainTextResponse(
-        content=BRIDGE_SCRIPT_PATH.read_text(encoding="utf-8"),
+        content=code,
         media_type="text/x-python; charset=utf-8",
     )
+
+
+@mcp_router.get("/mcp/guia")
+@mcp_router.get("/mcp/skill.md")
+def mcp_agent_guide_markdown(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_studio_token: Optional[str] = Header(default=None),
+    token: Optional[str] = Query(default=None),
+) -> PlainTextResponse:
+    """
+    Manual auto-contenido con credenciales integradas pensado para Termux Android, DeepSeek Harness,
+    Qwen Flash, OpenCode o cualquier agente al que el usuario le pase este único enlace en el chat.
+    """
+    _verify_mcp_auth(request, authorization=authorization, x_studio_token=x_studio_token, token_query=token)
+    details = get_mcp_connection_details(request)
+    hw = hardware_tracker.get_snapshot(active_jobs_count=job_manager.active_count())
+    gpu = hw["gpu"]
+    disk = hw["disk"]
+
+    colab_console_log(
+        f"[MCP] Guía y credenciales leídas por tu agente mediante enlace directo ({request.headers.get('user-agent', 'terminal')[:48]}).",
+        icon="📱",
+    )
+
+    video_recipes_md = MANUAL_RESOURCES["studio://manual/video-recipes"]["content"]
+    image_tts_md = MANUAL_RESOURCES["studio://manual/image-tts-montage"]["content"]
+
+    guide = f"""# MANUAL OFICIAL DE CONEXIÓN Y CONTROL — STUDIO IA (GOOGLE COLAB)
+
+Estás conectado a una instancia real de **Studio IA** corriendo sobre GPU en Google Colab:
+- **GPU detectada ahora mismo:** `{gpu.get('gpu_name', 'CPU')}` ({gpu.get('total_vram_gb', 0)} GB VRAM total · {gpu.get('free_vram_gb', 0)} GB libres)
+- **Disco libre en Colab:** `{disk.get('free_gb', '?')} GB`
+- **URL Base:** `{details['base_url']}`
+- **Endpoint MCP HTTP directo (con token incluido):** `{details['mcp_url_with_token']}`
+
+---
+
+## PASO 1 OBLIGATORIO EN TERMUX / BASH (EJECUTA ESTO PRIMERO)
+
+Descarga el cliente-puente oficial `studio_mcp.py` (cero dependencias externas, solo librería estándar de Python; **ya viene preconfigurado con tu URL y tu Token** y evita cortes por timeout de Cloudflare de 100 s haciendo *polling* cada 2 s):
+
+```bash
+curl -fsSL "{details['bridge_preconfigured_url']}" -o studio_mcp.py
+python3 studio_mcp.py --cli studio_get_state_and_manual '{{"include_recent_assets": true}}'
+```
+
+*(Si tu harness usa protocolo MCP nativo en vez de Bash CLI, puedes registrar `python3 studio_mcp.py` por `stdio` o conectar por HTTP Streamable directamente a `{details['mcp_url_with_token']}`).*
+
+---
+
+## REGLAS ESTRICTAS ANTI-INVENCIÓN (OBLIGATORIAS)
+
+{MCP_SERVER_INSTRUCTIONS}
+
+---
+
+## COMANDOS EXACTOS PARA USAR DESDE TERMUX / BASH (`--cli`)
+
+Todos los archivos generados (`.mp4`, `.png`, `.mp3`, `.wav`, `.zip`) se descargan **automáticamente** a tu carpeta local `./salidas_studio` en Termux (o a la ruta que pongas en `"save_to_local_path"`, ej. `"/sdcard/Download/mi_video.mp4"`).
+
+### 1) Ver todas las herramientas disponibles y sus `enum` cerrados permitidos
+```bash
+python3 studio_mcp.py --list-tools
+```
+
+### 2) Pedir la receta exacta verificada antes de generar (Cero Alucinaciones)
+- `task` permitidos: `"video_flf2v"`, `"video_i2v"`, `"video_t2v"`, `"image_create"`, `"image_edit"`, `"tts"`, `"montage"`.
+- `priority` permitidos: `"max_quality_14b"`, `"balanced_fast"`, `"ultra_fast_draft"`, `"zero_vram_cpu"`.
+```bash
+python3 studio_mcp.py --cli studio_recommend_pipeline '{{"task": "video_flf2v", "priority": "max_quality_14b"}}'
+```
+
+### 3) Generar Vídeo «Frame a Frame» (Inicio → Fin) subiendo 2 fotos desde Termux/Android y bajando el MP4
+```bash
+python3 studio_mcp.py --cli studio_generate_video '{{
+  "video_submode": "flf2v",
+  "mode": "ai",
+  "model_id": "wan21-vace-14b-fp8",
+  "video_lora_id": "lora-wan21-14b-fusionx-phantom",
+  "use_official_defaults": true,
+  "prompt": "el personaje gira suavemente la cabeza y sonríe con iluminación cinematográfica realista",
+  "local_image_path": "./inicio.png",
+  "local_end_image_path": "./final.png",
+  "duration_sec": 3.5
+}}'
+```
+
+### 4) Generar Imagen o Editar Imagen local
+```bash
+python3 studio_mcp.py --cli studio_generate_or_edit_image '{{
+  "model_id": "qwen-image-2512",
+  "use_official_defaults": true,
+  "prompt": "retrato fotográfico hiperrealista en estudio con luz lateral cálida"
+}}'
+```
+
+### 5) Generar Voz / Narración TTS (`studio_generate_speech`)
+```bash
+python3 studio_mcp.py --cli studio_generate_speech '{{
+  "engine_id": "edge-tts-cloud",
+  "voice_id": "es-ES-AlvaroNeural",
+  "rate_pct": 0,
+  "text": "Hola, este audio ha sido generado en Google Colab controlado desde Termux."
+}}'
+```
+
+### 6) Montaje Final Multipista (`studio_render_montage`)
+```bash
+python3 studio_mcp.py --cli studio_render_montage '{{
+  "title": "corto_final",
+  "items": [
+    {{"media_rel": "outputs/videos/clip_1.mp4", "audio_rel": "outputs/audio/voz_1.mp3", "fit_to_audio": true}},
+    {{"media_rel": "outputs/videos/clip_2.mp4", "duration": 3.5}}
+  ],
+  "fade_seconds": 0.2
+}}'
+```
+
+### 7) Liberar VRAM o borrar un modelo del disco de Colab si falta espacio
+```bash
+python3 studio_mcp.py --cli studio_free_memory_or_disk '{{"action": "unload_vram", "target": "all"}}'
+```
+
+---
+
+{video_recipes_md}
+
+---
+
+{image_tts_md}
+"""
+    return PlainTextResponse(content=guide, media_type="text/markdown; charset=utf-8")
 
 
 @mcp_router.get("/api/mcp/info")

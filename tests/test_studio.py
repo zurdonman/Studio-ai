@@ -1558,6 +1558,26 @@ def test_studio_mcp_local_bridge_upload_poll_and_download(temp_studio_env, monke
     assert p_dest_mp4.exists() and p_dest_mp4.stat().st_size > 1000
 
 
+def test_termux_agent_guide_link_and_preconfigured_bridge(temp_studio_env, monkeypatch):
+    client, _ = temp_studio_env
+    monkeypatch.setenv("STUDIO_MCP_TOKEN", "st_mcp_termux777")
+
+    # Sin token, `/mcp/guia` rechaza con 401; con `?token=...` devuelve el manual completo preconfigurado
+    assert client.get("/mcp/guia").status_code == 401
+    r_guide = client.get("/mcp/guia?token=st_mcp_termux777")
+    assert r_guide.status_code == 200
+    assert "st_mcp_termux777" in r_guide.text
+    assert "--cli studio_generate_video" in r_guide.text
+    assert "wan21-vace-14b-fp8" in r_guide.text
+
+    # `/mcp/bridge.py?token=...` incrusta URL y token automáticamente para uso directo en Termux
+    r_br = client.get("/mcp/bridge.py?token=st_mcp_termux777")
+    assert r_br.status_code == 200
+    assert 'EMBEDDED_DEFAULT_TOKEN = "st_mcp_termux777"' in r_br.text
+    assert 'EMBEDDED_DEFAULT_URL = "http://testserver"' in r_br.text
+
+
+
 
 
 
