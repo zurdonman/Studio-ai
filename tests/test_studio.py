@@ -833,13 +833,66 @@ def test_wan22_ti2v_native_flf2v_prepare_latents_and_fast_mp4(temp_studio_env, m
     assert 'id="vid-lora-quality-pills"' in html
     assert "lora-q-pill" in html
 
-    # 2) Codificación rápida _frames_to_mp4 por pipe RGB24 directo
+    # 2) Codificación rápida _frames_to_mp4 con lista PIL, np.ndarray 4D float32 [0,1] (Wan Diffusers) y NCHW [-1,1]
     frames = [Image.new("RGB", (320, 240), (20 * i, 80, 160)) for i in range(8)]
     mp4_out = tmp_path / "fast_pipe.mp4"
     info = _frames_to_mp4(frames=frames, output_mp4=mp4_out, fps=8)
     assert mp4_out.exists()
     assert info["has_video"] is True
     assert (info["width"], info["height"]) == (320, 240)
+
+    # Caso exacto de Diffusers WanImageToVideoPipeline (`output.frames[0]` = np.ndarray 4D float32)
+    np_frames_nhwc = np.linspace(0.0, 1.0, 8 * 240 * 320 * 3, dtype=np.float32).reshape((8, 240, 320, 3))
+    mp4_np = tmp_path / "fast_wan_np4d.mp4"
+    info_np = _frames_to_mp4(frames=np_frames_nhwc, output_mp4=mp4_np, fps=24)
+    assert mp4_np.exists()
+    assert info_np["has_video"] is True
+    assert (info_np["width"], info_np["height"]) == (320, 240)
+
+    np_frames_nchw = np.linspace(-1.0, 1.0, 8 * 3 * 240 * 320, dtype=np.float32).reshape((8, 3, 240, 320))
+    mp4_nchw = tmp_path / "fast_nchw.mp4"
+    info_nchw = _frames_to_mp4(frames=np_frames_nchw, output_mp4=mp4_nchw, fps=24)
+    assert mp4_nchw.exists()
+    assert (info_nchw["width"], info_nchw["height"]) == (320, 240)
+
+    # Verificar que en GPU L4 (22.5 GB) _apply_best_offload sube el umbral de mosaico VAE a 1280×1280
+    from studio.engines.video_engine import _apply_best_offload
+
+    class MockTileVAE:
+        def __init__(self):
+            self.tile_kwargs = None
+            self.sliced = False
+
+        def enable_slicing(self):
+            self.sliced = True
+
+        def enable_tiling(
+            self,
+            tile_sample_min_height=None,
+            tile_sample_min_width=None,
+            tile_sample_stride_height=None,
+            tile_sample_stride_width=None,
+        ):
+            self.tile_kwargs = (
+                tile_sample_min_height,
+                tile_sample_min_width,
+                tile_sample_stride_height,
+                tile_sample_stride_width,
+            )
+
+    class MockOffloadPipe:
+        def __init__(self):
+            self.vae = MockTileVAE()
+
+        def enable_model_cpu_offload(self):
+            pass
+
+    mop_l4 = MockOffloadPipe()
+    _apply_best_offload(mop_l4, vram_total_gb=22.0, min_vram_gb=13.5)
+    assert mop_l4.vae.tile_kwargs == (1280, 1280, 960, 960)
+    mop_t4 = MockOffloadPipe()
+    _apply_best_offload(mop_t4, vram_total_gb=15.0, min_vram_gb=13.5)
+    assert mop_t4.vae.tile_kwargs == (704, 704, 512, 512)
 
     # 3) Verificar condicionamiento nativo Inicio → Fin (`_attach_wan22_flf2v_support`) en Wan 2.2 TI2V-5B
     class FakeTensor:

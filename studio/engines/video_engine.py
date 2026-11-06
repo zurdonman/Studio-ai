@@ -90,9 +90,31 @@ def _apply_best_offload(
                 pass
         if hasattr(pipe.vae, "enable_tiling"):
             try:
-                pipe.vae.enable_tiling()
+                sig_tile = inspect.signature(pipe.vae.enable_tiling).parameters
+                if "tile_sample_min_height" in sig_tile:
+                    if vram_total_gb >= 20.0:
+                        # En L4 (22.5 GB) / A100 / H100 quedan >21 GB libres durante VAE encode/decode con CPU Offload.
+                        # Evita partir 800×1088 en 30 mosaicos de 256×256 (~3m33s -> ~12s).
+                        pipe.vae.enable_tiling(
+                            tile_sample_min_height=1280,
+                            tile_sample_min_width=1280,
+                            tile_sample_stride_height=960,
+                            tile_sample_stride_width=960,
+                        )
+                    else:
+                        pipe.vae.enable_tiling(
+                            tile_sample_min_height=704,
+                            tile_sample_min_width=704,
+                            tile_sample_stride_height=512,
+                            tile_sample_stride_width=512,
+                        )
+                else:
+                    pipe.vae.enable_tiling()
             except Exception:
-                pass
+                try:
+                    pipe.vae.enable_tiling()
+                except Exception:
+                    pass
 
 
 def _attach_wan22_flf2v_support(pipe: Any) -> Any:
@@ -995,22 +1017,53 @@ def _frame_to_uint8_rgb_array(frame: Any) -> Any:
 
 
 def _frames_to_mp4(
-    frames: List[Any],
+    frames: Any,
     output_mp4: Path,
     fps: int = 16,
     audio_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Codifica fotogramas a MP4 H.264 BT.709 vía pipe RGB24 directo (sin escritura lenta de PNGs)."""
-    if not frames:
+    """Codifica fotogramas (np.ndarray 4D, torch.Tensor o lista PIL/np) a MP4 H.264 BT.709 vía pipe RGB24 directo."""
+    import numpy as np  # type: ignore
+
+    if frames is None:
+        raise ValueError("La lista de fotogramas generados está vacía.")
+    if hasattr(frames, "detach"):
+        frames = frames.detach().float().cpu().numpy()
+    if len(frames) == 0:
         raise ValueError("La lista de fotogramas generados está vacía.")
 
     ffmpeg_bin = get_ffmpeg_bin()
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
-    rgb_arrays = [_frame_to_uint8_rgb_array(f) for f in frames]
-    h0, w0 = int(rgb_arrays[0].shape[0]), int(rgb_arrays[0].shape[1])
+
+    rgb_arrays: List[Any]
+    raw_bytes_fast: Optional[bytes] = None
+    h0 = 0
+    w0 = 0
+
+    if isinstance(frames, np.ndarray) and frames.ndim == 4:
+        arr4 = frames
+        if arr4.shape[-1] not in (1, 3, 4) and arr4.shape[1] in (1, 3, 4):
+            arr4 = np.transpose(arr4, (0, 2, 3, 1))
+        if arr4.dtype != np.uint8:
+            if float(arr4.min()) < -0.05:
+                arr4 = (arr4 + 1.0) * 0.5
+            arr4 = (np.clip(arr4, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+        if arr4.shape[-1] == 4:
+            arr4 = arr4[:, :, :, :3]
+        elif arr4.shape[-1] == 1:
+            arr4 = np.repeat(arr4, 3, axis=3)
+        arr4 = np.ascontiguousarray(arr4, dtype=np.uint8)
+        h0, w0 = int(arr4.shape[1]), int(arr4.shape[2])
+        raw_bytes_fast = arr4.tobytes()
+        rgb_arrays = [arr4[i] for i in range(int(arr4.shape[0]))]
+    else:
+        rgb_arrays = [_frame_to_uint8_rgb_array(f) for f in frames]
+        h0, w0 = int(rgb_arrays[0].shape[0]), int(rgb_arrays[0].shape[1])
+        if all(int(a.shape[0]) == h0 and int(a.shape[1]) == w0 for a in rgb_arrays):
+            raw_bytes_fast = b"".join(a.tobytes() for a in rgb_arrays)
 
     # Vía rápida: envío directo de memoria RGB24 por stdin (~2s en lugar de ~55s escribiendo PNGs)
-    if all(int(a.shape[0]) == h0 and int(a.shape[1]) == w0 for a in rgb_arrays):
+    if raw_bytes_fast is not None and h0 > 0 and w0 > 0:
         cmd_raw = [
             ffmpeg_bin,
             "-hide_banner",
@@ -1047,8 +1100,7 @@ def _frames_to_mp4(
             "-y",
             str(output_mp4),
         ]
-        raw_bytes = b"".join(a.tobytes() for a in rgb_arrays)
-        res_raw = subprocess.run(cmd_raw, input=raw_bytes, capture_output=True, timeout=300)
+        res_raw = subprocess.run(cmd_raw, input=raw_bytes_fast, capture_output=True, timeout=300)
         if res_raw.returncode == 0 and output_mp4.exists():
             return probe_media_info(output_mp4)
 
