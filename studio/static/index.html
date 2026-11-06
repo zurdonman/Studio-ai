@@ -44,6 +44,9 @@
     </div>
 
     <div class="topbar-actions">
+      <button class="btn btn-ghost btn-sm" id="btn-open-mcp-modal" title="Conecta tu agente de terminal (Claude Code, Codex, Cursor, Gemini CLI) a Studio IA mediante MCP">
+        🤖 Conectar MCP
+      </button>
       <button class="btn btn-ghost btn-sm" id="btn-open-hf-token" title="Opcional: conecta tu Token de lectura de Hugging Face para descargas más rápidas y modelos con licencia">
         🔑 Token HF
       </button>
@@ -990,6 +993,43 @@
         <div class="row-gap">
           <button type="button" class="btn btn-primary flex-1" id="btn-save-hf-token">Guardar y Activar Token</button>
           <button type="button" class="btn btn-danger btn-sm" id="btn-clear-hf-token">Quitar Token</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DE CONEXIÓN MCP PARA AGENTE DE TERMINAL -->
+  <div class="modal-backdrop" id="mcp-modal" hidden>
+    <div class="modal-box" style="max-width:680px;">
+      <div class="card-header">
+        <h3>🤖 Conector MCP (Controla Studio IA desde tu Terminal)</h3>
+        <button class="link-btn" id="btn-close-mcp-modal">✕ Cerrar</button>
+      </div>
+      <p class="muted">
+        Conecta tu agente local (<strong>Claude Code</strong>, <strong>Codex CLI</strong>, <strong>Gemini CLI</strong>, <strong>OpenCode</strong> o <strong>Cursor</strong>) a esta sesión de Google Colab. El agente recibe automáticamente el manual estructurado, esquemas cerrados anti-invención y todo lo que ejecute se verá <strong>en vivo en tu celda de Colab y en esta pantalla</strong>.
+      </p>
+      <div class="form-stack">
+        <div>
+          <label class="field-label">★ Opción 1 (Recomendada): Puente Local Universal — Sube fotos de tu PC y descarga los MP4 automáticamente sin timeouts</label>
+          <div class="row-gap">
+            <input type="text" id="mcp-cmd-claude-stdio" readonly />
+            <button type="button" class="btn btn-primary btn-sm" data-copy-target="mcp-cmd-claude-stdio">📋 Copiar Claude</button>
+          </div>
+          <div class="row-gap" style="margin-top:6px;">
+            <input type="text" id="mcp-cmd-codex-stdio" readonly />
+            <button type="button" class="btn btn-secondary btn-sm" data-copy-target="mcp-cmd-codex-stdio">📋 Copiar Codex</button>
+          </div>
+        </div>
+        <div>
+          <label class="field-label">Opción 2: Conexión HTTP Remota Directa (`/mcp` sin archivo local)</label>
+          <div class="row-gap">
+            <input type="text" id="mcp-cmd-http" readonly />
+            <button type="button" class="btn btn-secondary btn-sm" data-copy-target="mcp-cmd-http">📋 Copiar HTTP</button>
+          </div>
+        </div>
+        <div>
+          <label class="field-label">Configuración `mcpServers` JSON (Cursor / Windsurf / Gemini CLI)</label>
+          <textarea id="mcp-cmd-json" rows="5" readonly style="font-family:monospace;font-size:12px;"></textarea>
         </div>
       </div>
     </div>

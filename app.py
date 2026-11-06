@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -60,6 +60,7 @@ from studio.hardware import (
     request_colab_shutdown,
 )
 from studio.jobs import job_manager
+from studio.mcp_server import mcp_router
 from studio.memory_manager import memory_manager
 
 ensure_directories()
@@ -79,6 +80,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(mcp_router)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.mount("/media", StaticFiles(directory=str(DATA_ROOT)), name="media")
@@ -567,7 +570,7 @@ def api_get_assets() -> Dict[str, Any]:
 
 
 @app.post("/api/assets/upload")
-async def api_upload_asset(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def api_upload_asset(request: Request, file: UploadFile = File(...)) -> Dict[str, Any]:
     ensure_directories()
     orig_name = Path(file.filename or "archivo").name
     safe_stem = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in Path(orig_name).stem)[:40]
@@ -603,9 +606,11 @@ async def api_upload_asset(file: UploadFile = File(...)) -> Dict[str, Any]:
         }
 
     hardware_tracker.mark_activity()
+    from_mcp = bool(request.headers.get("x-mcp-client"))
+    origin_tag = "[MCP → Colab] Archivo subido desde tu terminal" if from_mcp else "Archivo subido desde la app"
     colab_console_log(
-        f"Archivo subido desde la app: {out_name} ({round(len(content) / 1024, 1)} KB, tipo={extra['type']})",
-        icon="📥",
+        f"{origin_tag}: {out_name} ({round(len(content) / 1024, 1)} KB, tipo={extra['type']})",
+        icon="🤖" if from_mcp else "📥",
     )
     return {
         "ok": True,
@@ -748,7 +753,8 @@ def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
                     status_code=400,
                     detail=(
                         f"El modelo «{m_defn['name']}» no soporta este modo ({sub}). "
-                        "Para Frame a Frame elige «Wan 2.2 TI2V-5B HD 720P», «Wan 2.1 VACE 1.3B», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
+                        "Para Frame a Frame elige «Wan 2.1 VACE 14B Quantized FP8», «Wan 2.1 FLF2V 14B 720P Quantized FP8», "
+                        "«LTX-Video 0.9.8 13B Distilled» o «Wan 2.1 VACE 1.3B»."
                     ),
                 )
 

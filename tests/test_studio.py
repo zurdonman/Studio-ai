@@ -1284,6 +1284,281 @@ def test_quantized_14b_distilled_13b_models_and_fp8_loader(monkeypatch, tmp_path
     assert tr._mods[2]._params[0].dtype == "bfloat16"
 
 
+def test_mcp_server_auth_manuals_guardrails_and_colab_logs(temp_studio_env, monkeypatch, capsys, tmp_path):
+    import base64
+    import io
+    import json
+    from PIL import Image
+
+    client, _ = temp_studio_env
+    monkeypatch.setenv("STUDIO_MCP_TOKEN", "st_mcp_secrettest123")
+
+    # 1) Sin token devuelve 401; con Bearer token pasa
+    r_unauth = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert r_unauth.status_code == 401
+
+    hdrs = {"Authorization": "Bearer st_mcp_secrettest123"}
+
+    # 2) Handshake MCP `initialize` + notificación `notifications/initialized` (202 Accepted)
+    r_init = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "clientInfo": {"name": "claude-code-test", "version": "1.0.0"},
+            },
+        },
+    )
+    assert r_init.status_code == 200
+    assert "Mcp-Session-Id" in r_init.headers
+    init_body = r_init.json()["result"]
+    assert init_body["protocolVersion"] == "2025-03-26"
+    assert "studio_get_state_and_manual" in init_body["instructions"]
+    assert "wan21-vace-14b-fp8" in init_body["instructions"]
+
+    r_notif = client.post("/mcp", headers=hdrs, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    assert r_notif.status_code == 202
+
+    # 3) Manuales consultables (`resources/list` + `resources/read`) y plantillas (`prompts/list` + `prompts/get`)
+    r_res = client.post("/mcp", headers=hdrs, json={"jsonrpc": "2.0", "id": 2, "method": "resources/list"})
+    uris = {x["uri"] for x in r_res.json()["result"]["resources"]}
+    assert "studio://manual/quickstart" in uris
+    assert "studio://manual/video-recipes" in uris
+    assert "studio://state/live" in uris
+
+    r_read = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={"jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": {"uri": "studio://manual/video-recipes"}},
+    )
+    assert "lora-wan21-14b-fusionx-phantom" in r_read.json()["result"]["contents"][0]["text"]
+
+    r_prm = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "prompts/get",
+            "params": {
+                "name": "flf2v_production_workflow",
+                "arguments": {"start_image": "a.png", "end_image": "b.png", "action_prompt": "salto mortal"},
+            },
+        },
+    )
+    assert "salto mortal" in r_prm.json()["result"]["messages"][0]["content"]["text"]
+
+    # 4) Esquemas cerrados con `enum` y guardias anti-alucinación con instrucciones de corrección exacta
+    r_tools = client.post("/mcp", headers=hdrs, json={"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
+    tools = {t["name"]: t for t in r_tools.json()["result"]["tools"]}
+    assert len(tools) >= 13
+    vid_schema = tools["studio_generate_video"]["inputSchema"]["properties"]
+    assert vid_schema["video_submode"]["enum"] == ["flf2v", "i2v", "t2v"]
+    assert "wan21-vace-14b-fp8" in vid_schema["model_id"]["enum"]
+    assert "lora-wan21-14b-fusionx-phantom" in vid_schema["video_lora_id"]["enum"]
+
+    # Subir dos fotogramas por MCP y probar guardia contra modelo incompatible en flf2v (`wan22-ti2v-5b`)
+    def _png_b64(color):
+        buf = io.BytesIO()
+        Image.new("RGB", (320, 240), color).save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    up1 = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_upload_file_base64",
+                "arguments": {"filename": "inicio.png", "data_base64": _png_b64((30, 90, 210))},
+            },
+        },
+    ).json()["result"]
+    assert up1["isError"] is False
+    rel1 = json.loads(up1["content"][0]["text"])["asset"]["rel_path"]
+
+    up2 = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_upload_file_base64",
+                "arguments": {"filename": "final.png", "data_base64": _png_b64((220, 80, 40))},
+            },
+        },
+    ).json()["result"]
+    rel2 = json.loads(up2["content"][0]["text"])["asset"]["rel_path"]
+
+    # Guardia 1: modelo solo I2V/T2V (`wan22-ti2v-5b`) rechazado en `flf2v` con lista exacta de alternativas
+    bad_mod = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_generate_video",
+                "arguments": {
+                    "video_submode": "flf2v",
+                    "mode": "ai",
+                    "model_id": "wan22-ti2v-5b",
+                    "prompt": "transición",
+                    "image_rel": rel1,
+                    "end_image_rel": rel2,
+                },
+            },
+        },
+    ).json()["result"]
+    assert bad_mod["isError"] is True
+    bad_mod_json = json.loads(bad_mod["content"][0]["text"])
+    assert bad_mod_json["error_code"] == "SUBMODE_NOT_SUPPORTED_BY_MODEL"
+    assert "wan21-vace-14b-fp8" in bad_mod_json["compatible_model_ids"]
+
+    # 5) Ejecución real Frame a Frame FFmpeg vía MCP + verificación de logs en tiempo real hacia la celda de Colab
+    ok_vid = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_generate_video",
+                "arguments": {
+                    "video_submode": "flf2v",
+                    "mode": "ffmpeg_motion",
+                    "prompt": "transición suave",
+                    "image_rel": rel1,
+                    "end_image_rel": rel2,
+                    "duration_sec": 2.0,
+                    "wait": True,
+                },
+            },
+        },
+    ).json()["result"]
+    assert ok_vid["isError"] is False
+    ok_vid_data = json.loads(ok_vid["content"][0]["text"])
+    assert ok_vid_data["status"] == "completed"
+    assert ok_vid_data["result"]["rel_path"].startswith("outputs/videos/")
+
+    captured_stdout = capsys.readouterr().out
+    assert "[MCP] Agente conectado desde terminal: «claude-code-test 1.0.0»" in captured_stdout
+    assert "[MCP → Studio IA] Agente ejecutó «studio_generate_video»" in captured_stdout
+
+    # 6) Endpoints auxiliares `/mcp/bridge.py` y `/api/mcp/info`
+    r_bridge = client.get("/mcp/bridge.py")
+    assert r_bridge.status_code == 200
+    assert "class StudioColabBridge" in r_bridge.text
+
+    r_info = client.get("/api/mcp/info")
+    assert r_info.status_code == 200
+    assert r_info.json()["token_required"] is True
+    assert "claude mcp add" in r_info.json()["commands"]["claude_code_stdio"]
+
+
+def test_studio_mcp_local_bridge_upload_poll_and_download(temp_studio_env, monkeypatch, tmp_path):
+    import io
+    import json
+    from PIL import Image
+    from studio_mcp import StudioColabBridge
+
+    client, _ = temp_studio_env
+    monkeypatch.setenv("STUDIO_MCP_TOKEN", "st_mcp_bridgetoken")
+
+    # Conectar StudioColabBridge en memoria contra el TestClient FastAPI para probar subida local + polling + bajada a PC
+    bridge = StudioColabBridge(
+        base_url="http://testserver",
+        token="st_mcp_bridgetoken",
+        out_dir=str(tmp_path / "auto_out"),
+    )
+
+    def _mock_http_json(method, path, payload=None, timeout=65.0):
+        resp = client.request(method, path, json=payload, headers=bridge._headers())
+        assert resp.status_code < 400, resp.text
+        return resp.json() if resp.text.strip() else {}
+
+    def _mock_upload(local_path_str):
+        p = tmp_path / local_path_str if not str(local_path_str).startswith("/") else Image.open(local_path_str)
+        from pathlib import Path as _P
+
+        fp = _P(local_path_str)
+        with open(fp, "rb") as fh:
+            resp = client.post(
+                "/api/assets/upload",
+                files={"file": (fp.name, fh, "image/png")},
+                headers={"X-MCP-Client": "studio-mcp-local-bridge"},
+            )
+        assert resp.status_code == 200
+        return resp.json()["asset"]
+
+    def _mock_download(rel_path=None, save_to_local_path=None, export_all_zip=False):
+        from pathlib import Path as _P
+
+        remote = "/api/export/zip" if export_all_zip else f"/media/{rel_path.lstrip('/')}"
+        resp = client.get(remote, headers=bridge._headers())
+        assert resp.status_code == 200
+        dest = _P(save_to_local_path) if save_to_local_path else (bridge.out_dir / _P(rel_path).name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(resp.content)
+        return str(dest)
+
+    monkeypatch.setattr(bridge, "_http_json", _mock_http_json)
+    monkeypatch.setattr(bridge, "upload_local_file", _mock_upload)
+    monkeypatch.setattr(bridge, "download_to_local", _mock_download)
+
+    # 1) `tools/list` en el puente añade propiedades locales (`local_image_path`, `local_end_image_path`, `save_to_local_path`) y `studio_download_asset_to_pc`
+    tlist_resp = bridge.handle_jsonrpc_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    b_tools = {t["name"]: t for t in tlist_resp["result"]["tools"]}
+    assert "studio_download_asset_to_pc" in b_tools
+    v_props = b_tools["studio_generate_video"]["inputSchema"]["properties"]
+    assert "local_image_path" in v_props
+    assert "local_end_image_path" in v_props
+    assert "save_to_local_path" in v_props
+
+    # 2) Crear dos imágenes en el "PC local", lanzar `studio_generate_video` por el puente y verificar el MP4 descargado en PC
+    p_start = tmp_path / "pc_pose_1.png"
+    p_end = tmp_path / "pc_pose_2.png"
+    Image.new("RGB", (320, 240), (40, 180, 90)).save(p_start)
+    Image.new("RGB", (320, 240), (190, 50, 140)).save(p_end)
+    p_dest_mp4 = tmp_path / "descargas_pc" / "mi_clip_final.mp4"
+
+    call_resp = bridge.handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_generate_video",
+                "arguments": {
+                    "video_submode": "flf2v",
+                    "mode": "ffmpeg_motion",
+                    "prompt": "transición desde PC",
+                    "local_image_path": str(p_start),
+                    "local_end_image_path": str(p_end),
+                    "duration_sec": 2.0,
+                    "save_to_local_path": str(p_dest_mp4),
+                },
+            },
+        }
+    )
+    assert call_resp["result"]["isError"] is False
+    done_data = json.loads(call_resp["result"]["content"][0]["text"])
+    assert done_data["ok"] is True
+    assert done_data["result"]["saved_local_path"] == str(p_dest_mp4)
+    assert p_dest_mp4.exists() and p_dest_mp4.stat().st_size > 1000
+
+
+
 
 
 

@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -168,9 +169,11 @@ def main() -> None:
         shutdown_flag.unlink()
 
     print("🚀 [2/3] Arrancando servidor Studio IA en proceso limpio...", flush=True)
+    mcp_token = os.environ.get("STUDIO_MCP_TOKEN", "").strip() or f"st_mcp_{secrets.token_hex(12)}"
     env = os.environ.copy()
     env["PORT"] = str(PORT)
     env["PYTHONUNBUFFERED"] = "1"
+    env["STUDIO_MCP_TOKEN"] = mcp_token
     env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     # Capturamos stdout/stderr en un hilo lector hacia print(..., flush=True) para que
@@ -200,18 +203,31 @@ def main() -> None:
         server_proc.terminate()
         sys.exit(1)
 
-    print("🔗 [3/3] Abriendo enlace de acceso...", flush=True)
+    print("🔗 [3/3] Abriendo enlace de acceso y conector MCP...", flush=True)
     cf_proc, cf_url = start_cloudflared_tunnel(PORT)
     colab_url = try_colab_proxy_url(PORT)
+
+    if cf_url:
+        try:
+            reg_req = urllib.request.Request(
+                f"http://127.0.0.1:{PORT}/api/mcp/tunnel-info",
+                data=json.dumps({"public_url": cf_url}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(reg_req, timeout=4).close()
+        except Exception:
+            pass
 
     hw = initial_status.get("hardware", {})
     gpu = hw.get("gpu", {})
     disk = hw.get("disk", {})
     cred = hw.get("credits", {})
 
-    msg_lines = ["✨ STUDIO IA ACTIVO Y LISTO ✨"]
+    base_ext = cf_url or f"http://127.0.0.1:{PORT}"
+    msg_lines = ["✨ STUDIO IA ACTIVO Y LISTO (WEB + SERVIDOR MCP) ✨"]
     if cf_url:
-        msg_lines.append(f"👉 Abre este enlace (PC o móvil):  {cf_url}")
+        msg_lines.append(f"👉 Interfaz Web (PC o móvil):      {cf_url}")
     if colab_url:
         msg_lines.append(f"🔹 Enlace alternativo Colab:       {colab_url}")
     if not cf_url and not colab_url:
@@ -219,7 +235,20 @@ def main() -> None:
     msg_lines.append(
         f"🖥️  Hardware: {gpu.get('gpu_name', 'CPU')} · Disco libre: {disk.get('free_gb', '?')} GB · Tarifa: {cred.get('hourly_rate', 0)} u/h"
     )
-    msg_lines.append("📡 Debajo verás EN TIEMPO REAL cada descarga (0-100%), carga de modelo y proceso que lances:")
+    msg_lines.append("─" * 74)
+    msg_lines.append("🤖 CONECTOR MCP PARA TU AGENTE DE TERMINAL (Claude Code / Codex / Cursor):")
+    msg_lines.append(f"   • Endpoint MCP Remoto:  {base_ext}/mcp")
+    msg_lines.append(f"   • Token MCP Sesión:     {mcp_token}")
+    msg_lines.append("   • Comando 1 línea (Puente Local recomendado · sube fotos y baja MP4 a tu PC):")
+    msg_lines.append(
+        f"     curl -fsSL {base_ext}/mcp/bridge.py -o studio_mcp.py && claude mcp add studio-ia -- python3 $(pwd)/studio_mcp.py --url {base_ext} --token {mcp_token} --out-dir ./salidas_studio"
+    )
+    msg_lines.append("   • Alternativa HTTP directa (sin descargar archivo):")
+    msg_lines.append(
+        f'     claude mcp add --transport http studio-ia {base_ext}/mcp --header "Authorization: Bearer {mcp_token}"'
+    )
+    msg_lines.append("─" * 74)
+    msg_lines.append("📡 Debajo verás EN TIEMPO REAL todo lo que hagas tú en la Web o tu Agente vía MCP:")
     _print_box(msg_lines)
 
     try:

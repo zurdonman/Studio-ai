@@ -2957,6 +2957,41 @@
         $("hf-token-modal").hidden = true;
       });
     }
+    if ($("btn-open-mcp-modal")) {
+      $("btn-open-mcp-modal").addEventListener("click", async () => {
+        try {
+          const info = await api("/api/mcp/info");
+          const cmds = info.commands || {};
+          if ($("mcp-cmd-claude-stdio")) $("mcp-cmd-claude-stdio").value = cmds.claude_code_stdio || "";
+          if ($("mcp-cmd-codex-stdio")) $("mcp-cmd-codex-stdio").value = cmds.codex_cli_stdio || "";
+          if ($("mcp-cmd-http")) $("mcp-cmd-http").value = cmds.claude_code_http || "";
+          if ($("mcp-cmd-json")) $("mcp-cmd-json").value = cmds.mcp_servers_json || "";
+          $("mcp-modal").hidden = false;
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
+    if ($("btn-close-mcp-modal")) {
+      $("btn-close-mcp-modal").addEventListener("click", () => {
+        $("mcp-modal").hidden = true;
+      });
+    }
+    document.querySelectorAll("[data-copy-target]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const el = $(btn.dataset.copyTarget);
+        if (!el || !el.value) return;
+        try {
+          await navigator.clipboard.writeText(el.value);
+          toast("Comando MCP copiado al portapapeles.", "success");
+        } catch (_err) {
+          el.select();
+          document.execCommand("copy");
+          toast("Comando MCP copiado.", "success");
+        }
+      });
+    });
+
     if ($("btn-save-hf-token")) {
       $("btn-save-hf-token").addEventListener("click", async () => {
         const val = ($("inp-hf-token").value || "").trim();
