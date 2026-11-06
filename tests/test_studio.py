@@ -689,26 +689,31 @@ def test_official_model_specs_prevent_hallucination_and_incompatible_flf2v(temp_
     cropped = _fit_and_crop_rgb(Image.new("RGB", (900, 1200), (80, 90, 100)), 704, 1280)
     assert cropped.size == (704, 1280)
 
-    # 7) Wan 2.2 TI2V-5B ahora soporta nativamente flf2v; modelos exclusivos como cogvideox-5b-i2v devuelven HTTP 400
-    assert "flf2v" in wan22["video_modes"]
+    # 7) Wan 2.2 TI2V-5B es especialista honesto I2V/T2V; Frame a Frame usa Wan 2.1 VACE 1.3B / Wan 2.1 Fun InP / SkyReels V2
+    assert "flf2v" not in wan22["video_modes"]
+    vace = vdefs["wan21-vace-1.3b"]
+    fun_inp = vdefs["wan21-fun-1.3b-inp"]
+    assert "flf2v" in vace["video_modes"] and vace["default_steps"] == 30 and vace["default_cfg"] == 5.0
+    assert "flf2v" in fun_inp["video_modes"]
     buf = io.BytesIO()
     Image.new("RGB", (640, 360), (20, 40, 60)).save(buf, format="PNG")
     raw = buf.getvalue()
     u1 = client.post("/api/assets/upload", files={"file": ("a.png", raw, "image/png")}).json()["asset"]
     u2 = client.post("/api/assets/upload", files={"file": ("b.png", raw, "image/png")}).json()["asset"]
-    r_bad_flf = client.post(
-        "/api/video/generate",
-        json={
-            "mode": "ai",
-            "video_submode": "flf2v",
-            "model_id": "cogvideox-5b-i2v",
-            "image_rel": u1["rel_path"],
-            "end_image_rel": u2["rel_path"],
-            "prompt": "transición",
-        },
-    )
-    assert r_bad_flf.status_code == 400
-    assert "Wan 2.2 TI2V-5B" in r_bad_flf.json()["detail"]
+    for non_flf_id in ("cogvideox-5b-i2v", "wan22-ti2v-5b"):
+        r_bad_flf = client.post(
+            "/api/video/generate",
+            json={
+                "mode": "ai",
+                "video_submode": "flf2v",
+                "model_id": non_flf_id,
+                "image_rel": u1["rel_path"],
+                "end_image_rel": u2["rel_path"],
+                "prompt": "transición",
+            },
+        )
+        assert r_bad_flf.status_code == 400
+        assert "Wan 2.1 VACE 1.3B" in r_bad_flf.json()["detail"]
 
 
 def test_video_speed_loras_and_steps_reset_controls(temp_studio_env, monkeypatch):
@@ -1025,6 +1030,41 @@ def test_wan22_ti2v_native_flf2v_prepare_latents_and_fast_mp4(temp_studio_env, m
     assert np.allclose(mask.arr[:, :, 0], 0.0)
     assert np.allclose(mask.arr[:, :, -1], 0.0)
     assert np.allclose(mask.arr[:, :, 1:-1], 1.0)
+
+
+def test_flf2v_dual_clip_fix_and_causal_lora_guardrails():
+    import types
+    import numpy as np
+    from studio.catalog import DEFAULT_CATALOG
+    from studio.engines.video_engine import _attach_dual_image_flf2v_fix
+
+    # 1) Todos los LoRAs causales / CFG=1.0 marcan incompatible_submodes=["flf2v"] para impedir saltos en el último frame
+    loras = {m["id"]: m for m in DEFAULT_CATALOG if m["category"] == "lora" and m.get("lora_target") == "video"}
+    assert "flf2v" in loras["lora-wan22-ti2v-5b-turbo"]["incompatible_submodes"]
+    assert loras["lora-wan22-ti2v-5b-turbo"]["causal_attention"] is True
+    assert "flf2v" in loras["lora-wan21-1.3b-rcm-turbo"]["incompatible_submodes"]
+
+    # 2) _attach_dual_image_flf2v_fix concatena (2, 257, 1280) -> (1, 514, 1280) cuando pos_embed_seq_len es None
+    class FakeDualPipe:
+        def __init__(self, pos_embed_seq_len=None):
+            self.transformer = types.SimpleNamespace(
+                config=types.SimpleNamespace(pos_embed_seq_len=pos_embed_seq_len)
+            )
+
+        def encode_image(self, image, device=None):
+            n = len(image) if isinstance(image, (list, tuple)) else 1
+            return np.ones((n, 257, 1280), dtype=np.float32)
+
+    p_null = FakeDualPipe(pos_embed_seq_len=None)
+    _attach_dual_image_flf2v_fix(p_null)
+    assert p_null.encode_image("img1").shape == (1, 257, 1280)
+    assert p_null.encode_image(["img1", "img2"]).shape == (1, 514, 1280)
+
+    # Si el modelo ya tiene pos_embed_seq_len=514 (ej. Wan2.1-FLF2V-14B), mantiene (2, 257, 1280) para su view nativo
+    p_514 = FakeDualPipe(pos_embed_seq_len=514)
+    _attach_dual_image_flf2v_fix(p_514)
+    assert p_514.encode_image(["img1", "img2"]).shape == (2, 257, 1280)
+
 
 
 

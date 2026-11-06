@@ -638,6 +638,12 @@
       }
     }
 
+    const curVidSel = $("select-video-model");
+    if (curVidSel && curVidSel.value && !isFfmpeg) {
+      populateVideoLoraSelect(curVidSel.value);
+      updateVideoStepsSafetyNote();
+    }
+
     updateVideoSourceThumb();
     updateVideoEndThumb();
     renderVideoCompatBanner();
@@ -778,11 +784,15 @@
     const pillsWrap = $("vid-lora-quality-pills");
     if (!loraBox || !loraSel) return;
 
+    const curSub = state.videoSubmode || "i2v";
+    const prev = loraSel.value;
+
     const compatLoras = state.catalog.filter(
       (m) =>
         m.category === "lora" &&
         m.lora_target === "video" &&
-        (!Array.isArray(m.compatible_models) || m.compatible_models.includes(modelId))
+        (!Array.isArray(m.compatible_models) || m.compatible_models.includes(modelId)) &&
+        (!Array.isArray(m.incompatible_submodes) || !m.incompatible_submodes.includes(curSub))
     );
 
     if (compatLoras.length === 0) {
@@ -792,10 +802,19 @@
       if (scaleWrap) scaleWrap.hidden = true;
       if (dlBtn) dlBtn.hidden = true;
       if (pillsWrap) pillsWrap.hidden = true;
+      // Si antes había un LoRA causal/destilado activo y pasamos a Frame a Frame, restaurar pasos/CFG oficiales
+      if (prev) {
+        const m = state.catalog.find((x) => x.id === modelId);
+        const spec = (m && m.official_spec) || {};
+        const recSteps = Number(spec.default_steps || (m && m.default_steps) || 30);
+        const recCfg = Number(spec.default_cfg || (m && m.default_cfg) || 5.0);
+        if ($("vid-steps")) $("vid-steps").value = recSteps;
+        if ($("vid-steps-slider")) $("vid-steps-slider").value = recSteps;
+        if ($("vid-cfg")) $("vid-cfg").value = recCfg;
+      }
       return;
     }
 
-    const prev = loraSel.value;
     loraBox.hidden = false;
     loraSel.innerHTML =
       `<option value="">Sin LoRA acelerador (Modo Oficial Estándar)</option>` +
@@ -904,7 +923,10 @@
 
     if (steps < minSafe) {
       noteEl.className = "vid-steps-note warn";
-      noteEl.textContent = `⚠️ Menos de ${minSafe} pasos sin LoRA puede deformar piernas/brazos o dejar borrones. Usa ≥${fastSafe} pasos, pulsa «↺ Resetear pasos» o elige arriba el ⚡ LoRA Turbo (6 pasos).`;
+      noteEl.textContent = `⚠️ Menos de ${minSafe} pasos sin LoRA puede deformar piernas/brazos o dejar borrones. Usa ≥${fastSafe} pasos o pulsa «↺ Resetear pasos».`;
+    } else if (state.videoSubmode === "flf2v") {
+      noteEl.className = "vid-steps-note ok";
+      noteEl.textContent = `🎞️ Modo Frame a Frame bidireccional activo (${steps} pasos · CFG ${cfg} sin LoRA causal): interpola de forma continua entre ambas poses (~1.2–1.5 min en L4 con 1.3B) sin saltos en el último fotograma.`;
     } else if (steps < defSteps - 4) {
       const savedPct = Math.max(5, Math.round((1 - steps / defSteps) * 100));
       noteEl.className = "vid-steps-note ok";

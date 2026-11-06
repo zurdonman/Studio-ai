@@ -264,10 +264,12 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     # ==================== LoRAs ACELERADORES DE VÍDEO ====================
     {
         "id": "lora-wan22-ti2v-5b-turbo",
-        "name": "⚡ LoRA Turbo 4–6 Pasos para Wan 2.2 TI2V-5B (Self-Forcing · ×12 más rápido)",
+        "name": "⚡ LoRA Turbo 4–6 Pasos para Wan 2.2 TI2V-5B (Self-Forcing · Solo Imagen/Texto→Vídeo)",
         "category": "lora",
         "lora_target": "video",
         "compatible_models": ["wan22-ti2v-5b"],
+        "incompatible_submodes": ["flf2v"],
+        "causal_attention": True,
         "recommended_steps": 6,
         "min_safe_steps": 4,
         "max_steps": 8,
@@ -276,10 +278,10 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "is_default": False,
         "parent_model": "wan22-ti2v-5b",
         "adapter_name": "wan22_5b_turbo",
-        "badge": "⚡ Vídeo ×12 más rápido · 332 MB",
+        "badge": "⚡ Vídeo ×12 más rápido · I2V/T2V · 332 MB",
         "description": (
-            "LoRA de destilación Self-Forcing para Wan 2.2 TI2V-5B (solo 332 MB). "
-            "Baja de 45 pasos (~18 min) a solo 4–6 pasos con CFG 1.0 (~1.2 min en L4) sobre el modelo que ya tienes descargado."
+            "LoRA causal Self-Forcing para Wan 2.2 TI2V-5B (332 MB) en Imagen a Vídeo y Texto a Vídeo. "
+            "Baja de 45 pasos (~18 min) a solo 4–6 pasos con CFG 1.0 (~1.2 min en L4). No se usa en Frame a Frame porque la atención causal ignora el fotograma final."
         ),
         "estimated_gb": 0.33,
         "min_vram_gb": 0.4,
@@ -302,9 +304,11 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "category": "lora",
         "lora_target": "video",
         "compatible_models": ["wan22-ti2v-5b"],
+        "incompatible_submodes": ["flf2v"],
+        "causal_attention": False,
         "recommended_steps": 6,
         "min_safe_steps": 4,
-        "max_steps": 8,
+        "max_steps": 10,
         "recommended_cfg": 1.0,
         "default_lora_scale": 0.75,
         "is_default": False,
@@ -313,7 +317,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "badge": "🚀 FastWan DMD · 661 MB",
         "description": (
             "LoRA FastWan DMD oficial extraído de FastVideo (Hao AI Lab, 661 MB) para Wan 2.2 TI2V-5B. "
-            "Genera en 6 pasos con CFG 1.0 y escala 0.75 manteniendo máxima fidelidad a la imagen inicial."
+            "Genera Imagen a Vídeo o Texto a Vídeo en 6 pasos con CFG 1.0 y escala 0.75 manteniendo máxima fidelidad a la imagen inicial."
         ),
         "estimated_gb": 0.66,
         "min_vram_gb": 0.6,
@@ -332,22 +336,24 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "lora-wan21-1.3b-rcm-turbo",
-        "name": "⚡ LoRA rCM Turbo 6 Pasos para Wan 2.1 1.3B / VACE (Frame a Frame Rápido)",
+        "name": "⚡ LoRA rCM Turbo 6 Pasos para Wan 2.1 1.3B (Solo Texto/Imagen → Vídeo)",
         "category": "lora",
         "lora_target": "video",
-        "compatible_models": ["wan21-vace-1.3b", "wan21-t2v-1.3b"],
+        "compatible_models": ["wan21-t2v-1.3b", "wan21-vace-1.3b"],
+        "incompatible_submodes": ["flf2v"],
+        "causal_attention": False,
         "recommended_steps": 6,
         "min_safe_steps": 4,
         "max_steps": 8,
         "recommended_cfg": 1.0,
         "default_lora_scale": 0.85,
         "is_default": False,
-        "parent_model": "wan21-vace-1.3b",
+        "parent_model": "wan21-t2v-1.3b",
         "adapter_name": "wan21_1_3b_rcm",
-        "badge": "⚡ Frame a Frame ×6 más rápido · 187 MB",
+        "badge": "⚡ T2V/I2V ×5 más rápido · 187 MB",
         "description": (
-            "LoRA acelerador rCM (187 MB) para Wan 2.1 1.3B y Wan 2.1 VACE 1.3B: "
-            "reduce de 40 pasos a solo 6 pasos con CFG 1.0."
+            "LoRA acelerador rCM (187 MB) entrenado sobre Wan 2.1 T2V 1.3B para Texto a Vídeo e Imagen a Vídeo simple en 6 pasos @ CFG 1.0. "
+            "En Frame a Frame se desactiva automáticamente porque VACE necesita CFG 5.0 y sus 15 capas de contexto completas (~1.2 min en L4 sin LoRA)."
         ),
         "estimated_gb": 0.19,
         "min_vram_gb": 0.3,
@@ -367,11 +373,11 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     # ==================== VÍDEO ====================
     {
         "id": "wan22-ti2v-5b",
-        "name": "Wan 2.2 TI2V-5B HD 720P (Imagen / Frame a Frame / Texto · 24 fps)",
+        "name": "Wan 2.2 TI2V-5B HD 720P (Imagen a Vídeo y Texto a Vídeo · 24 fps)",
         "category": "video",
         "is_default": True,
-        "badge": "HD 720P ★ · Imagen + Frame a Frame + LoRA Turbo",
-        "video_modes": ["i2v", "flf2v", "t2v"],
+        "badge": "HD 720P ★ · Imagen/Texto + LoRA Turbo",
+        "video_modes": ["i2v", "t2v"],
         "default_fps": 24,
         "default_steps": 45,
         "default_cfg": 5.0,
@@ -393,16 +399,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "default_cfg": 5.0,
             "flow_shift": 5.0,
             "prompt_lang": "es_en",
-            "official_note": "720P nativo (1280×704 / 704×1280) · Imagen a Vídeo, Frame a Frame (Inicio→Fin) y Texto a Vídeo · 45p oficial (6–10p con LoRA Turbo)",
+            "official_note": "720P nativo (1280×704 / 704×1280) · Especialista 1 Foto→Vídeo y Texto→Vídeo · 6p con LoRA Turbo (~1.2 min en L4). Para Frame a Frame (2 poses) usa Wan 2.1 VACE 1.3B",
         },
         "description": (
-            "Modelo 3-en-1 720P@24fps de Alibaba Wan 2.2: soporta Imagen a Vídeo, Frame a Frame (Inicio → Fin) y Texto a Vídeo. "
-            "En 45 pasos tarda ~18 min en L4; con su LoRA Turbo (332 MB) tarda ~1.5 min (6p) o ~3.5 min en modo Alta Nitidez (10p, fuerza 0.75)."
+            "Modelo HD 720P@24fps de Alibaba Wan 2.2 entrenado para animar 1 Imagen Inicial o generar desde Texto (no entrenado para 2 poses Frame a Frame). "
+            "Con su LoRA Turbo (332 MB) genera en 6 pasos (~1.2 min en L4). Al cambiar a Frame a Frame, Studio IA selecciona automáticamente Wan 2.1 VACE 1.3B."
         ),
         "estimated_gb": 31.9,
         "min_vram_gb": 13.5,
         "recommended_vram_gb": 19.5,
-        "l4_seconds_hint": "~18 min (45p) · ~1.5–3.5 min con LoRA Turbo",
+        "l4_seconds_hint": "~1.2 min con LoRA Turbo (6p) · ~18 min base (45p)",
         "engine": "wan_ti2v",
         "artifacts": [
             {
@@ -417,11 +423,11 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "wan22-ti2v-5b-turbo",
-        "name": "Wan 2.2 TI2V-5B TURBO 4 Pasos (Imagen / Frame a Frame / Texto · 22.8 GB)",
+        "name": "Wan 2.2 TI2V-5B TURBO 4 Pasos (Imagen a Vídeo y Texto a Vídeo · 22.8 GB)",
         "category": "video",
         "is_default": False,
-        "badge": "⚡ 4 Pasos de Fábrica · Imagen + Frame a Frame",
-        "video_modes": ["i2v", "flf2v", "t2v"],
+        "badge": "⚡ 4 Pasos de Fábrica · Solo I2V / T2V",
+        "video_modes": ["i2v", "t2v"],
         "default_fps": 24,
         "default_steps": 4,
         "default_cfg": 1.0,
@@ -443,11 +449,11 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "default_cfg": 1.0,
             "flow_shift": 5.0,
             "prompt_lang": "es_en",
-            "official_note": "Versión destilada 4 pasos @ CFG 1.0 · 720P (1280×704 / 704×1280) · 5 s (121 frames @ 24 fps) · ~1 min en L4",
+            "official_note": "Versión Self-Forcing 4 pasos @ CFG 1.0 · Solo 1 Foto→Vídeo o Texto→Vídeo · ~1 min en L4 (no apto para Frame a Frame por atención causal)",
         },
         "description": (
-            "Edición completa ya destilada a 4 pasos (Self-Forcing, bfloat16, 22.8 GB) de Wan 2.2 TI2V-5B. "
-            "Genera 121 fotogramas 720P@24fps en solo 4 pasos con CFG 1.0 (~1 min en L4). Si ya descargaste el Wan 2.2 normal, basta usar el LoRA Turbo de 332 MB."
+            "Edición destilada Self-Forcing a 4 pasos (bfloat16, 22.8 GB) de Wan 2.2 TI2V-5B para animar 1 imagen o texto en ~1 min en L4. "
+            "Al usar atención causal hacia delante, no es compatible con Frame a Frame (para Inicio → Fin usa Wan 2.1 VACE 1.3B)."
         ),
         "estimated_gb": 22.8,
         "min_vram_gb": 12.5,
@@ -467,13 +473,13 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "wan21-vace-1.3b",
-        "name": "Wan 2.1 VACE 1.3B (Frame a Frame + Imagen + Texto · Español/Inglés)",
+        "name": "Wan 2.1 VACE 1.3B Oficial (★ Especialista Frame a Frame Inicio → Fin · Español/Inglés)",
         "category": "video",
         "is_default": False,
-        "badge": "Recomendado Frame a Frame ★ · 3 en 1",
+        "badge": "★ #1 Recomendado Frame a Frame · ~1.3 min en L4",
         "video_modes": ["flf2v", "i2v", "t2v"],
         "default_fps": 16,
-        "default_steps": 40,
+        "default_steps": 30,
         "default_cfg": 5.0,
         "default_duration_sec": 5.0,
         "official_spec": {
@@ -486,25 +492,76 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "default_frames": 81,
             "default_duration_sec": 5.0,
             "default_fps": 16,
-            "default_steps": 40,
+            "default_steps": 30,
+            "fast_safe_steps": 24,
+            "min_safe_steps": 20,
             "default_cfg": 5.0,
             "flow_shift": 3.0,
             "prompt_lang": "es_en",
-            "official_note": "480P nativo (832×480 / 480×832) · 5 s (81 frames @ 16 fps) · 35–45 pasos · CFG 5.0 · Entiende Español e Inglés",
+            "official_note": "★ Especialista oficial Alibaba VACE para Frame a Frame (poses distintas como saltos/giros) · 30 pasos @ CFG 5.0 sin LoRA (~1.3 min en L4) · 81 frames @ 16 fps",
         },
         "description": (
-            "Modelo todoterreno 1.3B de Alibaba Wan VACE entrenado para Frame a Frame (Inicio → Fin), Imagen a Vídeo y Texto a Vídeo. "
-            "Entiende prompts en español, gasta solo 17.7 GB y usa 480P (832×480 / 480×832) @ 16 fps, 81 fotogramas y 40 pasos."
+            "Modelo oficial de Alibaba Wan-AI con 15 capas bidireccionales VACE entrenadas específicamente para interpolar poses complejas de Inicio → Fin "
+            "(ej. guardia → patada voladora) sin saltos bruscos al final. Pesa solo 17.7 GB y tarda ~1.3 min en L4 a máxima calidad (30 pasos, CFG 5.0, sin LoRA)."
         ),
         "estimated_gb": 17.7,
         "min_vram_gb": 8.0,
         "recommended_vram_gb": 13.5,
-        "l4_seconds_hint": "45–75 s / clip",
+        "l4_seconds_hint": "~1.1–1.5 min / clip (30 pasos sin LoRA)",
         "engine": "wan_vace",
         "artifacts": [
             {
                 "role": "base",
                 "repo_id": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
+            }
+        ],
+    },
+    {
+        "id": "wan21-fun-1.3b-inp",
+        "name": "Wan 2.1 Fun 1.3B InP (Alibaba PAI · Interpolación Dedicada Inicio → Fin)",
+        "category": "video",
+        "is_default": False,
+        "badge": "Especialista InP 36 Canales · Doble CLIP",
+        "video_modes": ["flf2v", "i2v"],
+        "default_fps": 16,
+        "default_steps": 35,
+        "default_cfg": 5.0,
+        "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [832, 480],
+            "portrait": [480, 832],
+            "square": [640, 640],
+            "max_area": 480 * 832,
+            "mod_value": 16,
+            "frame_rule": "4k+1",
+            "default_frames": 81,
+            "default_duration_sec": 5.0,
+            "default_fps": 16,
+            "default_steps": 35,
+            "fast_safe_steps": 26,
+            "min_safe_steps": 22,
+            "default_cfg": 5.0,
+            "flow_shift": 3.0,
+            "prompt_lang": "es_en",
+            "official_note": "Alibaba PAI Fun-InP (36 canales + doble CLIP Inicio/Fin) · 35 pasos @ CFG 5.0 (~1.4 min en L4) · Transiciones continuas pose a pose",
+        },
+        "description": (
+            "Modelo dedicado de interpolación (InP) de Alibaba PAI con transformador de 36 canales (máscara inicio/fin explícita) y codificador CLIP dual "
+            "para ambos fotogramas. Ideal como segunda opción especializada en transiciones Frame a Frame fluidas en T4 y L4."
+        ),
+        "estimated_gb": 29.5,
+        "min_vram_gb": 8.5,
+        "recommended_vram_gb": 14.0,
+        "l4_seconds_hint": "~1.2–1.6 min / clip (35 pasos)",
+        "engine": "wan_i2v_14b",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "weizhou03/Wan2.1-Fun-1.3B-InP-Diffusers",
                 "subdir": "base",
                 "filename": None,
                 "verify_file": "model_index.json",

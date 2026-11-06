@@ -378,11 +378,42 @@ def _switch_pipeline_class(
 
     new_pipe = target_cls(**valid_kwargs)
     _attach_wan22_flf2v_support(new_pipe)
+    _attach_dual_image_flf2v_fix(new_pipe)
     if vram_total_gb is None:
         vram_total_gb = float(query_gpu_info().get("vram_total_gb", 22.0))
     _apply_best_offload(new_pipe, vram_total_gb, float(handle.get("min_vram_gb", 14.0)))
     handle["pipe"] = new_pipe
     return new_pipe
+
+
+def _attach_dual_image_flf2v_fix(pipe: Any) -> None:
+    """
+    Corrige el bug upstream de Diffusers en `WanImageToVideoPipeline` y `SkyReelsV2ImageToVideoPipeline`
+    cuando se pasa `last_image` y `transformer.config.pos_embed_seq_len` es `None`
+    (ej. `Wan2.1-Fun-1.3B-InP-Diffusers`, `SkyReels-V2-I2V-1.3B-540P-Diffusers`, `Wan2.1-I2V-14B`):
+    `encode_image([first_img, last_img])` devolvía shape `(2, 257, D)` con batch=2 en vez de concatenar
+    los tokens visuales de inicio y fin en `(1, 514, D)`, provocando un RuntimeError en `torch.concat(..., dim=1)`.
+    """
+    orig_encode = getattr(pipe, "encode_image", None)
+    if orig_encode is None or getattr(pipe, "_studio_dual_clip_patched", False):
+        return
+
+    def _encode_image_flf2v_safe(image: Any, device: Any = None) -> Any:
+        out = orig_encode(image, device=device)
+        pos_len = getattr(getattr(getattr(pipe, "transformer", None), "config", None), "pos_embed_seq_len", None)
+        if (
+            isinstance(image, (list, tuple))
+            and len(image) == 2
+            and pos_len is None
+            and hasattr(out, "shape")
+            and len(out.shape) == 3
+            and int(out.shape[0]) == 2
+        ):
+            out = out.reshape(1, int(out.shape[0]) * int(out.shape[1]), int(out.shape[2]))
+        return out
+
+    pipe.encode_image = _encode_image_flf2v_safe
+    pipe._studio_dual_clip_patched = True
 
 
 def _read_model_index_json(base_dir: Path) -> Dict[str, Any]:
@@ -694,15 +725,14 @@ def _instantiate_video_pipeline(
         )
         flow_shift = float(spec.get("flow_shift", 5.0))
         pipe_i2v.scheduler = UniPCMultistepScheduler.from_config(pipe_i2v.scheduler.config, flow_shift=flow_shift)
-        _attach_wan22_flf2v_support(pipe_i2v)
         return {
             "pipe": pipe_i2v,
             "all_components": dict(pipe_i2v.components),
             "extra_init_kwargs": {"expand_timesteps": exp_ts, "boundary_ratio": b_ratio},
             "i2v_cls": WanImageToVideoPipeline,
             "t2v_cls": WanPipeline,
-            "flf2v_cls": WanImageToVideoPipeline,
-            "supported_submodes": ["t2v", "i2v", "flf2v"],
+            "flf2v_cls": None,
+            "supported_submodes": ["t2v", "i2v"],
             "active_mode": "i2v",
         }
 
@@ -746,14 +776,11 @@ def _instantiate_video_pipeline(
         from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanImageToVideoPipeline  # type: ignore
 
         vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
-        extra_kw: Dict[str, Any] = {}
-        if (base_dir / "image_encoder").exists():
-            from transformers import CLIPVisionModel  # type: ignore
-
-            extra_kw["image_encoder"] = CLIPVisionModel.from_pretrained(
-                bdir, subfolder="image_encoder", torch_dtype=torch.float32
-            )
-        pipe = WanImageToVideoPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16, **extra_kw)
+        # Respetar la clase exacta declarada en model_index.json (CLIPVisionModel o CLIPVisionModelWithProjection)
+        pipe = WanImageToVideoPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
+        if getattr(pipe, "image_encoder", None) is not None:
+            pipe.image_encoder.to(torch.float32)
+        _attach_dual_image_flf2v_fix(pipe)
         flow_shift = float(spec.get("flow_shift", 5.0))
         if pipe.config.boundary_ratio is None:
             pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=flow_shift)
@@ -822,6 +849,9 @@ def _instantiate_video_pipeline(
 
         vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
         pipe = SkyReelsV2ImageToVideoPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
+        if getattr(pipe, "image_encoder", None) is not None:
+            pipe.image_encoder.to(torch.float32)
+        _attach_dual_image_flf2v_fix(pipe)
         flow_shift = float(spec.get("flow_shift", 5.0))
         pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=flow_shift)
         return {
@@ -1326,8 +1356,9 @@ def generate_video_clip(
                 "t2v": "Texto a Vídeo",
             }.get(submode, submode)
             raise ValueError(
-                f"El modelo «{target_defn['name']}» no soporta el modo «{sub_es}». "
-                "Para Frame a Frame con IA elige arriba «Wan 2.2 TI2V-5B HD 720P», «Wan 2.1 VACE 1.3B», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
+                f"El modelo «{target_defn['name']}» no está entrenado para el modo «{sub_es}». "
+                "Para transiciones fluidas Frame a Frame (Inicio → Fin) elige arriba «Wan 2.1 VACE 1.3B Oficial», "
+                "«Wan 2.1 Fun 1.3B InP», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
             )
 
     infer_pct_start = 10.0
@@ -1361,8 +1392,8 @@ def generate_video_clip(
         target_cls = handle.get("flf2v_cls")
         if target_cls is None or "flf2v" not in supported:
             raise ValueError(
-                f"El modelo cargado («{slot['name']}») no soporta Frame a Frame (Inicio → Fin) nativo. "
-                "Elige «Wan 2.1 VACE 1.3B», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
+                f"El modelo cargado («{slot['name']}») no está entrenado para Frame a Frame (Inicio → Fin). "
+                "Elige «Wan 2.1 VACE 1.3B Oficial», «Wan 2.1 Fun 1.3B InP», «SkyReels V2 1.3B 540P» o «LTX-Video 0.9.5 2B»."
             )
         pipe = _switch_pipeline_class(handle, target_cls)
         handle["active_mode"] = "flf2v"
@@ -1383,14 +1414,51 @@ def generate_video_clip(
         pipe = _switch_pipeline_class(handle, target_cls)
         handle["active_mode"] = "t2v"
 
+    # Protección anti-salto en Frame a Frame: desactivar automáticamente LoRAs causales (Self-Forcing) o CFG=1.0 incompatibles
+    eff_lora_id = (video_lora_id or "").strip() or None
+    if submode == "flf2v" and eff_lora_id:
+        cand_lora = catalog_manager.get_definition(eff_lora_id)
+        incompat_modes = (cand_lora or {}).get("incompatible_submodes") or []
+        if cand_lora and ("flf2v" in incompat_modes or bool(cand_lora.get("causal_attention"))):
+            spec_tmp = defn.get("official_spec") or {}
+            def_st = int(spec_tmp.get("default_steps") or defn.get("default_steps") or 30)
+            def_cfg = float(spec_tmp.get("default_cfg") or defn.get("default_cfg") or 5.0)
+            if steps <= 12:
+                steps = def_st
+            if guidance_scale is not None and float(guidance_scale) <= 1.5:
+                guidance_scale = def_cfg
+            if job:
+                job.log(
+                    f"⚠️ LoRA «{cand_lora['name'].split('(')[0].strip()}» desactivado automáticamente en Frame a Frame: "
+                    f"la atención causal / CFG 1.0 impide planificar la transición hacia el fotograma final y causa cortes bruscos. "
+                    f"Usando modo bidireccional completo ({steps} pasos, CFG {guidance_scale if guidance_scale is not None else def_cfg}).",
+                    progress=max(3.0, infer_pct_start - 2.5),
+                )
+            eff_lora_id = None
+
     active_lora_defn = _sync_video_lora_on_handle(
         handle=handle,
         pipe=pipe,
-        video_lora_id=video_lora_id,
+        video_lora_id=eff_lora_id,
         video_lora_scale=video_lora_scale,
         job=job,
         pct_base=max(4.0, infer_pct_start - 2.0),
     )
+
+    # Protección anti-congelación en LoRAs destilados (ej. evitar lanzar 26 o 45 pasos sobre un LoRA de 4–8 pasos @ CFG 1.0)
+    if active_lora_defn is not None:
+        base_max_lora_steps = int(active_lora_defn.get("max_steps") or 10)
+        eff_scale_now = float(video_lora_scale if video_lora_scale is not None else active_lora_defn.get("default_lora_scale", 1.0))
+        safe_ceiling = max(base_max_lora_steps, 12 if eff_scale_now <= 0.80 else base_max_lora_steps)
+        if steps > safe_ceiling:
+            rec_s = int(active_lora_defn.get("recommended_steps") or 6)
+            if job:
+                job.log(
+                    f"⚡ Ajuste anti-congelación: con el LoRA destilado activo se bajan los pasos de {steps} → {rec_s} "
+                    f"(exceder {safe_ceiling} pasos en un LoRA de pocos pasos bloquea el movimiento).",
+                    progress=max(4.0, infer_pct_start - 1.5),
+                )
+            steps = rec_s
 
     actual_seed = int(seed) if int(seed) > 0 else random.randint(1, 2_147_483_647)
 
@@ -1542,6 +1610,15 @@ def generate_video_clip(
 
     # Condicionamiento específico verificado para cada arquitectura
     if engine == "wan_vace":
+        try:
+            from diffusers import UniPCMultistepScheduler  # type: ignore
+
+            vace_shift = 5.0 if (width * height > 500_000) else float(spec.get("flow_shift", 3.0))
+            pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=vace_shift)
+        except Exception:
+            pass
+        if "conditioning_scale" in call_sig:
+            kwargs["conditioning_scale"] = 1.0
         if submode == "i2v" and img_pil is not None:
             neutral = Image.new("RGB", (width, height), (128, 128, 128))
             m_keep = Image.new("L", (width, height), 0)
