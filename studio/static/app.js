@@ -2963,6 +2963,7 @@
           const info = await api("/api/mcp/info");
           const cmds = info.commands || {};
           if ($("mcp-cmd-claude-stdio")) $("mcp-cmd-claude-stdio").value = cmds.claude_code_stdio || "";
+          if ($("mcp-cmd-claude-ps")) $("mcp-cmd-claude-ps").value = cmds.claude_code_powershell || "";
           if ($("mcp-cmd-codex-stdio")) $("mcp-cmd-codex-stdio").value = cmds.codex_cli_stdio || "";
           if ($("mcp-cmd-http")) $("mcp-cmd-http").value = cmds.claude_code_http || "";
           if ($("mcp-cmd-json")) $("mcp-cmd-json").value = cmds.mcp_servers_json || "";

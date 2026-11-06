@@ -83,9 +83,22 @@ def get_mcp_connection_details(request: Optional[Request] = None) -> Dict[str, A
     auth_hdr = f' --header "Authorization: Bearer {tok}"' if tok else ""
 
     curl_bridge = f"curl -fsSL {bridge_url} -o studio_mcp.py"
-    claude_stdio = f"{curl_bridge} && claude mcp add studio-ia -- python3 $(pwd)/studio_mcp.py --url {pub}{tok_arg} --out-dir ./salidas_studio"
-    codex_stdio = f"{curl_bridge} && codex mcp add studio-ia -- python3 $(pwd)/studio_mcp.py --url {pub}{tok_arg} --out-dir ./salidas_studio"
-    claude_http = f"claude mcp add --transport http studio-ia {mcp_http_url}{auth_hdr}"
+    claude_stdio = (
+        f'{curl_bridge} && (claude mcp remove studio-ia >/dev/null 2>&1 || true) && '
+        f'claude mcp add studio-ia -- python3 "$(pwd)/studio_mcp.py" --url {pub}{tok_arg} --out-dir "$(pwd)/salidas_studio"'
+    )
+    claude_powershell = (
+        f'curl.exe -fsSL {bridge_url} -o studio_mcp.py; claude mcp remove studio-ia 2>$null; '
+        f'claude mcp add studio-ia -- python "$PWD\\studio_mcp.py" --url {pub}{tok_arg} --out-dir "$PWD\\salidas_studio"'
+    )
+    codex_stdio = (
+        f'{curl_bridge} && (codex mcp remove studio-ia >/dev/null 2>&1 || true) && '
+        f'codex mcp add studio-ia -- python3 "$(pwd)/studio_mcp.py" --url {pub}{tok_arg} --out-dir "$(pwd)/salidas_studio"'
+    )
+    claude_http = (
+        f'(claude mcp remove studio-ia >/dev/null 2>&1 || true) && '
+        f'claude mcp add --transport http studio-ia {mcp_http_url}{auth_hdr}'
+    )
 
     json_args = ["studio_mcp.py", "--url", pub]
     if tok:
@@ -114,6 +127,7 @@ def get_mcp_connection_details(request: Optional[Request] = None) -> Dict[str, A
         "commands": {
             "download_bridge": curl_bridge,
             "claude_code_stdio": claude_stdio,
+            "claude_code_powershell": claude_powershell,
             "codex_cli_stdio": codex_stdio,
             "claude_code_http": claude_http,
             "mcp_servers_json": mcp_json_snippet,
