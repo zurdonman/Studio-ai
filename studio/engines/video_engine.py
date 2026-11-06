@@ -54,6 +54,51 @@ OFFICIAL_NEGATIVE_PROMPTS: Dict[str, str] = {
 }
 
 
+def _attach_vae_oom_guard(vae: Any) -> None:
+    """
+    Protege `vae._decode` frente a picos de VRAM en secuencias largas HD (ej. 121 fotogramas float32):
+    si el tamaño de mosaico actual agota la VRAM, vacía la caché 3D, reduce automáticamente a
+    mosaicos 256×256 de mínimo consumo (~2.2 GB VRAM) y completa el vídeo sin perder la tarea.
+    """
+    if vae is None or getattr(vae, "_studio_oom_guard_attached", False):
+        return
+    orig_inner_decode = getattr(vae, "_decode", None)
+    if not callable(orig_inner_decode):
+        return
+
+    def _safe_inner_decode(self: Any, z: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return orig_inner_decode(z, *args, **kwargs)
+        except Exception as exc:
+            is_oom = "out of memory" in str(exc).lower() or "OutOfMemoryError" in exc.__class__.__name__
+            if not is_oom:
+                raise
+            if hasattr(self, "clear_cache"):
+                try:
+                    self.clear_cache()
+                except Exception:
+                    pass
+            flush_ram_and_vram()
+            if hasattr(self, "enable_tiling"):
+                try:
+                    sig = inspect.signature(self.enable_tiling).parameters
+                    if "tile_sample_min_height" in sig:
+                        self.enable_tiling(
+                            tile_sample_min_height=256,
+                            tile_sample_min_width=256,
+                            tile_sample_stride_height=192,
+                            tile_sample_stride_width=192,
+                        )
+                    else:
+                        self.enable_tiling()
+                except Exception:
+                    pass
+            return orig_inner_decode(z, *args, **kwargs)
+
+    vae._decode = types.MethodType(_safe_inner_decode, vae)
+    vae._studio_oom_guard_attached = True
+
+
 def _apply_best_offload(
     pipe: Any,
     vram_total_gb: float,
@@ -92,21 +137,30 @@ def _apply_best_offload(
             try:
                 sig_tile = inspect.signature(pipe.vae.enable_tiling).parameters
                 if "tile_sample_min_height" in sig_tile:
-                    if vram_total_gb >= 20.0:
-                        # En L4 (22.5 GB) / A100 / H100 quedan >21 GB libres durante VAE encode/decode con CPU Offload.
-                        # Evita partir 800×1088 en 30 mosaicos de 256×256 (~3m33s -> ~12s).
+                    if vram_total_gb >= 36.0:
+                        # A100 40/80 GB y H100 caben los 20.3 GB del VAE float32 sin mosaicos (~14s)
                         pipe.vae.enable_tiling(
                             tile_sample_min_height=1280,
                             tile_sample_min_width=1280,
                             tile_sample_stride_height=960,
                             tile_sample_stride_width=960,
                         )
-                    else:
+                    elif vram_total_gb >= 20.0:
+                        # NVIDIA L4 (22 GB): sin tiling pide ~20.4 GB y da OOM; con 448×448 usa solo ~6.8 GB VRAM
+                        # y reduce los mosaicos de 30 (256×256) a ~9 (~3.5× más rápido y 100% seguro).
                         pipe.vae.enable_tiling(
-                            tile_sample_min_height=704,
-                            tile_sample_min_width=704,
-                            tile_sample_stride_height=512,
-                            tile_sample_stride_width=512,
+                            tile_sample_min_height=448,
+                            tile_sample_min_width=448,
+                            tile_sample_stride_height=320,
+                            tile_sample_stride_width=320,
+                        )
+                    else:
+                        # T4 (15 GB): mosaicos 384×384 (~5.1 GB pico VRAM)
+                        pipe.vae.enable_tiling(
+                            tile_sample_min_height=384,
+                            tile_sample_min_width=384,
+                            tile_sample_stride_height=256,
+                            tile_sample_stride_width=256,
                         )
                 else:
                     pipe.vae.enable_tiling()
@@ -115,6 +169,7 @@ def _apply_best_offload(
                     pipe.vae.enable_tiling()
                 except Exception:
                     pass
+        _attach_vae_oom_guard(pipe.vae)
 
 
 def _attach_wan22_flf2v_support(pipe: Any) -> Any:

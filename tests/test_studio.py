@@ -855,16 +855,24 @@ def test_wan22_ti2v_native_flf2v_prepare_latents_and_fast_mp4(temp_studio_env, m
     assert mp4_nchw.exists()
     assert (info_nchw["width"], info_nchw["height"]) == (320, 240)
 
-    # Verificar que en GPU L4 (22.5 GB) _apply_best_offload sube el umbral de mosaico VAE a 1280×1280
+    # Verificar mosaicos calibrados por VRAM + salvavidas automático anti-OOM en _decode
     from studio.engines.video_engine import _apply_best_offload
+
+    class OutOfMemoryError(RuntimeError):
+        pass
 
     class MockTileVAE:
         def __init__(self):
             self.tile_kwargs = None
             self.sliced = False
+            self.cleared = 0
+            self.fail_first = True
 
         def enable_slicing(self):
             self.sliced = True
+
+        def clear_cache(self):
+            self.cleared += 1
 
         def enable_tiling(
             self,
@@ -880,6 +888,12 @@ def test_wan22_ti2v_native_flf2v_prepare_latents_and_fast_mp4(temp_studio_env, m
                 tile_sample_stride_width,
             )
 
+        def _decode(self, z):
+            if self.fail_first:
+                self.fail_first = False
+                raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.51 GiB.")
+            return ("decoded_ok", self.tile_kwargs)
+
     class MockOffloadPipe:
         def __init__(self):
             self.vae = MockTileVAE()
@@ -887,12 +901,21 @@ def test_wan22_ti2v_native_flf2v_prepare_latents_and_fast_mp4(temp_studio_env, m
         def enable_model_cpu_offload(self):
             pass
 
+    mop_a100 = MockOffloadPipe()
+    _apply_best_offload(mop_a100, vram_total_gb=40.0, min_vram_gb=13.5)
+    assert mop_a100.vae.tile_kwargs == (1280, 1280, 960, 960)
+
     mop_l4 = MockOffloadPipe()
     _apply_best_offload(mop_l4, vram_total_gb=22.0, min_vram_gb=13.5)
-    assert mop_l4.vae.tile_kwargs == (1280, 1280, 960, 960)
+    assert mop_l4.vae.tile_kwargs == (448, 448, 320, 320)
+    # Simular pico OOM inesperado: debe limpiar caché, bajar a 256×256 y completar _decode sin fallar
+    res_dec = mop_l4.vae._decode("latents")
+    assert res_dec == ("decoded_ok", (256, 256, 192, 192))
+    assert mop_l4.vae.cleared == 1
+
     mop_t4 = MockOffloadPipe()
     _apply_best_offload(mop_t4, vram_total_gb=15.0, min_vram_gb=13.5)
-    assert mop_t4.vae.tile_kwargs == (704, 704, 512, 512)
+    assert mop_t4.vae.tile_kwargs == (384, 384, 256, 256)
 
     # 3) Verificar condicionamiento nativo Inicio → Fin (`_attach_wan22_flf2v_support`) en Wan 2.2 TI2V-5B
     class FakeTensor:

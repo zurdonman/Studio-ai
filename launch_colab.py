@@ -171,6 +171,7 @@ def main() -> None:
     env = os.environ.copy()
     env["PORT"] = str(PORT)
     env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     # Capturamos stdout/stderr en un hilo lector hacia print(..., flush=True) para que
     # Google Colab (ipykernel OutStream) muestre todos los logs en tiempo real en la celda.
