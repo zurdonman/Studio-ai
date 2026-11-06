@@ -1660,7 +1660,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "subdir": "onnx",
                 "filename": "yunet_2023_mar.onnx",
                 "verify_file": "yunet_2023_mar.onnx",
-                "expected_bytes": 232589,
+                "expected_bytes": 232475,
             },
             {
                 "role": "edtalk",
@@ -1669,7 +1669,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "subdir": "onnx",
                 "filename": "edtalk_256.onnx",
                 "verify_file": "edtalk_256.onnx",
-                "expected_bytes": 270636084,
+                "expected_bytes": 270681365,
             },
             {
                 "role": "xseg",
@@ -1678,7 +1678,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "subdir": "onnx",
                 "filename": "xseg_1.onnx",
                 "verify_file": "xseg_1.onnx",
-                "expected_bytes": 70354487,
+                "expected_bytes": 70324286,
             },
             {
                 "role": "gfpgan",
@@ -1687,7 +1687,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "subdir": "onnx",
                 "filename": "gfpgan_1.4.onnx",
                 "verify_file": "gfpgan_1.4.onnx",
-                "expected_bytes": 340263489,
+                "expected_bytes": 340299087,
             },
         ],
     },
