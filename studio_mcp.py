@@ -114,6 +114,52 @@ BRIDGE_ONLY_LOCAL_PROPS: Dict[str, Dict[str, Any]] = {
             "description": "Opcional: ruta local en tu PC/Termux donde guardar el archivo .md o .txt del log completo.",
         },
     },
+    "studio_generate_music_or_sfx": {
+        "save_to_local_path": {
+            "type": "string",
+            "description": "Opcional: ruta local en tu PC/Termux donde guardar el audio musical o ambiental (.wav).",
+        },
+    },
+    "studio_lipsync_character": {
+        "local_media_path": {
+            "type": "string",
+            "description": "Opcional: ruta local de la imagen o vídeo MP4 base en tu PC/Termux (se sube automáticamente).",
+        },
+        "local_voice_audio_path": {
+            "type": "string",
+            "description": "Opcional: ruta local del audio de voz (.mp3/.wav) en tu PC/Termux.",
+        },
+        "local_music_path": {
+            "type": "string",
+            "description": "Opcional: ruta local de la música de fondo en tu PC/Termux.",
+        },
+        "local_ambient_path": {
+            "type": "string",
+            "description": "Opcional: ruta local del sonido ambiente en tu PC/Termux.",
+        },
+        "save_to_local_path": {
+            "type": "string",
+            "description": "Opcional: ruta local en tu PC/Termux donde guardar el MP4 final con LipSync HD.",
+        },
+    },
+    "studio_mix_audio_tracks": {
+        "local_video_path": {
+            "type": "string",
+            "description": "Opcional: ruta local del vídeo MP4 en tu PC/Termux.",
+        },
+        "local_music_path": {
+            "type": "string",
+            "description": "Opcional: ruta local de la música en tu PC/Termux.",
+        },
+        "local_ambient_path": {
+            "type": "string",
+            "description": "Opcional: ruta local del sonido ambiente en tu PC/Termux.",
+        },
+        "save_to_local_path": {
+            "type": "string",
+            "description": "Opcional: ruta local en tu PC/Termux donde guardar el archivo masterizado.",
+        },
+    },
 }
 
 DOWNLOAD_ASSET_TOOL_DEF: Dict[str, Any] = {
@@ -150,6 +196,9 @@ ASYNC_JOB_TOOLS = {
     "studio_generate_speech",
     "studio_render_montage",
     "studio_analyze_coherence",
+    "studio_generate_music_or_sfx",
+    "studio_lipsync_character",
+    "studio_mix_audio_tracks",
 }
 
 
@@ -405,6 +454,11 @@ class StudioColabBridge:
                 ("local_end_image_path", "end_image_rel"),
                 ("local_audio_path", "audio_rel"),
                 ("local_anchor_image_path", "anchor_image_rel"),
+                ("local_media_path", "media_rel"),
+                ("local_voice_audio_path", "voice_audio_rel"),
+                ("local_video_path", "video_rel"),
+                ("local_music_path", "music_rel"),
+                ("local_ambient_path", "ambient_rel"),
             ]
             for local_key, remote_key in upload_single_map:
                 val = args.pop(local_key, None)

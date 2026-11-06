@@ -408,6 +408,17 @@
       toast("Clip de vídeo MP4 listo.", "success");
     } else if (job.kind === "tts" && res.media_url) {
       toast(`Locución lista (${res.duration_seconds}s).`, "success");
+    } else if (job.kind === "audio_bgm" && res.media_url) {
+      toast(`Pista musical/ambiental lista (${res.duration_seconds}s).`, "success");
+    } else if ((job.kind === "lipsync" || job.kind === "audio_mix") && res.media_url) {
+      if (res.type === "video") {
+        showVideoResult(res);
+        if ($("lipsync-result-wrap") && $("lipsync-result-player")) {
+          $("lipsync-result-wrap").hidden = false;
+          $("lipsync-result-player").src = `${res.media_url}?t=${Date.now()}`;
+        }
+      }
+      toast(`LipSync / Masterización completada (${res.duration_seconds}s).`, "success");
     } else if (job.kind === "montage" && res.media_url) {
       showMontageResult(res);
       toast(`Montaje MP4 completado (${res.duration_seconds}s).`, "success");
@@ -1623,8 +1634,59 @@
     renderImageGallery();
     renderVideoSelectsAndGallery();
     renderAudioList();
+    renderLipSyncSelects();
     renderMontagePickers();
     renderMontageGallery();
+  }
+
+  function renderLipSyncSelects() {
+    const medSel = $("lipsync-media-select");
+    const voxSel = $("lipsync-voice-select");
+    const ambSel = $("lipsync-ambient-select");
+    const musSel = $("lipsync-music-select");
+    if (!medSel || !voxSel) return;
+
+    const visualPool = [
+      ...state.assets.videos,
+      ...state.assets.images,
+      ...state.assets.uploads.filter((u) => u.type === "image" || u.type === "video"),
+    ];
+    const audioPool = [
+      ...state.assets.audio,
+      ...state.assets.uploads.filter((u) => u.type === "audio"),
+    ];
+
+    const prevMed = medSel.value;
+    medSel.innerHTML =
+      `<option value="">-- Elige un vídeo MP4 o imagen retrato --</option>` +
+      visualPool
+        .map(
+          (a) =>
+            `<option value="${escapeHtml(a.rel_path)}">[${a.type === "video" ? "VÍDEO" : "IMAGEN"}] ${escapeHtml(a.filename)}</option>`
+        )
+        .join("");
+    if (prevMed) medSel.value = prevMed;
+
+    const audioOpts = audioPool
+      .map(
+        (a) =>
+          `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}${a.duration_seconds ? ` (${a.duration_seconds}s)` : ""}</option>`
+      )
+      .join("");
+    const prevVox = voxSel.value;
+    voxSel.innerHTML = `<option value="">-- Elige locución de voz --</option>` + audioOpts;
+    if (prevVox) voxSel.value = prevVox;
+
+    if (ambSel) {
+      const prevAmb = ambSel.value;
+      ambSel.innerHTML = `<option value="">(Sin ambiente de fondo)</option>` + audioOpts;
+      if (prevAmb) ambSel.value = prevAmb;
+    }
+    if (musSel) {
+      const prevMus = musSel.value;
+      musSel.innerHTML = `<option value="">(Sin música de fondo)</option>` + audioOpts;
+      if (prevMus) musSel.value = prevMus;
+    }
   }
 
   function setBaseImage(asset) {
@@ -2882,6 +2944,59 @@
         toast(e.message, "error");
       }
     });
+
+    if ($("btn-run-bgm")) {
+      $("btn-run-bgm").addEventListener("click", async () => {
+        try {
+          const res = await api("/api/audio/generate-bgm", {
+            method: "POST",
+            body: JSON.stringify({
+              model_id: $("bgm-model-select").value,
+              preset: $("bgm-preset-select").value,
+              prompt: $("bgm-prompt").value || "warm restaurant ambience",
+              duration_seconds: Number($("bgm-duration").value || 10),
+            }),
+          });
+          watchJob(res.job);
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
+
+    if ($("btn-dl-lipsync")) {
+      $("btn-dl-lipsync").addEventListener("click", () => downloadModel("edtalk-256-lipsync-hd"));
+    }
+
+    if ($("btn-run-lipsync")) {
+      $("btn-run-lipsync").addEventListener("click", async () => {
+        const mediaRel = $("lipsync-media-select") ? $("lipsync-media-select").value : "";
+        const voiceRel = $("lipsync-voice-select") ? $("lipsync-voice-select").value : "";
+        if (!mediaRel) {
+          toast("Selecciona primero la imagen o clip de vídeo de los personajes.", "error");
+          return;
+        }
+        if (!voiceRel) {
+          toast("Selecciona la pista de voz del personaje.", "error");
+          return;
+        }
+        try {
+          const res = await api("/api/video/lipsync", {
+            method: "POST",
+            body: JSON.stringify({
+              media_rel: mediaRel,
+              voice_audio_rel: voiceRel,
+              target_face: $("lipsync-target-face").value || "largest",
+              ambient_rel: ($("lipsync-ambient-select") && $("lipsync-ambient-select").value) || null,
+              music_rel: ($("lipsync-music-select") && $("lipsync-music-select").value) || null,
+            }),
+          });
+          watchJob(res.job);
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
 
     // Pestaña 4: Montaje FFmpeg
     $("input-montage-files").addEventListener("change", async (ev) => {

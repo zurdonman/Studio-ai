@@ -679,6 +679,88 @@
               <button class="btn btn-primary btn-lg" id="btn-run-tts">
                 🎙️ Generar Locución
               </button>
+
+              <!-- NUEVO: Generador de Música Instrumental y Ambiente de Fondo -->
+              <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 10px;" />
+              <h4 class="sub-heading" style="margin-top:0;">🎵 Música Instrumental y Ambiente de Fondo (Restaurante / Lluvia / Cine)</h4>
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Motor de Música / Ambiente</label>
+                  <select id="bgm-model-select">
+                    <option value="procedural-ambience-cpu">Sintetizador Acústico Estéreo (0 GB · 0.2s Instantáneo CPU)</option>
+                    <option value="musicgen-small-bgm">Meta MusicGen Small (Música IA · 2.0 GB)</option>
+                    <option value="audioldm2-sfx">AudioLDM 2 Foley & Ambiente IA (3.8 GB)</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label">Preset Acústico (para 0 GB CPU)</label>
+                  <select id="bgm-preset-select">
+                    <option value="restaurant_warm_murmur">🍽️ Restaurante / Cafetería Cálida</option>
+                    <option value="cinematic_warm_pad">🎹 Pad Cinematográfico Cálido</option>
+                    <option value="rain_cozy">🌧️ Lluvia Suave en Cristal</option>
+                    <option value="wind_nature">🌿 Brisa Exterior Natural</option>
+                    <option value="room_tone_clean">🎙️ Room-Tone Limpio de Sala</option>
+                  </select>
+                </div>
+              </div>
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Prompt musical / sonoro</label>
+                  <input type="text" id="bgm-prompt" value="warm smooth acoustic jazz piano in a cozy restaurant" />
+                </div>
+                <div>
+                  <label class="field-label">Duración (segundos)</label>
+                  <input type="number" id="bgm-duration" value="10" min="2" max="30" step="1" />
+                </div>
+              </div>
+              <button class="btn btn-secondary" id="btn-run-bgm">
+                🎶 Generar Música / Ambiente Sonoro
+              </button>
+
+              <!-- NUEVO: LipSync HD + Auto-Ducking -->
+              <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 10px;" />
+              <div class="row-gap" style="justify-content:space-between;flex-wrap:wrap;">
+                <h4 class="sub-heading" style="margin:0;">👄 LipSync HD Habla Realista + Auto-Ducking (EDTalk-256 + GFPGAN)</h4>
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-dl-lipsync" title="Descarga EDTalk-256 + YuNet + XSeg + GFPGAN 1.4 (0.65 GB)">
+                  ⬇ Descargar LipSync HD (0.65 GB)
+                </button>
+              </div>
+              <label class="field-label">Imagen o Clip de Vídeo Base (donde salen los personajes)</label>
+              <select id="lipsync-media-select"></select>
+
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Voz del Personaje</label>
+                  <select id="lipsync-voice-select"></select>
+                </div>
+                <div>
+                  <label class="field-label">Personaje que Habla</label>
+                  <select id="lipsync-target-face">
+                    <option value="largest">👤 Rostro Principal (Mayor tamaño)</option>
+                    <option value="leftmost">⬅️ Persona de la Izquierda</option>
+                    <option value="rightmost">➡️ Persona de la Derecha</option>
+                    <option value="center">🎯 Persona Central</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Ambiente de Fondo Opcional (Auto-Ducking)</label>
+                  <select id="lipsync-ambient-select"></select>
+                </div>
+                <div>
+                  <label class="field-label">Música de Fondo Opcional (Auto-Ducking)</label>
+                  <select id="lipsync-music-select"></select>
+                </div>
+              </div>
+
+              <button class="btn btn-primary" id="btn-run-lipsync">
+                👄 Animar Boca (LipSync HD) + Masterizar Sonido
+              </button>
+              <div id="lipsync-result-wrap" hidden style="margin-top:10px;">
+                <video id="lipsync-result-player" class="result-media" controls playsinline></video>
+              </div>
             </div>
           </div>
 
@@ -800,6 +882,8 @@
             <button class="filter-chip active" data-cat="all">Todos</button>
             <button class="filter-chip" data-cat="video">🎬 Vídeo</button>
             <button class="filter-chip" data-cat="image">🖼️ Imagen + LoRAs</button>
+            <button class="filter-chip" data-cat="lipsync">👄 LipSync HD</button>
+            <button class="filter-chip" data-cat="audio">🎵 Música y Ambiente</button>
             <button class="filter-chip" data-cat="vision">👁️ Coherencia VL</button>
             <button class="filter-chip" data-cat="tts">🎙️ Voz / TTS</button>
           </div>

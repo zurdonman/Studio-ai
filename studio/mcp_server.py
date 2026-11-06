@@ -36,6 +36,11 @@ from studio.config import (
     VIDEOS_OUT_DIR,
     ensure_directories,
 )
+from studio.engines.audio_studio_engine import (
+    AMBIENCE_PRESETS,
+    audio_studio_engine,
+    mix_and_master_media,
+)
 from studio.engines.coherence_engine import (
     load_coherence_vlm_into_memory,
     run_coherence_analysis,
@@ -46,6 +51,7 @@ from studio.engines.image_engine import (
     load_image_model_into_memory,
     process_image_cpu_ffmpeg_only,
 )
+from studio.engines.lipsync_engine import lipsync_engine
 from studio.engines.tts_engine import EDGE_TTS_VOICES, load_tts_model_into_memory, synthesize_voice
 from studio.engines.video_engine import generate_video_clip, load_video_model_into_memory
 from studio.hardware import (
@@ -194,7 +200,18 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
      2) **Fotogramas 2..N = EDICIÓN ANCLADA (`qwen-image-edit-2511-pack`):** Llama a `studio_generate_or_edit_image` pasando SIEMPRE `model_id="qwen-image-edit-2511-pack"`, `base_image_rel=<anchor_image_rel>` y `reference_rels=[<anchor_image_rel>]`, pidiendo conservar exactamente los mismos rostros, peinados, ropa, mesa e iluminación y cambiar SOLO la pose/acción de ese instante.
      3) **AUDITORÍA DE COHERENCIA (`studio_analyze_coherence`):** Antes de renderizar vídeo pesado, llama a `studio_analyze_coherence(anchor_image_rel=<anchor>, candidate_image_rels=[...], mode="hybrid_auto")` (combina OpenCV fotométrico 0.1s + Qwen2.5-VL-3B 4-bit semántico). Si algún fotograma sale `verdict="NEEDS_REPAIR"`, ejecuta directamente el `recommended_repair_tool_call` que te devuelve la herramienta para corregirlo.
 
-5. GESTIÓN DE ESPACIO EN DISCO, MEMORIA Y EXPORTACIÓN DE LOGS EN COLAB:
+5. LIPSYNC HD MULTI-PERSONAJE, MÚSICA, SONIDO DE FONDO Y MEZCLA FFMPEG CON AUTO-DUCKING:
+   - Para que los personajes MUEVAN LA BOCA en sincronía real con las voces (sobre una foto o sobre un vídeo generado con Wan 14B):
+     1) Si `edtalk-256-lipsync-hd` (solo 0.65 GB) aún no está descargado, prepáralo con `studio_prepare_model(model_id="edtalk-256-lipsync-hd")`.
+     2) Llama a `studio_lipsync_character`:
+        - 1 personaje: pasa `media_rel` + `voice_audio_rel` + `target_face="largest"` (o `"leftmost"` / `"rightmost"`).
+        - Varias personas conversando (ej. en un restaurante): pasa `dialogue_turns=[{"voice_audio_rel": "voz_1.mp3", "target_face": "leftmost", "start_sec": 0.2}, {"voice_audio_rel": "voz_2.mp3", "target_face": "rightmost", "start_sec": 3.5}]` para que cada comensal mueva los labios solo en su turno (XSeg protege copas/cubiertos delante de la boca y GFPGAN 1.4 restaura labios a 512×512).
+   - Para crear MÚSICA y SONIDO DE FONDO (ambiente restaurante, lluvia, pad cálido):
+     - Llama a `studio_generate_music_or_sfx` (`model_id="procedural-ambience-cpu"` con `preset="restaurant_warm_murmur"` en 0.2s y 0 GB VRAM, o `model_id="musicgen-small-bgm"` para música instrumental IA, o `model_id="audioldm2-sfx"` para efectos Foley).
+   - Para MEZCLAR VOCES + MÚSICA + AMBIENTE sin bajar el volumen de las voces ni congelar el vídeo:
+     - Usa `studio_mix_audio_tracks` (o pasa `music_rel` y `ambient_rel` directamente a `studio_lipsync_character` / `studio_render_montage`). Aplica Auto-Ducking (`sidechaincompress`) atenuando música/ambiente automáticamente mientras alguien habla y extiende el vídeo con fluidez (`setpts` / ping-pong) si el diálogo dura más que el clip.
+
+6. GESTIÓN DE ESPACIO EN DISCO, MEMORIA Y EXPORTACIÓN DE LOGS EN COLAB:
    - Si una descarga avisa `DISK_SPACE_INSUFFICIENT`, consulta las sugerencias devueltas y usa `studio_free_memory_or_disk(action="delete_from_disk", target=...)` (preguntando antes al usuario si procede).
    - Si el usuario pide el registro completo de lo ocurrido en la sesión, llama a `studio_export_session_log(format="md")`.
    - Todo lo que ejecutes se muestra EN TIEMPO REAL en la celda de Google Colab del usuario.
@@ -266,6 +283,23 @@ MANUAL_RESOURCES: Dict[str, Dict[str, str]] = {
             "   - Etapa 1 (`OpenCV`, 0.1s, 0 GB VRAM): Verifica proporción, paleta HSV/LAB, iluminación y nitidez.\n"
             "   - Etapa 2 (`Qwen2.5-VL-3B-Instruct` 4-bit, ~2.8 GB VRAM): Inspecciona semánticamente rostros, pelo, ropa, número de personas y viabilidad de transición.\n"
             "   - Si devuelve `NEEDS_REPAIR`, ejecuta el `recommended_repair_tool_call` incluido en la respuesta antes de animar en `14B`.\n"
+        ),
+    },
+    "studio://manual/lipsync-and-sound": {
+        "name": "Manual Oficial de LipSync HD Multi-Persona, Música, Ambiente y Mezcla FFmpeg con Auto-Ducking",
+        "mimeType": "text/markdown",
+        "content": (
+            "# LipSync HD (`EDTalk-256 + GFPGAN 1.4 + XSeg`) y Diseño Sonoro Multipista\n\n"
+            "## 1. LipSync Fonético Realista (`studio_lipsync_character`)\n"
+            "- Paquete recomendado: `edtalk-256-lipsync-hd` (0.65 GB en disco, ~1.5 GB VRAM, 4–9 s en Colab L4).\n"
+            "- Incluye detector multi-rostro `YuNet`, animación labial `EDTalk 256`, máscara de oclusión `XSeg` (respeta copas/cubiertos/manos) y restauración `GFPGAN 1.4` a 512×512.\n"
+            "- En escenas con dos personas (p.ej. comiendo en un restaurante), usa `dialogue_turns` indicando `target_face='leftmost'` para la persona de la izquierda y `target_face='rightmost'` para la de la derecha con sus `start_sec`.\n\n"
+            "## 2. Música y Ambiente Sonoro (`studio_generate_music_or_sfx`)\n"
+            "- `procedural-ambience-cpu` (0 GB, 0.2 s): presets estéreo `restaurant_warm_murmur`, `rain_cozy`, `cinematic_warm_pad`, `wind_nature`, `room_tone_clean`.\n"
+            "- `musicgen-small-bgm` (2.0 GB): música instrumental IA original (jazz suave, piano, cine).\n"
+            "- `audioldm2-sfx` (3.8 GB): efectos Foley y paisajes acústicos desde texto.\n\n"
+            "## 3. Mezcla Multipista sin Pérdida de Volumen (`studio_mix_audio_tracks`)\n"
+            "- Posiciona voces con `start_sec` al milisegundo (`normalize=0`, sin perder -6 dB), aplica Auto-Ducking (`sidechaincompress`) sobre música/ambiente cuando alguien habla y extiende el vídeo sin congelar fotogramas.\n"
         ),
     },
 }
@@ -446,6 +480,8 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
     video_lora_ids = [""] + [m["id"] for m in all_defs if m["category"] == "lora" and m.get("lora_target") == "video"]
     image_lora_ids = [m["id"] for m in all_defs if m["category"] == "lora" and (m.get("lora_target") or "image") == "image"]
     tts_engine_ids = [m["id"] for m in all_defs if m["category"] == "tts"]
+    lipsync_model_ids = [m["id"] for m in all_defs if m["category"] == "lipsync"]
+    audio_gen_ids = ["auto"] + [m["id"] for m in all_defs if m["category"] == "audio"]
     voice_ids = [v["id"] for v in EDGE_TTS_VOICES]
 
     return [
@@ -485,6 +521,8 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                             "video_t2v",
                             "consistent_keyframes",
                             "coherence_check",
+                            "lipsync_talking_scene",
+                            "music_and_ambience",
                             "image_create",
                             "image_edit",
                             "tts",
@@ -518,7 +556,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                 "properties": {
                     "category": {
                         "type": "string",
-                        "enum": ["all", "video", "image", "vision", "lora", "tts"],
+                        "enum": ["all", "video", "image", "vision", "lipsync", "audio", "lora", "tts"],
                         "default": "video",
                     },
                     "required_video_submode": {
@@ -925,6 +963,184 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
             },
         },
         {
+            "name": "studio_generate_music_or_sfx",
+            "description": (
+                "Genera música instrumental de fondo (`musicgen-small-bgm`), efectos Foley/paisajes sonoros IA (`audioldm2-sfx`) "
+                "o ambiente estéreo instantáneo en 0.2s sin VRAM (`procedural-ambience-cpu` con presets como `restaurant_warm_murmur`, "
+                "`rain_cozy`, `cinematic_warm_pad`, `wind_nature`, `room_tone_clean`)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "default": "warm smooth acoustic jazz piano in a cozy restaurant",
+                        "description": "Descripción de la música o ambiente deseado (en inglés para MusicGen/AudioLDM2, o cualquier idioma para DSP).",
+                    },
+                    "model_id": {
+                        "type": "string",
+                        "enum": audio_gen_ids,
+                        "default": "auto",
+                        "description": "`'auto'`, `'procedural-ambience-cpu'` (0 GB instantáneo), `'musicgen-small-bgm'` (música IA) o `'audioldm2-sfx'` (Foley IA).",
+                    },
+                    "preset": {
+                        "type": "string",
+                        "enum": ["auto"] + list(AMBIENCE_PRESETS.keys()),
+                        "default": "auto",
+                        "description": "Preset acústico cuando se usa `procedural-ambience-cpu` (ej. `'restaurant_warm_murmur'`).",
+                    },
+                    "duration_seconds": {
+                        "type": "number",
+                        "default": 10.0,
+                        "minimum": 2.0,
+                        "maximum": 30.0,
+                    },
+                    "seed": {"type": "integer", "default": 42},
+                    "wait": {"type": "boolean", "default": True},
+                },
+            },
+        },
+        {
+            "name": "studio_lipsync_character",
+            "description": (
+                "Sincronización labial fonética HD (`edtalk-256-lipsync-hd`: EDTalk 256 + YuNet + oclusión XSeg para copas/cubiertos/manos "
+                "+ restauración GFPGAN 1.4 a 512×512). Anima la boca de 1 o varios personajes sobre una imagen fija o un vídeo MP4 "
+                "(como los generados con Wan 14B) y mezcla automáticamente voces, música y ambiente con Auto-Ducking."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "media_rel": {
+                        "type": "string",
+                        "description": "`rel_path` de la imagen retrato o del clip de vídeo MP4 donde aparecen los personajes.",
+                    },
+                    "voice_audio_rel": {
+                        "type": "string",
+                        "description": "`rel_path` del audio de voz cuando habla un único personaje (opcional si usas `dialogue_turns`).",
+                    },
+                    "target_face": {
+                        "type": "string",
+                        "enum": ["largest", "leftmost", "rightmost", "center", "index_0", "index_1"],
+                        "default": "largest",
+                        "description": "Qué rostro animar (`'leftmost'` = persona de la izquierda, `'rightmost'` = persona de la derecha, `'largest'` = rostro principal).",
+                    },
+                    "dialogue_turns": {
+                        "type": "array",
+                        "description": (
+                            "Lista opcional de turnos de diálogo para escenas con varios personajes (ej. dos amigos en restaurante): "
+                            "cada elemento lleva `voice_audio_rel`, `target_face` (`'leftmost'`/`'rightmost'`), `start_sec` y `volume`."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "voice_audio_rel": {"type": "string"},
+                                "target_face": {
+                                    "type": "string",
+                                    "enum": ["largest", "leftmost", "rightmost", "center", "index_0", "index_1"],
+                                    "default": "largest",
+                                },
+                                "start_sec": {"type": "number", "default": 0.0, "minimum": 0.0},
+                                "volume": {"type": "number", "default": 1.0, "minimum": 0.1, "maximum": 2.0},
+                            },
+                            "required": ["voice_audio_rel"],
+                        },
+                    },
+                    "model_id": {
+                        "type": "string",
+                        "enum": lipsync_model_ids or ["edtalk-256-lipsync-hd"],
+                        "default": "edtalk-256-lipsync-hd",
+                    },
+                    "lip_weight": {
+                        "type": "number",
+                        "default": 0.85,
+                        "minimum": 0.3,
+                        "maximum": 1.15,
+                        "description": "Intensidad de apertura articular labial (0.85 recomendado).",
+                    },
+                    "enhance_face": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Restaura labios y dientes en alta definición 512×512 con GFPGAN 1.4.",
+                    },
+                    "restore_strength": {
+                        "type": "number",
+                        "default": 0.50,
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                    },
+                    "music_rel": {
+                        "type": "string",
+                        "description": "`rel_path` opcional de música de fondo (se atenúa sola con Auto-Ducking al hablar).",
+                    },
+                    "music_volume": {"type": "number", "default": 0.22, "minimum": 0.02, "maximum": 1.5},
+                    "ambient_rel": {
+                        "type": "string",
+                        "description": "`rel_path` opcional de sonido ambiente de fondo (ej. murmullo cálido de restaurante).",
+                    },
+                    "ambient_volume": {"type": "number", "default": 0.18, "minimum": 0.02, "maximum": 1.5},
+                    "extend_video_to_audio": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Si el diálogo dura más que el vídeo, extiende el vídeo suavemente sin congelar fotogramas.",
+                    },
+                    "wait": {"type": "boolean", "default": True},
+                },
+                "required": ["media_rel"],
+            },
+        },
+        {
+            "name": "studio_mix_audio_tracks",
+            "description": (
+                "Mezclador y masterizador multipista FFmpeg profesional para vídeo o audio: posiciona 1 o varias voces con "
+                "`start_sec` exacto sin perder volumen (`normalize=0`), añade música (`music_rel`) y sonido ambiente (`ambient_rel`) "
+                "con **Auto-Ducking dinámico (`sidechaincompress`)** cuando hablan los personajes, y extiende el vídeo sin congelarlo si hace falta."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "video_rel": {
+                        "type": "string",
+                        "description": "`rel_path` opcional del vídeo MP4 al que mezclar/reemplazar la banda sonora.",
+                    },
+                    "voice_tracks": {
+                        "type": "array",
+                        "description": "Pistas de diálogo con su instante de entrada `start_sec` en segundos.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "audio_rel": {"type": "string"},
+                                "start_sec": {"type": "number", "default": 0.0, "minimum": 0.0},
+                                "volume": {"type": "number", "default": 1.0, "minimum": 0.05, "maximum": 2.5},
+                            },
+                            "required": ["audio_rel"],
+                        },
+                    },
+                    "music_rel": {"type": "string", "description": "`rel_path` opcional de música de fondo."},
+                    "music_volume": {"type": "number", "default": 0.24, "minimum": 0.02, "maximum": 2.0},
+                    "ambient_rel": {"type": "string", "description": "`rel_path` opcional de ambiente sonoro (restaurante, lluvia, sala)."},
+                    "ambient_volume": {"type": "number", "default": 0.18, "minimum": 0.02, "maximum": 2.0},
+                    "keep_original_audio": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Conservar también el audio que ya traía el `video_rel` (p.ej. `true` si el vídeo ya salió de `studio_lipsync_character`).",
+                    },
+                    "original_audio_volume": {"type": "number", "default": 1.0, "minimum": 0.05, "maximum": 2.0},
+                    "auto_duck_bg": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Atenuar automáticamente música y ambiente mientras suenan las voces.",
+                    },
+                    "extend_video_to_audio": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Extender vídeo suavemente (setpts / ping-pong) si las voces duran más que el clip.",
+                    },
+                    "fade_out_seconds": {"type": "number", "default": 0.80, "minimum": 0.0, "maximum": 4.0},
+                    "wait": {"type": "boolean", "default": True},
+                },
+            },
+        },
+        {
             "name": "studio_export_session_log",
             "description": (
                 "Genera y guarda el registro completo de todo lo sucedido desde que se encendió Studio IA hasta este instante "
@@ -1094,6 +1310,43 @@ def _compute_recommendation(task: str, priority: str) -> Dict[str, Any]:
                 "use_lightning_lora": True,
             },
             "why_this_choice": "Anclar cada fotograma a la Imagen #1 en Qwen-Image-Edit 2511 + auditar con Qwen2.5-VL-3B evita que cambien caras o ropa.",
+        }
+
+    if task == "lipsync_talking_scene":
+        return {
+            "task": task,
+            "detected_gpu": gpu_info.get("gpu_name", "CPU"),
+            "free_disk_gb": free_disk,
+            "workflow_steps": [
+                {"step": 1, "action": "Descargar una vez `edtalk-256-lipsync-hd` (0.65 GB) con `studio_prepare_model(model_id='edtalk-256-lipsync-hd')`."},
+                {"step": 2, "action": "Generar las voces en español con `studio_generate_speech` y el ambiente con `studio_generate_music_or_sfx(model_id='procedural-ambience-cpu', preset='restaurant_warm_murmur')`."},
+                {"step": 3, "action": "Aplicar LipSync por personaje (`target_face='leftmost'` / `'rightmost'` en `dialogue_turns`) + `ambient_rel` + `music_rel` llamando a `studio_lipsync_character`."},
+            ],
+            "recommended_tool": "studio_lipsync_character",
+            "recommended_arguments": {
+                "model_id": "edtalk-256-lipsync-hd",
+                "target_face": "largest",
+                "lip_weight": 0.85,
+                "enhance_face": True,
+                "extend_video_to_audio": True,
+            },
+            "why_this_choice": "EDTalk-256 + YuNet + XSeg + GFPGAN 1.4 ocupa solo 0.65 GB (~1.5 GB VRAM) y sincroniza labios de 1 o varios personajes con Auto-Ducking integrado.",
+        }
+
+    if task == "music_and_ambience":
+        use_ai_bgm = has_gpu and priority != "zero_vram_cpu" and catalog_manager.is_downloaded("musicgen-small-bgm")
+        return {
+            "task": task,
+            "detected_gpu": gpu_info.get("gpu_name", "CPU"),
+            "recommended_tool": "studio_generate_music_or_sfx",
+            "recommended_arguments": {
+                "model_id": "musicgen-small-bgm" if use_ai_bgm else "procedural-ambience-cpu",
+                "preset": "restaurant_warm_murmur",
+                "duration_seconds": 12.0,
+            },
+            "why_this_choice": (
+                "Usa `procedural-ambience-cpu` (0 GB, 0.2s) para ambiente inmediato o descarga `musicgen-small-bgm` (2 GB) para música instrumental IA original."
+            ),
         }
 
     if task == "coherence_check":
@@ -1298,6 +1551,27 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 title=f"[MCP] Preparar inspector multimodal: {defn['name']}",
                 fn=lambda j: load_coherence_vlm_into_memory(model_id=mid, auto_download=True, job=j),
             )
+        elif cat == "lipsync":
+            def _prep_ls(j: Any) -> Dict[str, Any]:
+                if not catalog_manager.is_downloaded(mid):
+                    catalog_manager.download_model(mid, j)
+                if load_vram:
+                    lipsync_engine._ensure_loaded(mid, job=j)
+                return {"model_id": mid, "loaded": load_vram}
+
+            job = job_manager.submit(
+                kind="load_model",
+                title=f"[MCP] Preparar LipSync HD: {defn['name']}",
+                fn=_prep_ls,
+            )
+        elif cat == "audio":
+            if defn.get("builtin_no_download"):
+                return _ok_result({"ok": True, "model_id": mid, "builtin": True})
+            job = job_manager.submit(
+                kind="download",
+                title=f"[MCP] Preparar audio/música: {defn['name']}",
+                fn=lambda j: catalog_manager.download_model(mid, j),
+            )
         else:
             job = job_manager.submit(
                 kind="load_model",
@@ -1316,7 +1590,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if action == "unload_vram":
             if target == "all":
                 info = memory_manager.unload_all()
-            elif target in ("image", "video", "tts", "vision"):
+            elif target in ("image", "video", "tts", "vision", "lipsync", "audio_bgm"):
                 info = memory_manager.unload_slot(target)
             else:
                 info = memory_manager.unload_by_model_id(target)
@@ -1878,7 +2152,218 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
         return _ok_result(_wait_for_job_bounded(job.id))
 
-    # 15. Exportar documento completo de log de sesión (.md o .txt)
+    # 15. Generar música instrumental o ambiente/efectos sonoros
+    if name == "studio_generate_music_or_sfx":
+        prm = str(args.get("prompt") or "warm smooth acoustic jazz piano in a cozy restaurant")
+        mid = str(args.get("model_id") or "auto").strip()
+        prs = str(args.get("preset") or "auto").strip()
+        dur_s = float(args.get("duration_seconds") or 10.0)
+        sd = int(args.get("seed") if args.get("seed") is not None else 42)
+        wait_flag = bool(args.get("wait", True))
+
+        if mid not in ("auto", "procedural-ambience-cpu") and not catalog_manager.is_downloaded(mid):
+            return _guided_error(
+                "AUDIO_MODEL_NOT_DOWNLOADED",
+                f"El modelo `{mid}` aún no está descargado en disco.",
+                f"Descárgalo primero con `studio_prepare_model(model_id='{mid}')` o usa `model_id='procedural-ambience-cpu'` (0 GB en 0.2s).",
+            )
+
+        job = job_manager.submit(
+            kind="audio_bgm",
+            title=f"[MCP] Música/Ambiente ({mid}): {(prm or prs)[:38]}",
+            fn=lambda j: audio_studio_engine.generate_music_or_ambience(
+                job=j,
+                prompt=prm,
+                model_id=mid,
+                preset=prs,
+                duration_seconds=dur_s,
+                seed=sd,
+            ),
+        )
+        if not wait_flag:
+            return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
+        return _ok_result(_wait_for_job_bounded(job.id))
+
+    # 16. Sincronización labial HD (1 personaje o diálogo por turnos multi-personaje)
+    if name == "studio_lipsync_character":
+        try:
+            med_p = _resolve_rel_safe(args.get("media_rel"))
+            if med_p is None:
+                return _guided_error(
+                    "MISSING_MEDIA_REL",
+                    "Falta `media_rel` (la imagen o clip MP4 sobre el que animar los labios).",
+                    "Pasa el `rel_path` devuelto por `studio_generate_video` o `studio_generate_or_edit_image`.",
+                )
+            v_single = _resolve_rel_safe(args.get("voice_audio_rel")) if args.get("voice_audio_rel") else None
+            raw_turns = list(args.get("dialogue_turns") or [])
+            turns_resolved: List[Dict[str, Any]] = []
+            for idx_t, tr in enumerate(raw_turns, start=1):
+                vp = _resolve_rel_safe(tr.get("voice_audio_rel"))
+                if vp is None:
+                    return _guided_error(
+                        "MISSING_TURN_VOICE",
+                        f"Falta `voice_audio_rel` en el turno #{idx_t} de `dialogue_turns`.",
+                        "Genera antes la voz con `studio_generate_speech` y pasa su `rel_path`.",
+                    )
+                turns_resolved.append(
+                    {
+                        "voice_path": vp,
+                        "target_face": str(tr.get("target_face") or args.get("target_face") or "largest"),
+                        "start_sec": float(tr.get("start_sec") or 0.0),
+                        "volume": float(tr.get("volume") if tr.get("volume") is not None else 1.0),
+                    }
+                )
+            mus_p = _resolve_rel_safe(args.get("music_rel")) if args.get("music_rel") else None
+            amb_p = _resolve_rel_safe(args.get("ambient_rel")) if args.get("ambient_rel") else None
+        except (ValueError, FileNotFoundError) as exc:
+            return _guided_error(
+                "LIPSYNC_FILE_NOT_FOUND",
+                str(exc),
+                "Verifica los `rel_path` con `studio_list_assets`.",
+            )
+
+        if v_single is None and not turns_resolved:
+            return _guided_error(
+                "MISSING_VOICE_FOR_LIPSYNC",
+                "No se indicó `voice_audio_rel` ni `dialogue_turns`.",
+                "Pasa `voice_audio_rel` para 1 hablante o `dialogue_turns` para varios personajes.",
+            )
+
+        ls_mid = str(args.get("model_id") or "edtalk-256-lipsync-hd").strip()
+        if not catalog_manager.is_downloaded(ls_mid):
+            return _guided_error(
+                "LIPSYNC_MODEL_NOT_DOWNLOADED",
+                f"El paquete `{ls_mid}` (0.65 GB) aún no está descargado en Colab.",
+                f"Ejecuta primero `studio_prepare_model(model_id='{ls_mid}')` (tarda ~4s en Colab) y repite la llamada.",
+            )
+
+        t_face = str(args.get("target_face") or "largest")
+        l_weight = float(args.get("lip_weight") if args.get("lip_weight") is not None else 0.85)
+        enh = bool(args.get("enhance_face", True))
+        r_str = float(args.get("restore_strength") if args.get("restore_strength") is not None else 0.50)
+        m_vol = float(args.get("music_volume") if args.get("music_volume") is not None else 0.22)
+        a_vol = float(args.get("ambient_volume") if args.get("ambient_volume") is not None else 0.18)
+        ext_vid = bool(args.get("extend_video_to_audio", True))
+        wait_flag = bool(args.get("wait", True))
+
+        job = job_manager.submit(
+            kind="lipsync",
+            title=f"[MCP] LipSync HD ({f'{len(turns_resolved)} turnos' if turns_resolved else t_face} · {med_p.name})",
+            fn=lambda j: lipsync_engine.render_lipsync(
+                job=j,
+                media_path=med_p,
+                voice_audio_path=v_single,
+                target_face=t_face,
+                dialogue_turns=turns_resolved if turns_resolved else None,
+                model_id=ls_mid,
+                lip_weight=l_weight,
+                enhance_face=enh,
+                restore_strength=r_str,
+                music_path=mus_p,
+                music_volume=m_vol,
+                ambient_path=amb_p,
+                ambient_volume=a_vol,
+                extend_video_to_audio=ext_vid,
+            ),
+        )
+        if not wait_flag:
+            return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
+        return _ok_result(_wait_for_job_bounded(job.id))
+
+    # 17. Mezclador multipista FFmpeg con Auto-Ducking sobre diálogo
+    if name == "studio_mix_audio_tracks":
+        try:
+            vid_p = _resolve_rel_safe(args.get("video_rel")) if args.get("video_rel") else None
+            mus_p = _resolve_rel_safe(args.get("music_rel")) if args.get("music_rel") else None
+            amb_p = _resolve_rel_safe(args.get("ambient_rel")) if args.get("ambient_rel") else None
+            raw_v = list(args.get("voice_tracks") or [])
+            v_resolved: List[Dict[str, Any]] = []
+            for idx_v, vt in enumerate(raw_v, start=1):
+                vp = _resolve_rel_safe(vt.get("audio_rel"))
+                if vp is None:
+                    return _guided_error("MISSING_VOICE_TRACK", f"Falta `audio_rel` en `voice_tracks[{idx_v - 1}]`.", "Verifica con `studio_list_assets`.")
+                v_resolved.append(
+                    {
+                        "path": vp,
+                        "start_sec": float(vt.get("start_sec") or 0.0),
+                        "volume": float(vt.get("volume") if vt.get("volume") is not None else 1.0),
+                    }
+                )
+        except (ValueError, FileNotFoundError) as exc:
+            return _guided_error("MIX_FILE_NOT_FOUND", str(exc), "Verifica los `rel_path` con `studio_list_assets`.")
+
+        if vid_p is None and not v_resolved and mus_p is None and amb_p is None:
+            return _guided_error(
+                "EMPTY_MIX_REQUEST",
+                "No indicaste ningún vídeo ni pista de voz, música o ambiente.",
+                "Pasa `video_rel` y al menos `voice_tracks`, `music_rel` o `ambient_rel`.",
+            )
+
+        m_vol = float(args.get("music_volume") if args.get("music_volume") is not None else 0.24)
+        a_vol = float(args.get("ambient_volume") if args.get("ambient_volume") is not None else 0.18)
+        keep_orig = bool(args.get("keep_original_audio", False))
+        orig_vol = float(args.get("original_audio_volume") if args.get("original_audio_volume") is not None else 1.0)
+        duck = bool(args.get("auto_duck_bg", True))
+        ext_vid = bool(args.get("extend_video_to_audio", True))
+        fade_out = float(args.get("fade_out_seconds") if args.get("fade_out_seconds") is not None else 0.80)
+        wait_flag = bool(args.get("wait", True))
+
+        def _run_mix_mcp(j: Any) -> Dict[str, Any]:
+            ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if vid_p is not None:
+                VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
+                out_name = f"master_{ts_slug}_{j.id[:6]}.mp4"
+                out_path = VIDEOS_OUT_DIR / out_name
+                rel_p = f"outputs/videos/{out_name}"
+                m_type = "video"
+                s_dir = VIDEOS_OUT_DIR
+            else:
+                AUDIO_OUT_DIR.mkdir(parents=True, exist_ok=True)
+                out_name = f"mix_{ts_slug}_{j.id[:6]}.wav"
+                out_path = AUDIO_OUT_DIR / out_name
+                rel_p = f"outputs/audio/{out_name}"
+                m_type = "audio"
+                s_dir = AUDIO_OUT_DIR
+
+            res = mix_and_master_media(
+                output_path=out_path,
+                video_path=vid_p,
+                voice_tracks=v_resolved,
+                music_path=mus_p,
+                music_volume=m_vol,
+                ambient_path=amb_p,
+                ambient_volume=a_vol,
+                keep_original_audio=keep_orig,
+                original_audio_volume=orig_vol,
+                auto_duck_bg=duck,
+                extend_video_to_audio=ext_vid,
+                fade_out_seconds=fade_out,
+                job=j,
+            )
+            meta = {
+                "id": out_path.stem,
+                "filename": out_name,
+                "rel_path": rel_p,
+                "media_url": f"/media/{rel_p}",
+                "type": m_type,
+                **res,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            (s_dir / f"{out_path.stem}.json").write_text(
+                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            return meta
+
+        job = job_manager.submit(
+            kind="audio_mix",
+            title=f"[MCP] Mezcla Multipista + Auto-Ducking ({len(v_resolved)} voces)",
+            fn=_run_mix_mcp,
+        )
+        if not wait_flag:
+            return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
+        return _ok_result(_wait_for_job_bounded(job.id))
+
+    # 18. Exportar documento completo de log de sesión (.md o .txt)
     if name == "studio_export_session_log":
         fmt = "txt" if str(args.get("format") or "md").lower() == "txt" else "md"
         downloaded_models = [
@@ -2350,24 +2835,54 @@ python3 studio_mcp.py --cli studio_analyze_coherence '{{
 ```
 *(Si devuelve `"verdict": "NEEDS_REPAIR"`, ejecuta directamente el `"recommended_repair_tool_call"` devuelto).*
 
-### 5) Generar Voz / Narración TTS (`studio_generate_speech`)
+### 5) Generar Voces + Ambiente de Restaurante / Música + LipSync HD Multi-Personaje (`studio_lipsync_character`)
+1. Descargar una sola vez el motor LipSync HD (`0.65 GB`, tarda ~4 s en Colab):
 ```bash
-python3 studio_mcp.py --cli studio_generate_speech '{{
-  "engine_id": "edge-tts-cloud",
-  "voice_id": "es-ES-AlvaroNeural",
-  "rate_pct": 0,
-  "text": "Hola, este audio ha sido generado en Google Colab controlado desde Termux."
+python3 studio_mcp.py --cli studio_prepare_model '{{"model_id": "edtalk-256-lipsync-hd"}}'
+```
+2. Generar las voces de cada personaje (`studio_generate_speech`) y el sonido de fondo (`studio_generate_music_or_sfx`):
+```bash
+python3 studio_mcp.py --cli studio_generate_speech '{{"voice_id": "es-ES-AlvaroNeural", "text": "Esta pasta está increíble, brindemos por esta noche."}}'
+python3 studio_mcp.py --cli studio_generate_speech '{{"voice_id": "es-ES-ElviraNeural", "text": "¡Salud! Ha sido una idea genial venir a este restaurante."}}'
+python3 studio_mcp.py --cli studio_generate_music_or_sfx '{{"model_id": "procedural-ambience-cpu", "preset": "restaurant_warm_murmur", "duration_seconds": 12}}'
+```
+*(O descarga `"musicgen-small-bgm"` para componer jazz/piano original por IA).*
+3. Aplicar **LipSync HD por turnos** (`leftmost` = persona izquierda, `rightmost` = persona derecha) + ambiente con **Auto-Ducking automático**:
+```bash
+python3 studio_mcp.py --cli studio_lipsync_character '{{
+  "media_rel": "outputs/videos/clip_restaurante.mp4",
+  "dialogue_turns": [
+    {{"voice_audio_rel": "outputs/audio/VOZ_ALVARO.mp3", "target_face": "leftmost", "start_sec": 0.2}},
+    {{"voice_audio_rel": "outputs/audio/VOZ_ELVIRA.mp3", "target_face": "rightmost", "start_sec": 3.4}}
+  ],
+  "ambient_rel": "outputs/audio/bgm_AMBIENTE.wav",
+  "ambient_volume": 0.18
 }}'
 ```
 
-### 6) Montaje Final Multipista (`studio_render_montage`)
+### 6) Mezclador Multipista FFmpeg Independiente (`studio_mix_audio_tracks`) y Montaje Final (`studio_render_montage`)
+Si ya tienes un vídeo y quieres añadirle voces posicionadas al segundo + música + ambiente con Auto-Ducking (`sidechaincompress`) sin bajar el volumen de las voces ni congelar el vídeo:
+```bash
+python3 studio_mcp.py --cli studio_mix_audio_tracks '{{
+  "video_rel": "outputs/videos/clip_1.mp4",
+  "voice_tracks": [{{"audio_rel": "outputs/audio/voz_1.mp3", "start_sec": 0.3}}],
+  "music_rel": "outputs/audio/musica.wav",
+  "music_volume": 0.22,
+  "ambient_rel": "outputs/audio/ambiente.wav",
+  "ambient_volume": 0.16,
+  "auto_duck_bg": true
+}}'
+```
+Y para unir varios planos en un cortometraje completo (incluye Auto-Ducking sobre `global_audio_rel` y extensión fluida sin fotogramas congelados):
 ```bash
 python3 studio_mcp.py --cli studio_render_montage '{{
   "title": "corto_final",
   "items": [
-    {{"media_rel": "outputs/videos/clip_1.mp4", "audio_rel": "outputs/audio/voz_1.mp3", "fit_to_audio": true}},
-    {{"media_rel": "outputs/videos/clip_2.mp4", "duration": 3.5}}
+    {{"media_rel": "outputs/videos/lipsync_plano1.mp4"}},
+    {{"media_rel": "outputs/videos/lipsync_plano2.mp4"}}
   ],
+  "global_audio_rel": "outputs/audio/musica.wav",
+  "global_audio_volume": 0.20,
   "fade_seconds": 0.2
 }}'
 ```

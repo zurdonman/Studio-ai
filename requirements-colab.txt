@@ -9,3 +9,5 @@ sentencepiece>=0.2.0
 ftfy>=6.2.0
 soundfile>=0.12.1
 imageio>=2.34.0
+onnxruntime-gpu>=1.19.0
+scipy>=1.11.0

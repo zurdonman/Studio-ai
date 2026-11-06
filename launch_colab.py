@@ -79,6 +79,10 @@ def ensure_dependencies() -> None:
             str(req_file),
         ]
     )
+    if req_file.name == "requirements.txt":
+        has_ort = subprocess.run([sys.executable, "-c", "import onnxruntime"], capture_output=True).returncode == 0
+        if not has_ort:
+            subprocess.call([sys.executable, "-m", "pip", "install", "-q", "onnxruntime>=1.18.0"])
     _remove_incompatible_preinstalled_packages()
     print("✅ Dependencias listas.", flush=True)
 

@@ -1741,6 +1741,356 @@ def test_coherence_engine_fast_cv_and_hybrid_vlm_and_mcp_repair_loop(temp_studio
     assert "gafas y camisa azul" in vlm_res["comparisons"][0]["recommended_repair_tool_call"]["arguments"]["prompt"]
 
 
+def test_ffmpeg_montage_no_truncation_pingpong_and_ducking(temp_studio_env, tmp_path):
+    """Verifica corrección de bugs FFmpeg: sin corte por `-shortest`, extensión ping-pong sin congelar y Auto-Ducking sin perder -6 dB."""
+    import wave
+    import numpy as np
+    from PIL import Image
+    from studio.engines.ffmpeg_utils import (
+        create_motion_clip_from_image,
+        probe_media_info,
+        render_montage_mp4,
+    )
+
+    def _make_sine_wav(fp, dur_s, freq=330.0, amp=0.55):
+        sr = 24000
+        t = np.linspace(0, dur_s, int(sr * dur_s), endpoint=False, dtype=np.float32)
+        pcm = (amp * np.sin(2.0 * np.pi * freq * t) * 32767.0).astype(np.int16)
+        with wave.open(str(fp), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(pcm.tobytes())
+
+    img_p = tmp_path / "shot.png"
+    Image.new("RGB", (640, 360), (140, 90, 60)).save(img_p)
+    short_voice = tmp_path / "short_voice.wav"
+    _make_sine_wav(short_voice, 1.1, freq=440.0)
+
+    # 1) Un plano de 3.6s con voz corta de 1.1s NO debe truncarse a 1.1s (antes `-shortest` lo cortaba)
+    clip_1 = tmp_path / "clip_full.mp4"
+    create_motion_clip_from_image(
+        image_path=img_p,
+        output_mp4=clip_1,
+        width=640,
+        height=360,
+        fps=24,
+        duration_sec=3.6,
+        motion="zoom_in",
+        audio_path=short_voice,
+    )
+    info_1 = probe_media_info(clip_1)
+    assert info_1["duration_seconds"] >= 3.45
+    assert info_1["has_audio"] is True
+
+    # 2) Vídeo corto (1.4s) con locución larga (3.2s) en montaje: se extiende por ping-pong fluido a ~3.2s + mezcla global con Auto-Ducking
+    short_vid = tmp_path / "short_vid.mp4"
+    create_motion_clip_from_image(
+        image_path=img_p,
+        output_mp4=short_vid,
+        width=640,
+        height=360,
+        fps=24,
+        duration_sec=1.4,
+        motion="pan_right",
+    )
+    long_voice = tmp_path / "long_voice.wav"
+    _make_sine_wav(long_voice, 3.2, freq=380.0)
+    bgm_wav = tmp_path / "bgm.wav"
+    _make_sine_wav(bgm_wav, 4.0, freq=180.0, amp=0.35)
+
+    montage_out = tmp_path / "montage_ducked.mp4"
+    m_res = render_montage_mp4(
+        items=[
+            {"path": str(short_vid), "audio_path": str(long_voice), "fit_to_audio": True},
+            {"path": str(clip_1), "duration": 2.0},
+        ],
+        output_mp4=montage_out,
+        width=640,
+        height=360,
+        fps=24,
+        global_audio_path=bgm_wav,
+        global_audio_volume=0.25,
+        fade_seconds=0.15,
+    )
+    assert montage_out.exists()
+    assert m_res["duration_seconds"] >= 5.0
+
+
+def test_audio_studio_ambience_and_multitrack_mix_mcp(temp_studio_env, monkeypatch, tmp_path):
+    """Prueba `studio_generate_music_or_sfx` (ambiente restaurante 0 GB) y `studio_mix_audio_tracks` con múltiples voces + Auto-Ducking."""
+    import json
+    import wave
+    import numpy as np
+    from PIL import Image
+    from studio.engines.ffmpeg_utils import create_motion_clip_from_image
+
+    client, data_dir = temp_studio_env
+    monkeypatch.setenv("STUDIO_MCP_TOKEN", "tok_audio_test")
+    hdrs = {"Authorization": "Bearer tok_audio_test"}
+
+    # 1) Generar ambiente estéreo cálido de restaurante vía MCP (0 GB CPU)
+    r_amb = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_generate_music_or_sfx",
+                "arguments": {
+                    "model_id": "procedural-ambience-cpu",
+                    "preset": "restaurant_warm_murmur",
+                    "duration_seconds": 4.0,
+                },
+            },
+        },
+    ).json()["result"]
+    assert r_amb["isError"] is False
+    amb_data = json.loads(r_amb["content"][0]["text"])["result"]
+    assert amb_data["preset"] == "restaurant_warm_murmur"
+    assert amb_data["duration_seconds"] >= 3.8
+    amb_rel = amb_data["rel_path"]
+
+    # Generar también pad musical cálido
+    r_mus = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_generate_music_or_sfx",
+                "arguments": {
+                    "model_id": "procedural-ambience-cpu",
+                    "preset": "cinematic_warm_pad",
+                    "duration_seconds": 4.0,
+                },
+            },
+        },
+    ).json()["result"]
+    mus_rel = json.loads(r_mus["content"][0]["text"])["result"]["rel_path"]
+
+    # 2) Subir un vídeo corto de 2.0s y 2 voces que llegan hasta 3.6s → `studio_mix_audio_tracks` extiende vídeo + aplica Auto-Ducking
+    vid_fp = tmp_path / "base_scene.mp4"
+    img_fp = tmp_path / "base_scene.png"
+    Image.new("RGB", (640, 360), (95, 70, 55)).save(img_fp)
+    create_motion_clip_from_image(img_fp, vid_fp, width=640, height=360, fps=24, duration_sec=2.0, motion="zoom_in")
+    up_vid = client.post("/api/assets/upload", files={"file": ("base_scene.mp4", vid_fp.read_bytes(), "video/mp4")}).json()["asset"]["rel_path"]
+
+    def _upload_voice(name: str, dur: float, freq: float) -> str:
+        p = tmp_path / name
+        sr = 24000
+        t = np.linspace(0, dur, int(sr * dur), endpoint=False, dtype=np.float32)
+        pcm = (0.65 * np.sin(2.0 * np.pi * freq * t) * 32767.0).astype(np.int16)
+        with wave.open(str(p), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(pcm.tobytes())
+        return client.post("/api/assets/upload", files={"file": (name, p.read_bytes(), "audio/wav")}).json()["asset"]["rel_path"]
+
+    v1_rel = _upload_voice("voz_persona_izq.wav", 1.2, 320.0)
+    v2_rel = _upload_voice("voz_persona_der.wav", 1.3, 460.0)
+
+    r_mix = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_mix_audio_tracks",
+                "arguments": {
+                    "video_rel": up_vid,
+                    "voice_tracks": [
+                        {"audio_rel": v1_rel, "start_sec": 0.2, "volume": 1.0},
+                        {"audio_rel": v2_rel, "start_sec": 1.9, "volume": 1.0},
+                    ],
+                    "music_rel": mus_rel,
+                    "music_volume": 0.22,
+                    "ambient_rel": amb_rel,
+                    "ambient_volume": 0.18,
+                    "auto_duck_bg": True,
+                    "extend_video_to_audio": True,
+                },
+            },
+        },
+    ).json()["result"]
+    assert r_mix["isError"] is False
+    mix_res = json.loads(r_mix["content"][0]["text"])["result"]
+    assert mix_res["auto_ducking_applied"] is True
+    assert mix_res["video_extended"] is True
+    assert mix_res["voice_tracks_count"] == 2
+    assert mix_res["duration_seconds"] >= 3.2
+    assert (data_dir / mix_res["rel_path"]).exists()
+
+
+def test_lipsync_engine_multi_turn_dialogue_and_mcp_tool(temp_studio_env, monkeypatch, tmp_path):
+    """Prueba el motor LipSync HD multi-personaje (`leftmost` / `rightmost` por turnos + XSeg + GFPGAN + Auto-Ducking) vía MCP."""
+    import json
+    import wave
+    import numpy as np
+    from PIL import Image, ImageDraw
+    import studio.engines.lipsync_engine as ls_mod
+    from studio.catalog import catalog_manager
+
+    client, data_dir = temp_studio_env
+    monkeypatch.setenv("STUDIO_MCP_TOKEN", "tok_lipsync_test")
+    hdrs = {"Authorization": "Bearer tok_lipsync_test"}
+
+    # Verificar que la guía `/mcp/guia` expone la sección de LipSync HD y Auto-Ducking
+    guia_txt = client.get("/mcp/guia?token=tok_lipsync_test").text
+    assert "studio_lipsync_character" in guia_txt
+    assert "studio_generate_music_or_sfx" in guia_txt
+    assert "studio_mix_audio_tracks" in guia_txt
+
+    # Simular paquete ONNX descargado y sesiones ligeras verificando exactamente las dimensiones de entrada/salida
+    ls_dir = catalog_manager.model_dir("edtalk-256-lipsync-hd") / "onnx"
+    ls_dir.mkdir(parents=True, exist_ok=True)
+    for fn in ("yunet_2023_mar.onnx", "edtalk_256.onnx", "xseg_1.onnx", "gfpgan_1.4.onnx"):
+        (ls_dir / fn).write_bytes(b"onnx_placeholder")
+    catalog_manager.marker_file("edtalk-256-lipsync-hd").write_text('{"ok": true}', encoding="utf-8")
+
+    class _FakeInput:
+        def __init__(self, name: str):
+            self.name = name
+
+    class _FakeEdtalk:
+        def run(self, _, feeds):
+            assert feeds["source"].shape == (1, 1, 80, 16)
+            assert feeds["target"].shape == (1, 3, 256, 256)
+            assert feeds["weight"].shape == (1,)
+            # Modificar sutilmente la zona de la boca para verificar integración real de paste_back
+            out = feeds["target"].copy()
+            out[:, :, 165:210, 90:166] = np.clip(out[:, :, 165:210, 90:166] * 0.85 + 0.12, 0.0, 1.0)
+            return [out.astype(np.float32)]
+
+    class _FakeXseg:
+        def get_inputs(self):
+            return [_FakeInput("input")]
+
+        def run(self, _, feeds):
+            inp = feeds["input"]
+            assert inp.shape == (1, 256, 256, 3)
+            return [np.ones((1, 256, 256, 1), dtype=np.float32)]
+
+    class _FakeGfpgan:
+        def get_inputs(self):
+            return [_FakeInput("input")]
+
+        def run(self, _, feeds):
+            inp = feeds["input"]
+            assert inp.shape == (1, 3, 512, 512)
+            return [inp.astype(np.float32)]
+
+    fake_sessions = {
+        "yunet": object(),
+        "edtalk": _FakeEdtalk(),
+        "xseg": _FakeXseg(),
+        "gfpgan": _FakeGfpgan(),
+    }
+    monkeypatch.setattr(ls_mod.lipsync_engine, "_ensure_loaded", lambda model_id, job=None: fake_sessions)
+
+    # Devolver 2 rostros claros en la escena (persona izquierda x~180 y persona derecha x~460)
+    def _fake_detect_two_diners(_sess, frame_bgr, det_size=640, score_thresh=0.45):
+        base_tpl = ls_mod.FFHQ_512_TEMPLATE
+        left_kps = base_tpl * 140.0 + np.array([110.0, 95.0], dtype=np.float32)
+        right_kps = base_tpl * 140.0 + np.array([390.0, 95.0], dtype=np.float32)
+        return [
+            {
+                "bbox": np.array([110.0, 95.0, 250.0, 245.0], dtype=np.float32),
+                "score": 0.96,
+                "landmarks_5": left_kps,
+                "area": 140.0 * 150.0,
+                "center_x": 180.0,
+                "center_y": 170.0,
+            },
+            {
+                "bbox": np.array([390.0, 95.0, 530.0, 245.0], dtype=np.float32),
+                "score": 0.95,
+                "landmarks_5": right_kps,
+                "area": 140.0 * 150.0,
+                "center_x": 460.0,
+                "center_y": 170.0,
+            },
+        ]
+
+    monkeypatch.setattr(ls_mod, "detect_faces_yunet_onnx", _fake_detect_two_diners)
+
+    # Crear imagen de dos comensales + 2 pistas de voz + ambiente restaurante
+    scene_img = Image.new("RGB", (640, 360), (70, 50, 42))
+    drw = ImageDraw.Draw(scene_img)
+    drw.ellipse([125, 100, 235, 235], fill=(225, 185, 155))
+    drw.ellipse([405, 100, 515, 235], fill=(215, 172, 145))
+    scene_fp = tmp_path / "dos_comensales.png"
+    scene_img.save(scene_fp)
+    scene_rel = client.post("/api/assets/upload", files={"file": ("dos_comensales.png", scene_fp.read_bytes(), "image/png")}).json()["asset"]["rel_path"]
+
+    def _mk_voice(fn: str, dur: float, f0: float) -> str:
+        p = tmp_path / fn
+        sr = 16000
+        t = np.linspace(0, dur, int(sr * dur), endpoint=False, dtype=np.float32)
+        sig = 0.5 * np.sin(2.0 * np.pi * f0 * t) * (0.55 + 0.45 * np.sin(2.0 * np.pi * 4.5 * t))
+        pcm = (sig * 32767.0).astype(np.int16)
+        with wave.open(str(p), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(pcm.tobytes())
+        return client.post("/api/assets/upload", files={"file": (fn, p.read_bytes(), "audio/wav")}).json()["asset"]["rel_path"]
+
+    v_left = _mk_voice("comensal_izq.wav", 0.7, 210.0)
+    v_right = _mk_voice("comensal_der.wav", 0.7, 310.0)
+
+    r_amb = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_generate_music_or_sfx",
+                "arguments": {"model_id": "procedural-ambience-cpu", "preset": "restaurant_warm_murmur", "duration_seconds": 3.0},
+            },
+        },
+    ).json()["result"]
+    amb_rel = json.loads(r_amb["content"][0]["text"])["result"]["rel_path"]
+
+    r_ls = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_lipsync_character",
+                "arguments": {
+                    "media_rel": scene_rel,
+                    "dialogue_turns": [
+                        {"voice_audio_rel": v_left, "target_face": "leftmost", "start_sec": 0.1},
+                        {"voice_audio_rel": v_right, "target_face": "rightmost", "start_sec": 0.95},
+                    ],
+                    "ambient_rel": amb_rel,
+                    "ambient_volume": 0.18,
+                },
+            },
+        },
+    ).json()["result"]
+    assert r_ls["isError"] is False
+    ls_data = json.loads(r_ls["content"][0]["text"])["result"]
+    assert ls_data["turns_count"] == 2
+    assert ls_data["frames_lipsynced"] > 10
+    assert ls_data["auto_ducking_applied"] is True
+    assert (data_dir / ls_data["rel_path"]).exists()
+
+
+
 
 
 

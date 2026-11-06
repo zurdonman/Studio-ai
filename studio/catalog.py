@@ -5,9 +5,11 @@ import os
 import shutil
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import requests
 from huggingface_hub import HfApi, hf_hub_download
 from tqdm.std import tqdm as std_tqdm
 
@@ -1633,6 +1635,132 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "engine": "opencv_fast",
         "artifacts": [],
     },
+    # ==================== LIPSYNC HD Y MÚSICA / AMBIENTE SONORO ====================
+    {
+        "id": "edtalk-256-lipsync-hd",
+        "name": "EDTalk-256 HD + GFPGAN 1.4 + XSeg Oclusión (★ LipSync Habla Realista · 0.65 GB · Multi-Persona)",
+        "category": "lipsync",
+        "is_default": True,
+        "badge": "★ LipSync 256→512 HD · Cualquier Idioma · 0.65 GB",
+        "description": (
+            "Motor completo de sincronización labial fonética en alta definición (Apache-2.0 EDTalk 256×256 + restauración facial "
+            "GFPGAN 1.4 a 512×512 + máscara de oclusión XSeg para copas/cubiertos/manos + detector YuNet multi-rostro). "
+            "Anima la boca de cualquier personaje en una foto o en un vídeo de Wan 14B eligiendo izquierda, derecha o rostro principal."
+        ),
+        "estimated_gb": 0.65,
+        "min_vram_gb": 1.5,
+        "recommended_vram_gb": 3.0,
+        "l4_seconds_hint": "4–9 s / clip",
+        "engine": "edtalk_onnx_hd",
+        "artifacts": [
+            {
+                "role": "yunet",
+                "repo_id": "facefusion/models-3.4.0",
+                "direct_url": "https://github.com/facefusion/facefusion-assets/releases/download/models-3.4.0/yunet_2023_mar.onnx",
+                "subdir": "onnx",
+                "filename": "yunet_2023_mar.onnx",
+                "verify_file": "yunet_2023_mar.onnx",
+                "expected_bytes": 232589,
+            },
+            {
+                "role": "edtalk",
+                "repo_id": "facefusion/models-3.3.0",
+                "direct_url": "https://github.com/facefusion/facefusion-assets/releases/download/models-3.3.0/edtalk_256.onnx",
+                "subdir": "onnx",
+                "filename": "edtalk_256.onnx",
+                "verify_file": "edtalk_256.onnx",
+                "expected_bytes": 270636084,
+            },
+            {
+                "role": "xseg",
+                "repo_id": "facefusion/models-3.1.0",
+                "direct_url": "https://github.com/facefusion/facefusion-assets/releases/download/models-3.1.0/xseg_1.onnx",
+                "subdir": "onnx",
+                "filename": "xseg_1.onnx",
+                "verify_file": "xseg_1.onnx",
+                "expected_bytes": 70354487,
+            },
+            {
+                "role": "gfpgan",
+                "repo_id": "facefusion/models-3.0.0",
+                "direct_url": "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/gfpgan_1.4.onnx",
+                "subdir": "onnx",
+                "filename": "gfpgan_1.4.onnx",
+                "verify_file": "gfpgan_1.4.onnx",
+                "expected_bytes": 340263489,
+            },
+        ],
+    },
+    {
+        "id": "musicgen-small-bgm",
+        "name": "Meta MusicGen Small (★ Música Instrumental Original por Prompt · 2.0 GB)",
+        "category": "audio",
+        "is_default": True,
+        "badge": "★ Música IA · Jazz / Cine / Lo-Fi · 2.0 GB",
+        "description": (
+            "Generador oficial de música instrumental de Meta AI (MusicGen 300M integrado en Transformers). "
+            "Crea bandas sonoras personalizadas (jazz suave de restaurante, piano emotivo, tensión cinematográfica) sin derechos de autor."
+        ),
+        "estimated_gb": 2.0,
+        "min_vram_gb": 2.3,
+        "recommended_vram_gb": 4.0,
+        "l4_seconds_hint": "4–8 s / pista",
+        "engine": "musicgen",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "facebook/musicgen-small",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "config.json",
+                "ignore_patterns": ["*.bin", "flax_model*", "tf_model*"],
+            }
+        ],
+    },
+    {
+        "id": "audioldm2-sfx",
+        "name": "AudioLDM 2 Efectos y Sonido Ambiental (★ Ambiente Restaurante / Lluvia / Foley · 3.8 GB)",
+        "category": "audio",
+        "is_default": False,
+        "badge": "SFX + Ambiente Realista · Diffusers",
+        "description": (
+            "Generador de paisajes sonoros y efectos Foley realistas desde texto (murmullo cálido de restaurante, platos y copas, "
+            "lluvia en cristal, pasos, tráfico lejano, viento)."
+        ),
+        "estimated_gb": 3.8,
+        "min_vram_gb": 3.5,
+        "recommended_vram_gb": 6.0,
+        "l4_seconds_hint": "6–10 s / efecto",
+        "engine": "audioldm2",
+        "artifacts": [
+            {
+                "role": "base",
+                "repo_id": "cvssp/audioldm2",
+                "subdir": "base",
+                "filename": None,
+                "verify_file": "model_index.json",
+                "ignore_patterns": ["*.bin"],
+            }
+        ],
+    },
+    {
+        "id": "procedural-ambience-cpu",
+        "name": "Sintetizador Acústico de Ambiente en Estudio (Restaurante / Lluvia / Sala / Pad Cálido · 0 GB)",
+        "category": "audio",
+        "is_default": False,
+        "builtin_no_download": True,
+        "badge": "0 GB · 0.2s Instantáneo CPU",
+        "description": (
+            "Generador DSP estéreo integrado (0 GB VRAM, 0.2 s) con presets calibrados de ambiente acústico cálido de restaurante/cafetería, "
+            "lluvia suave, aire exterior, pad armónico cinematográfico y room-tone limpio."
+        ),
+        "estimated_gb": 0.0,
+        "min_vram_gb": 0.0,
+        "recommended_vram_gb": 0.0,
+        "l4_seconds_hint": "0.2 s",
+        "engine": "procedural_dsp",
+        "artifacts": [],
+    },
 ]
 
 
@@ -2430,6 +2558,28 @@ class CatalogManager:
             single_fn = art.get("filename")
             allow_pats = art.get("allow_patterns")
             ignore_pats = art.get("ignore_patterns")
+            direct_url = art.get("direct_url")
+
+            if direct_url and single_fn:
+                fsize = int(art.get("expected_bytes") or 0)
+                local_target = subdir / single_fn
+                exists_already = local_target.exists() and (
+                    fsize == 0 or abs(local_target.stat().st_size - fsize) < 4096
+                )
+                total_bytes += fsize
+                if exists_already:
+                    already_bytes += local_target.stat().st_size
+                plan_files.append(
+                    {
+                        "repo_id": repo_id,
+                        "direct_url": direct_url,
+                        "rfilename": single_fn,
+                        "subdir": subdir,
+                        "size": fsize,
+                        "exists": exists_already,
+                    }
+                )
+                continue
 
             info = api.model_info(repo_id=repo_id, files_metadata=True)
             siblings = info.siblings or []
@@ -2581,13 +2731,32 @@ class CatalogManager:
             watcher = threading.Thread(target=_pulse_watcher, daemon=True)
             watcher.start()
             try:
-                downloaded_path = hf_hub_download(
-                    repo_id=item["repo_id"],
-                    filename=rfn,
-                    local_dir=str(item["subdir"]),
-                    tqdm_class=_JobTqdm,
-                    token=tok,
-                )
+                if item.get("direct_url"):
+                    target_fp = Path(item["subdir"]) / rfn
+                    target_fp.parent.mkdir(parents=True, exist_ok=True)
+                    part_fp = target_fp.with_suffix(target_fp.suffix + ".part")
+                    with requests.get(str(item["direct_url"]), stream=True, timeout=60) as resp_dl:
+                        resp_dl.raise_for_status()
+                        with open(part_fp, "wb") as fh_out:
+                            for chunk in resp_dl.iter_content(chunk_size=256 * 1024):
+                                job.check_cancelled()
+                                if not chunk:
+                                    continue
+                                fh_out.write(chunk)
+                                c_len = len(chunk)
+                                file_progress["transfer"] += c_len
+                                dl_clock["net_bytes"] += c_len
+                                _emit_live_progress(force=False)
+                    part_fp.replace(target_fp)
+                    downloaded_path = str(target_fp)
+                else:
+                    downloaded_path = hf_hub_download(
+                        repo_id=item["repo_id"],
+                        filename=rfn,
+                        local_dir=str(item["subdir"]),
+                        tqdm_class=_JobTqdm,
+                        token=tok,
+                    )
             finally:
                 file_progress["done"] = True
 

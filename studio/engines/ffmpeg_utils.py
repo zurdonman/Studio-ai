@@ -223,18 +223,20 @@ def create_motion_clip_from_image(
         ]
         if audio_path and audio_path.exists():
             cmd += ["-i", str(audio_path)]
+            a_chain = f"[2:a]aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur={duration_sec:.3f},atrim=0:{duration_sec:.3f}[aout]"
         else:
-            cmd += ["-f", "lavfi", "-t", f"{duration_sec:.2f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+            cmd += ["-f", "lavfi", "-t", f"{duration_sec:.3f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+            a_chain = f"[2:a]atrim=0:{duration_sec:.3f}[aout]"
 
         cmd += [
             "-filter_complex",
-            fc,
+            f"{fc};{a_chain}",
             "-map",
             "[vout]",
             "-map",
-            "2:a:0",
+            "[aout]",
             "-t",
-            f"{duration_sec:.2f}",
+            f"{duration_sec:.3f}",
             "-c:v",
             "libx264",
             "-preset",
@@ -248,12 +250,11 @@ def create_motion_clip_from_image(
             "-b:a",
             "192k",
             "-ar",
-            "44100",
+            "48000",
             "-ac",
             "2",
             "-movflags",
             "+faststart",
-            "-shortest",
             "-y",
             str(output_mp4),
         ]
@@ -283,18 +284,24 @@ def create_motion_clip_from_image(
         if motion in ("zoom_in", "zoom_out", "pan_right"):
             cmd += ["-i", str(image_path)]
         else:
-            cmd += ["-loop", "1", "-t", f"{duration_sec:.2f}", "-i", str(image_path)]
+            cmd += ["-loop", "1", "-t", f"{duration_sec:.3f}", "-i", str(image_path)]
 
         if audio_path and audio_path.exists():
             cmd += ["-i", str(audio_path)]
+            af_chain = f"[1:a]aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur={duration_sec:.3f},atrim=0:{duration_sec:.3f}[aout]"
         else:
-            cmd += ["-f", "lavfi", "-t", f"{duration_sec:.2f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+            cmd += ["-f", "lavfi", "-t", f"{duration_sec:.3f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+            af_chain = f"[1:a]atrim=0:{duration_sec:.3f}[aout]"
 
         cmd += [
+            "-filter_complex",
+            f"[0:v]{vf}[vout];{af_chain}",
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
             "-t",
-            f"{duration_sec:.2f}",
-            "-vf",
-            vf,
+            f"{duration_sec:.3f}",
             "-c:v",
             "libx264",
             "-preset",
@@ -308,12 +315,11 @@ def create_motion_clip_from_image(
             "-b:a",
             "192k",
             "-ar",
-            "44100",
+            "48000",
             "-ac",
             "2",
             "-movflags",
             "+faststart",
-            "-shortest",
             "-y",
             str(output_mp4),
         ]
@@ -398,7 +404,8 @@ def render_montage_mp4(
                 )
             else:
                 v_info = probe_media_info(src_path)
-                clip_dur = float(item.get("duration") or v_info["duration_seconds"] or 4.0)
+                v_orig_dur = max(0.25, float(v_info["duration_seconds"] or 4.0))
+                clip_dur = float(item.get("duration") or v_orig_dur)
                 if shot_audio:
                     a_info = probe_media_info(shot_audio)
                     if a_info["duration_seconds"] > 0.2 and item.get("fit_to_audio", True):
@@ -409,36 +416,80 @@ def render_montage_mp4(
                     fade_out_st = max(0.0, clip_dur - fade_seconds)
                     fade_filter = f",fade=t=in:st=0:d={fade_seconds:.2f},fade=t=out:st={fade_out_st:.2f}:d={fade_seconds:.2f}"
 
-                vf = (
+                base_scale = (
                     f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
-                    f"fps={fps},format=yuv420p{fade_filter}"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
                 )
 
-                cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-i", str(src_path)]
+                # Si la voz dura más que el clip de vídeo, evitar fotograma congelado estático:
+                # <= 1.40x → estiramiento temporal suave; > 1.40x → bucle ping-pong fluido (ida y vuelta sin corte)
+                use_pingpong = clip_dur > v_orig_dur * 1.40
+                stretch_pts = ""
+                if (not use_pingpong) and clip_dur > v_orig_dur + 0.08:
+                    ratio = min(1.40, clip_dur / v_orig_dur)
+                    stretch_pts = f",setpts={ratio:.5f}*PTS"
+
+                cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "error"]
+                if use_pingpong:
+                    # Crear 1 ciclo ping-pong en memoria y repetirlo si aún hiciera falta
+                    cycles_needed = max(1, int((clip_dur / max(0.3, v_orig_dur * 2.0)) + 1.5))
+                    if cycles_needed > 1:
+                        cmd += ["-stream_loop", str(cycles_needed)]
+                cmd += ["-i", str(src_path)]
+
+                if use_pingpong:
+                    v_chain = (
+                        f"[0:v]{base_scale},fps={fps},split=2[vf][vr];"
+                        f"[vr]reverse[vrev];"
+                        f"[vf][vrev]concat=n=2:v=1:a=0,trim=0:{clip_dur:.3f},setpts=PTS-STARTPTS,format=yuv420p{fade_filter}[vout]"
+                    )
+                else:
+                    v_chain = (
+                        f"[0:v]{base_scale}{stretch_pts},fps={fps},"
+                        f"trim=0:{clip_dur:.3f},setpts=PTS-STARTPTS,format=yuv420p{fade_filter}[vout]"
+                    )
+
                 if shot_audio:
-                    cmd += ["-i", str(shot_audio), "-map", "0:v:0", "-map", "1:a:0"]
+                    cmd += ["-i", str(shot_audio)]
+                    if v_info["has_audio"] and bool(item.get("keep_original_audio", False)):
+                        orig_vol = float(item.get("original_audio_volume", 0.25))
+                        a_chain = (
+                            f"[0:a]aresample=48000,aformat=channel_layouts=stereo,volume={orig_vol:.2f},"
+                            f"apad=whole_dur={clip_dur:.3f},atrim=0:{clip_dur:.3f}[a_orig];"
+                            f"[1:a]aresample=48000,aformat=channel_layouts=stereo,"
+                            f"apad=whole_dur={clip_dur:.3f},atrim=0:{clip_dur:.3f}[a_shot];"
+                            f"[a_shot][a_orig]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.96[aout]"
+                        )
+                    else:
+                        a_chain = (
+                            f"[1:a]aresample=48000,aformat=channel_layouts=stereo,"
+                            f"apad=whole_dur={clip_dur:.3f},atrim=0:{clip_dur:.3f}[aout]"
+                        )
                 elif v_info["has_audio"]:
-                    cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+                    a_chain = (
+                        f"[0:a]aresample=48000,aformat=channel_layouts=stereo,"
+                        f"apad=whole_dur={clip_dur:.3f},atrim=0:{clip_dur:.3f}[aout]"
+                    )
                 else:
                     cmd += [
                         "-f",
                         "lavfi",
                         "-t",
-                        f"{clip_dur:.2f}",
+                        f"{clip_dur:.3f}",
                         "-i",
-                        "anullsrc=channel_layout=stereo:sample_rate=44100",
-                        "-map",
-                        "0:v:0",
-                        "-map",
-                        "1:a:0",
+                        "anullsrc=channel_layout=stereo:sample_rate=48000",
                     ]
+                    a_chain = f"[1:a]atrim=0:{clip_dur:.3f}[aout]"
 
                 cmd += [
+                    "-filter_complex",
+                    f"{v_chain};{a_chain}",
+                    "-map",
+                    "[vout]",
+                    "-map",
+                    "[aout]",
                     "-t",
-                    f"{clip_dur:.2f}",
-                    "-vf",
-                    vf,
+                    f"{clip_dur:.3f}",
                     "-c:v",
                     "libx264",
                     "-preset",
@@ -450,7 +501,7 @@ def render_montage_mp4(
                     "-b:a",
                     "192k",
                     "-ar",
-                    "44100",
+                    "48000",
                     "-ac",
                     "2",
                     "-y",
@@ -510,17 +561,28 @@ def render_montage_mp4(
 
         output_mp4.parent.mkdir(parents=True, exist_ok=True)
 
-        # Paso 3: Mezclar pista de audio/música global si se proporcionó
+        # Paso 3: Mezclar pista de audio/música global con Auto-Ducking sobre la voz y sin perder -6dB de volumen
         if global_audio_path and global_audio_path.exists():
             if job:
                 job.log(
-                    f"Mezclando pista de audio global ({global_audio_path.name})...",
+                    f"Masterizando audio global con Auto-Ducking sobre diálogo ({global_audio_path.name})...",
                     progress=92.0,
-                    step="Mezclando audio final...",
+                    step="Masterizando audio y ducking...",
                 )
             joined_info = probe_media_info(joined_mp4)
             total_dur = max(0.5, joined_info["duration_seconds"])
-            vol = max(0.05, min(2.0, float(global_audio_volume)))
+            vol = max(0.03, min(2.0, float(global_audio_volume)))
+            in_fade = min(0.35, total_dur * 0.15)
+            out_fade = min(0.85, total_dur * 0.25)
+            fade_out_st = max(0.0, total_dur - out_fade)
+
+            mix_fc = (
+                f"[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[v_main][v_sc];"
+                f"[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:{total_dur:.3f},asetpts=PTS-STARTPTS,"
+                f"volume={vol:.3f},afade=t=in:st=0:d={in_fade:.2f},afade=t=out:st={fade_out_st:.3f}:d={out_fade:.2f}[bg_raw];"
+                f"[bg_raw][v_sc]sidechaincompress=threshold=0.025:ratio=5:attack=35:release=380:makeup=1.0[bg_ducked];"
+                f"[v_main][bg_ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.96[aout]"
+            )
             cmd_mix = [
                 ffmpeg_bin,
                 "-hide_banner",
@@ -533,9 +595,9 @@ def render_montage_mp4(
                 "-i",
                 str(global_audio_path),
                 "-t",
-                f"{total_dur:.2f}",
+                f"{total_dur:.3f}",
                 "-filter_complex",
-                f"[1:a]volume={vol:.2f}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                mix_fc,
                 "-map",
                 "0:v:0",
                 "-map",
@@ -546,6 +608,10 @@ def render_montage_mp4(
                 "aac",
                 "-b:a",
                 "192k",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
                 "-movflags",
                 "+faststart",
                 "-y",

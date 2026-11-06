@@ -203,6 +203,8 @@ class RuntimeMemoryManager:
         for item in to_drop:
             try:
                 handle = item.get("handle")
+                if hasattr(handle, "unload") and callable(handle.unload):
+                    handle.unload()
                 if hasattr(handle, "maybe_free_model_hooks"):
                     handle.maybe_free_model_hooks()
             except Exception:

@@ -34,6 +34,11 @@ from studio.config import (
     VIDEOS_OUT_DIR,
     ensure_directories,
 )
+from studio.engines.audio_studio_engine import (
+    AMBIENCE_PRESETS,
+    audio_studio_engine,
+    mix_and_master_media,
+)
 from studio.engines.coherence_engine import (
     load_coherence_vlm_into_memory,
     run_coherence_analysis,
@@ -48,6 +53,7 @@ from studio.engines.image_engine import (
     load_image_model_into_memory,
     process_image_cpu_ffmpeg_only,
 )
+from studio.engines.lipsync_engine import lipsync_engine
 from studio.engines.tts_engine import (
     EDGE_TTS_VOICES,
     load_tts_model_into_memory,
@@ -530,6 +536,32 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
                 job=j,
             ),
         )
+    elif cat == "lipsync":
+        def _load_ls(j: Any) -> Dict[str, Any]:
+            if req.auto_download and not catalog_manager.is_downloaded(req.model_id):
+                catalog_manager.download_model(req.model_id, job=j)
+            lipsync_engine._ensure_loaded(req.model_id, job=j)
+            return {"model_id": req.model_id, "loaded": True}
+
+        job = job_manager.submit(
+            kind="load_model",
+            title=f"Cargar motor LipSync HD: {defn['name']}",
+            fn=_load_ls,
+        )
+    elif cat == "audio":
+        if defn.get("builtin_no_download"):
+            return {"ok": True, "builtin": True, "message": "Sintetizador DSP integrado en CPU (0 GB, sin carga previa)."}
+
+        def _load_aud(j: Any) -> Dict[str, Any]:
+            if req.auto_download and not catalog_manager.is_downloaded(req.model_id):
+                catalog_manager.download_model(req.model_id, job=j)
+            return {"model_id": req.model_id, "ready": True}
+
+        job = job_manager.submit(
+            kind="load_model",
+            title=f"Preparar motor musical/sonoro: {defn['name']}",
+            fn=_load_aud,
+        )
     else:
         raise HTTPException(status_code=400, detail=f"Categoría no soportada: {cat}")
 
@@ -540,7 +572,7 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
 def api_unload_memory(req: MemoryUnloadReq) -> Dict[str, Any]:
     if req.target == "all":
         info = memory_manager.unload_all()
-    elif req.target in ("image", "video", "tts", "vision"):
+    elif req.target in ("image", "video", "tts", "vision", "lipsync", "audio_bgm"):
         info = memory_manager.unload_slot(req.target)
     else:
         info = memory_manager.unload_by_model_id(req.target)
@@ -904,6 +936,213 @@ def api_render_montage(req: MontageRenderReq) -> Dict[str, Any]:
         kind="montage",
         title=f"Montaje MP4 ({len(resolved_items)} planos · {req.width}x{req.height})",
         fn=_do_montage,
+    )
+    return {"ok": True, "job": job.to_dict()}
+
+
+class AudioBgmReq(BaseModel):
+    prompt: str = "warm smooth acoustic jazz piano in a cozy Italian restaurant"
+    model_id: str = "auto"
+    preset: str = "auto"
+    duration_seconds: float = 10.0
+    seed: int = 42
+
+
+class VoiceTrackMixItem(BaseModel):
+    audio_rel: str
+    start_sec: float = 0.0
+    volume: float = 1.0
+
+
+class AudioMixMasterReq(BaseModel):
+    video_rel: Optional[str] = None
+    voice_tracks: List[VoiceTrackMixItem] = Field(default_factory=list)
+    music_rel: Optional[str] = None
+    music_volume: float = 0.24
+    ambient_rel: Optional[str] = None
+    ambient_volume: float = 0.18
+    keep_original_audio: bool = False
+    original_audio_volume: float = 0.35
+    auto_duck_bg: bool = True
+    extend_video_to_audio: bool = True
+    fade_out_seconds: float = 0.80
+
+
+class DialogueTurnReqItem(BaseModel):
+    voice_audio_rel: str
+    target_face: str = "largest"
+    start_sec: float = 0.0
+    volume: float = 1.0
+
+
+class LipSyncReq(BaseModel):
+    media_rel: str
+    voice_audio_rel: Optional[str] = None
+    target_face: str = "largest"
+    dialogue_turns: List[DialogueTurnReqItem] = Field(default_factory=list)
+    model_id: str = "edtalk-256-lipsync-hd"
+    lip_weight: float = 0.85
+    enhance_face: bool = True
+    restore_strength: float = 0.50
+    music_rel: Optional[str] = None
+    music_volume: float = 0.22
+    ambient_rel: Optional[str] = None
+    ambient_volume: float = 0.18
+    extend_video_to_audio: bool = True
+
+
+@app.get("/api/audio/presets")
+def api_audio_presets() -> Dict[str, Any]:
+    return {"ok": True, "presets": AMBIENCE_PRESETS}
+
+
+@app.post("/api/audio/generate-bgm")
+def api_generate_bgm(req: AudioBgmReq) -> Dict[str, Any]:
+    job = job_manager.submit(
+        kind="audio_bgm",
+        title=f"Música / Ambiente ({req.model_id}): {(req.prompt or req.preset)[:38]}",
+        fn=lambda j: audio_studio_engine.generate_music_or_ambience(
+            job=j,
+            prompt=req.prompt,
+            model_id=req.model_id,
+            preset=req.preset,
+            duration_seconds=req.duration_seconds,
+            seed=req.seed,
+        ),
+    )
+    return {"ok": True, "job": job.to_dict()}
+
+
+@app.post("/api/audio/mix-master")
+def api_mix_master(req: AudioMixMasterReq) -> Dict[str, Any]:
+    vid_p = _resolve_media_rel(req.video_rel) if req.video_rel else None
+    if req.video_rel and not vid_p:
+        raise HTTPException(status_code=400, detail=f"No se encontró el vídeo: {req.video_rel}")
+
+    mus_p = _resolve_media_rel(req.music_rel) if req.music_rel else None
+    if req.music_rel and not mus_p:
+        raise HTTPException(status_code=400, detail=f"No se encontró la música: {req.music_rel}")
+
+    amb_p = _resolve_media_rel(req.ambient_rel) if req.ambient_rel else None
+    if req.ambient_rel and not amb_p:
+        raise HTTPException(status_code=400, detail=f"No se encontró el ambiente: {req.ambient_rel}")
+
+    resolved_voices: List[Dict[str, Any]] = []
+    for idx_v, vt in enumerate(req.voice_tracks, start=1):
+        vp = _resolve_media_rel(vt.audio_rel)
+        if not vp:
+            raise HTTPException(status_code=400, detail=f"No se encontró la voz #{idx_v}: {vt.audio_rel}")
+        resolved_voices.append({"path": vp, "start_sec": vt.start_sec, "volume": vt.volume})
+
+    if vid_p is None and not resolved_voices and mus_p is None and amb_p is None:
+        raise HTTPException(status_code=400, detail="Indica al menos un vídeo o una pista de audio para mezclar.")
+
+    def _do_mix(j: Any) -> Dict[str, Any]:
+        ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if vid_p is not None:
+            VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
+            out_name = f"master_{ts_slug}_{j.id[:6]}.mp4"
+            out_path = VIDEOS_OUT_DIR / out_name
+            rel_path = f"outputs/videos/{out_name}"
+            m_type = "video"
+            sidecar_dir = VIDEOS_OUT_DIR
+        else:
+            AUDIO_OUT_DIR.mkdir(parents=True, exist_ok=True)
+            out_name = f"mix_{ts_slug}_{j.id[:6]}.wav"
+            out_path = AUDIO_OUT_DIR / out_name
+            rel_path = f"outputs/audio/{out_name}"
+            m_type = "audio"
+            sidecar_dir = AUDIO_OUT_DIR
+
+        res = mix_and_master_media(
+            output_path=out_path,
+            video_path=vid_p,
+            voice_tracks=resolved_voices,
+            music_path=mus_p,
+            music_volume=req.music_volume,
+            ambient_path=amb_p,
+            ambient_volume=req.ambient_volume,
+            keep_original_audio=req.keep_original_audio,
+            original_audio_volume=req.original_audio_volume,
+            auto_duck_bg=req.auto_duck_bg,
+            extend_video_to_audio=req.extend_video_to_audio,
+            fade_out_seconds=req.fade_out_seconds,
+            job=j,
+        )
+        meta = {
+            "id": out_path.stem,
+            "filename": out_name,
+            "rel_path": rel_path,
+            "media_url": f"/media/{rel_path}",
+            "type": m_type,
+            **res,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        (sidecar_dir / f"{out_path.stem}.json").write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        j.log(f"Mezcla multipista lista: {out_name} ({res['duration_seconds']:.2f}s).", level="success", progress=100.0)
+        return meta
+
+    job = job_manager.submit(
+        kind="audio_mix",
+        title=f"Mezcla Multipista + Auto-Ducking ({len(resolved_voices)} voces)",
+        fn=_do_mix,
+    )
+    return {"ok": True, "job": job.to_dict()}
+
+
+@app.post("/api/video/lipsync")
+def api_lipsync_video(req: LipSyncReq) -> Dict[str, Any]:
+    med_p = _resolve_media_rel(req.media_rel)
+    if not med_p:
+        raise HTTPException(status_code=400, detail=f"No se encontró la imagen o vídeo: {req.media_rel}")
+
+    v_single: Optional[Path] = None
+    if req.voice_audio_rel:
+        v_single = _resolve_media_rel(req.voice_audio_rel)
+        if not v_single:
+            raise HTTPException(status_code=400, detail=f"No se encontró el audio de voz: {req.voice_audio_rel}")
+
+    turns_resolved: List[Dict[str, Any]] = []
+    for idx_t, tr in enumerate(req.dialogue_turns, start=1):
+        vp = _resolve_media_rel(tr.voice_audio_rel)
+        if not vp:
+            raise HTTPException(status_code=400, detail=f"No se encontró el audio del turno #{idx_t}: {tr.voice_audio_rel}")
+        turns_resolved.append(
+            {
+                "voice_path": vp,
+                "target_face": tr.target_face,
+                "start_sec": tr.start_sec,
+                "volume": tr.volume,
+            }
+        )
+
+    if v_single is None and not turns_resolved:
+        raise HTTPException(status_code=400, detail="Indica `voice_audio_rel` o al menos un turno en `dialogue_turns`.")
+
+    mus_p = _resolve_media_rel(req.music_rel) if req.music_rel else None
+    amb_p = _resolve_media_rel(req.ambient_rel) if req.ambient_rel else None
+
+    job = job_manager.submit(
+        kind="lipsync",
+        title=f"LipSync HD ({req.target_face if not turns_resolved else f'{len(turns_resolved)} turnos'} · {med_p.name})",
+        fn=lambda j: lipsync_engine.render_lipsync(
+            job=j,
+            media_path=med_p,
+            voice_audio_path=v_single,
+            target_face=req.target_face,
+            dialogue_turns=turns_resolved if turns_resolved else None,
+            model_id=req.model_id,
+            lip_weight=req.lip_weight,
+            enhance_face=req.enhance_face,
+            restore_strength=req.restore_strength,
+            music_path=mus_p,
+            music_volume=req.music_volume,
+            ambient_path=amb_p,
+            ambient_volume=req.ambient_volume,
+            extend_video_to_audio=req.extend_video_to_audio,
+        ),
     )
     return {"ok": True, "job": job.to_dict()}
 
