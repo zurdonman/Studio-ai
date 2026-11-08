@@ -48,6 +48,16 @@ from studio.engines.ffmpeg_utils import (
     render_montage_mp4,
     verify_image_file,
 )
+from studio.engines.higgsfield_engine import (
+    HIGGSFIELD_MOTIONS,
+    build_character_appearance_from_traits,
+    character_vault,
+    compile_cinema_prompt,
+    get_higgsfield_catalog_payload,
+    render_higgsfield_cpu_motion_clip,
+    run_higgsfield_scene_director,
+    smart_clip_and_reframe_video,
+)
 from studio.engines.image_engine import (
     generate_or_edit_image,
     load_image_model_into_memory,
@@ -1142,6 +1152,328 @@ def api_lipsync_video(req: LipSyncReq) -> Dict[str, Any]:
             ambient_path=amb_p,
             ambient_volume=req.ambient_volume,
             extend_video_to_audio=req.extend_video_to_audio,
+        ),
+    )
+    return {"ok": True, "job": job.to_dict()}
+
+
+# ==================== MODO HIGGSFIELD (100% LOCAL / COLAB · 0€ APIs) ====================
+
+
+class CharacterSaveReq(BaseModel):
+    char_id: Optional[str] = None
+    name: str
+    appearance_prompt: str = ""
+    traits: Dict[str, str] = Field(default_factory=dict)
+    anchor_image_rel: str = ""
+    voice_id: str = "es-ES-AlvaroNeural"
+    default_face_side: str = "largest"
+
+
+class CinemaShotReq(BaseModel):
+    prompt: str
+    camera_id: str = "arri_full_frame_8k"
+    lens_id: str = "classic_anamorphic"
+    focal_mm: str = "35"
+    aperture: str = "f/2.8"
+    lighting_id: str = "natural_cinema"
+    aspect_ratio: str = "16:9"
+    character_ids: List[str] = Field(default_factory=list)
+    base_image_rel: Optional[str] = None
+    seed: int = 0
+
+
+class HiggsfieldMotionReq(BaseModel):
+    image_rel: str
+    end_image_rel: Optional[str] = None
+    prompt: str = ""
+    motion_id: str = "dolly_in_dramatic"
+    engine_mode: str = "auto"  # "auto" | "ai_14b" | "ai_fast" | "ffmpeg_instant"
+    aspect_ratio: str = "16:9"
+    duration_seconds: float = 4.5
+    audio_rel: Optional[str] = None
+    seed: int = 0
+
+
+class SmartClipReq(BaseModel):
+    video_rel: str
+    start_sec: float = 0.0
+    end_sec: float = 0.0
+    target_aspect: str = "9:16"
+    fade_seconds: float = 0.25
+
+
+class SceneDialogueLineReq(BaseModel):
+    character_id: Optional[str] = None
+    voice_id: Optional[str] = None
+    target_face: Optional[str] = None
+    start_sec: Optional[float] = None
+    text: str
+
+
+class HiggsfieldSceneDirectorReq(BaseModel):
+    scene_prompt: str
+    camera_id: str = "arri_full_frame_8k"
+    lens_id: str = "classic_anamorphic"
+    focal_mm: str = "35"
+    aperture: str = "f/2.8"
+    lighting_id: str = "natural_cinema"
+    motion_id: str = "dolly_in_dramatic"
+    video_engine_mode: str = "auto"
+    aspect_ratio: str = "16:9"
+    duration_seconds: float = 4.5
+    base_image_rel: Optional[str] = None
+    character_ids: List[str] = Field(default_factory=list)
+    dialogue_lines: List[SceneDialogueLineReq] = Field(default_factory=list)
+    ambience_preset: str = "none"
+    apply_lipsync: bool = True
+    seed: int = 42
+
+
+@app.get("/api/higgsfield/catalog")
+def api_higgsfield_catalog() -> Dict[str, Any]:
+    return {"ok": True, **get_higgsfield_catalog_payload()}
+
+
+@app.post("/api/higgsfield/characters")
+def api_save_higgsfield_character(req: CharacterSaveReq) -> Dict[str, Any]:
+    app_prompt = req.appearance_prompt.strip()
+    if not app_prompt and req.traits:
+        app_prompt = build_character_appearance_from_traits(req.traits)
+    try:
+        saved = character_vault.save_character(
+            name=req.name,
+            appearance_prompt=app_prompt,
+            anchor_image_rel=req.anchor_image_rel,
+            voice_id=req.voice_id,
+            default_face_side=req.default_face_side,
+            traits=req.traits,
+            char_id=req.char_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "character": saved, "characters": character_vault.list_characters()}
+
+
+@app.delete("/api/higgsfield/characters/{char_id}")
+def api_delete_higgsfield_character(char_id: str) -> Dict[str, Any]:
+    character_vault.delete_character(char_id)
+    return {"ok": True, "characters": character_vault.list_characters()}
+
+
+@app.post("/api/higgsfield/cinema-shot")
+def api_higgsfield_cinema_shot(req: CinemaShotReq) -> Dict[str, Any]:
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="Describe la escena cinematográfica a fotografiar.")
+    chars = [c for cid in req.character_ids if (c := character_vault.get_character(cid)) is not None]
+    compiled = compile_cinema_prompt(
+        user_prompt=req.prompt,
+        camera_id=req.camera_id,
+        lens_id=req.lens_id,
+        focal_mm=req.focal_mm,
+        aperture=req.aperture,
+        lighting_id=req.lighting_id,
+        characters=chars,
+    )
+    anchor_paths: List[Path] = []
+    if req.base_image_rel:
+        bp = _resolve_media_rel(req.base_image_rel)
+        if bp:
+            anchor_paths.append(bp)
+    for ch in chars:
+        ap = _resolve_media_rel(ch.get("anchor_image_rel")) if ch.get("anchor_image_rel") else None
+        if ap and ap not in anchor_paths:
+            anchor_paths.append(ap)
+
+    if req.aspect_ratio == "9:16":
+        w, h = 704, 1280
+    elif req.aspect_ratio == "1:1":
+        w, h = 1024, 1024
+    else:
+        w, h = 1280, 704
+
+    job = job_manager.submit(
+        kind="image",
+        title=f"🎬 Cinema Shot ({req.camera_id} · {req.focal_mm}mm {req.aperture})",
+        fn=lambda j: generate_or_edit_image(
+            prompt=compiled,
+            model_id="qwen-image-edit-2511-pack",
+            base_image_path=anchor_paths[0] if anchor_paths else None,
+            reference_paths=anchor_paths[:3] if len(anchor_paths) > 1 else None,
+            width=w,
+            height=h,
+            steps=4,
+            guidance_scale=1.0,
+            seed=req.seed,
+            use_lightning_lora=True,
+            job=j,
+        ),
+    )
+    return {"ok": True, "compiled_prompt": compiled, "job": job.to_dict()}
+
+
+@app.post("/api/higgsfield/motion-clip")
+def api_higgsfield_motion_clip(req: HiggsfieldMotionReq) -> Dict[str, Any]:
+    img_p = _resolve_media_rel(req.image_rel)
+    if not img_p:
+        raise HTTPException(status_code=400, detail=f"No se encontró la imagen inicial: {req.image_rel}")
+    end_p = _resolve_media_rel(req.end_image_rel) if req.end_image_rel else None
+    aud_p = _resolve_media_rel(req.audio_rel) if req.audio_rel else None
+
+    m_spec = HIGGSFIELD_MOTIONS.get(req.motion_id) or HIGGSFIELD_MOTIONS["dolly_in_dramatic"]
+    full_prompt = f"{req.prompt.strip()}, {m_spec['video_prompt']}".strip(", ")
+
+    if req.aspect_ratio == "9:16":
+        vw, vh = 704, 1280
+    elif req.aspect_ratio == "1:1":
+        vw, vh = 960, 960
+    else:
+        vw, vh = 832, 480
+
+    def _run_hf_motion(j: Any) -> Dict[str, Any]:
+        eff = (req.engine_mode or "auto").lower()
+        if eff == "auto":
+            if catalog_manager.is_downloaded("wan21-vace-14b-fp8"):
+                eff = "ai_14b"
+            elif catalog_manager.is_downloaded("wan21-vace-1.3b"):
+                eff = "ai_fast"
+            else:
+                eff = "ffmpeg_instant"
+
+        if eff in ("ai_14b", "ai_fast"):
+            mid = "wan21-vace-14b-fp8" if eff == "ai_14b" else "wan21-vace-1.3b"
+            lid = "lora-wan21-14b-fusionx-phantom" if eff == "ai_14b" else "lora-wan21-1.3b-bidirect2"
+            if not catalog_manager.is_downloaded(lid):
+                lid = ""
+            submode = "flf2v" if end_p is not None else "i2v"
+            return generate_video_clip(
+                mode="ai",
+                video_submode=submode,
+                model_id=mid,
+                video_lora_id=lid or None,
+                prompt=full_prompt,
+                image_path=img_p,
+                end_image_path=end_p,
+                width=vw,
+                height=vh,
+                duration_seconds=req.duration_seconds,
+                fps=16,
+                steps=6 if lid else 24,
+                guidance_scale=1.0 if lid else 5.0,
+                seed=req.seed,
+                audio_path=aud_p,
+                job=j,
+            )
+
+        t0 = time.time()
+        VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_name = f"hf_motion_{req.motion_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        out_p = VIDEOS_OUT_DIR / out_name
+        if end_p is not None:
+            info = generate_video_clip(
+                mode="ffmpeg_motion",
+                video_submode="flf2v",
+                model_id="ffmpeg-motion-cpu",
+                prompt=full_prompt,
+                image_path=img_p,
+                end_image_path=end_p,
+                width=vw,
+                height=vh,
+                duration_seconds=req.duration_seconds,
+                fps=24,
+                audio_path=aud_p,
+                job=j,
+            )
+            return info
+
+        info = render_higgsfield_cpu_motion_clip(
+            image_path=img_p,
+            output_mp4=out_p,
+            motion_id=req.motion_id,
+            width=vw,
+            height=vh,
+            fps=24,
+            duration_sec=req.duration_seconds,
+            audio_path=aud_p,
+            job=j,
+        )
+        meta = {
+            "id": out_p.stem,
+            "filename": out_name,
+            "rel_path": f"outputs/videos/{out_name}",
+            "media_url": f"/media/outputs/videos/{out_name}",
+            "type": "video",
+            "model_id": "higgsfield-ffmpeg-cpu",
+            "model_name": f"Higgsfield Motion ({m_spec['label']})",
+            "motion_id": req.motion_id,
+            "duration_seconds": info["duration_seconds"],
+            "width": vw,
+            "height": vh,
+            "fps": 24,
+            "elapsed_seconds": round(time.time() - t0, 2),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        (VIDEOS_OUT_DIR / f"{out_p.stem}.json").write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        j.log(f"Clip Higgsfield listo: {out_name} ({info['duration_seconds']}s).", level="success", progress=100.0)
+        return meta
+
+    job = job_manager.submit(
+        kind="video",
+        title=f"🌪️ Higgsfield Motion: {m_spec['label']}",
+        fn=_run_hf_motion,
+    )
+    return {"ok": True, "job": job.to_dict()}
+
+
+@app.post("/api/higgsfield/smart-clip")
+def api_higgsfield_smart_clip(req: SmartClipReq) -> Dict[str, Any]:
+    vid_p = _resolve_media_rel(req.video_rel)
+    if not vid_p:
+        raise HTTPException(status_code=400, detail=f"No se encontró el vídeo: {req.video_rel}")
+    job = job_manager.submit(
+        kind="video",
+        title=f"✂️ Smart Clipper ({req.target_aspect} · {vid_p.name})",
+        fn=lambda j: smart_clip_and_reframe_video(
+            video_path=vid_p,
+            start_sec=req.start_sec,
+            end_sec=req.end_sec,
+            target_aspect=req.target_aspect,
+            fade_seconds=req.fade_seconds,
+            job=j,
+        ),
+    )
+    return {"ok": True, "job": job.to_dict()}
+
+
+@app.post("/api/higgsfield/scene-director")
+def api_higgsfield_scene_director(req: HiggsfieldSceneDirectorReq) -> Dict[str, Any]:
+    if not req.scene_prompt.strip():
+        raise HTTPException(status_code=400, detail="Escribe la descripción de la escena para el Auto-Director.")
+    d_lines = [dl.model_dump() for dl in req.dialogue_lines]
+    job = job_manager.submit(
+        kind="lipsync",
+        title=f"🎬 Auto-Director Higgsfield: {req.scene_prompt.strip()[:36]}",
+        fn=lambda j: run_higgsfield_scene_director(
+            job=j,
+            scene_prompt=req.scene_prompt,
+            resolve_rel_fn=_resolve_media_rel,
+            camera_id=req.camera_id,
+            lens_id=req.lens_id,
+            focal_mm=req.focal_mm,
+            aperture=req.aperture,
+            lighting_id=req.lighting_id,
+            motion_id=req.motion_id,
+            video_engine_mode=req.video_engine_mode,
+            aspect_ratio=req.aspect_ratio,
+            duration_seconds=req.duration_seconds,
+            base_image_rel=req.base_image_rel,
+            character_ids=req.character_ids,
+            dialogue_lines=d_lines,
+            ambience_preset=req.ambience_preset,
+            apply_lipsync=req.apply_lipsync,
+            seed=req.seed,
         ),
     )
     return {"ok": True, "job": job.to_dict()}

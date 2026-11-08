@@ -160,6 +160,20 @@ BRIDGE_ONLY_LOCAL_PROPS: Dict[str, Dict[str, Any]] = {
             "description": "Opcional: ruta local en tu PC/Termux donde guardar el archivo masterizado.",
         },
     },
+    "studio_higgsfield_director": {
+        "local_base_image_path": {
+            "type": "string",
+            "description": "Opcional: ruta local de imagen base en tu PC/Termux.",
+        },
+        "local_video_path": {
+            "type": "string",
+            "description": "Opcional: ruta local de vídeo MP4 para `smart_clip_9_16`.",
+        },
+        "save_to_local_path": {
+            "type": "string",
+            "description": "Opcional: ruta local donde guardar la imagen o vídeo Higgsfield resultante.",
+        },
+    },
 }
 
 DOWNLOAD_ASSET_TOOL_DEF: Dict[str, Any] = {
@@ -199,6 +213,7 @@ ASYNC_JOB_TOOLS = {
     "studio_generate_music_or_sfx",
     "studio_lipsync_character",
     "studio_mix_audio_tracks",
+    "studio_higgsfield_director",
 }
 
 

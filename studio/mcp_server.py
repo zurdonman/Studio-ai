@@ -46,6 +46,21 @@ from studio.engines.coherence_engine import (
     run_coherence_analysis,
 )
 from studio.engines.ffmpeg_utils import probe_media_info, render_montage_mp4, verify_image_file
+from studio.engines.higgsfield_engine import (
+    APERTURES,
+    CINEMA_CAMERAS,
+    CINEMA_LENSES,
+    FOCAL_LENGTHS,
+    HIGGSFIELD_MOTIONS,
+    LIGHTING_MOODS,
+    build_character_appearance_from_traits,
+    character_vault,
+    compile_cinema_prompt,
+    get_higgsfield_catalog_payload,
+    render_higgsfield_cpu_motion_clip,
+    run_higgsfield_scene_director,
+    smart_clip_and_reframe_video,
+)
 from studio.engines.image_engine import (
     generate_or_edit_image,
     load_image_model_into_memory,
@@ -1136,6 +1151,107 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                         "description": "Extender vídeo suavemente (setpts / ping-pong) si las voces duran más que el clip.",
                     },
                     "fade_out_seconds": {"type": "number", "default": 0.80, "minimum": 0.0, "maximum": 4.0},
+                    "wait": {"type": "boolean", "default": True},
+                },
+            },
+        },
+        {
+            "name": "studio_higgsfield_presets_and_cast",
+            "description": (
+                "MODO HIGGSFIELD (100% gratis en Google Colab). Lista todas las cámaras de cine (ARRI 8K, IMAX 70mm, 16mm...), "
+                "lentes ópticas (Anamórfica 2x, 70s Prime, Halation, Swirl Bokeh...), focales (14-85mm), aperturas (f/1.4-f/11), "
+                "los 12 movimientos de cámara Higgsfield (Crash Zoom, Dolly Zoom, Bullet Time, FPV Drone, SnorriCam, Handheld...) "
+                "y las fichas de personajes guardados en el Casting Vault."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {
+            "name": "studio_higgsfield_save_character",
+            "description": (
+                "Guarda, actualiza o elimina un personaje persistente en el Casting Vault de Modo Higgsfield "
+                "(nombre, foto ancla `anchor_image_rel`, rasgos físicos y voz TTS asignada)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["save", "delete"],
+                        "default": "save",
+                    },
+                    "char_id": {"type": "string", "description": "ID existente para actualizar o borrar (opcional al crear)."},
+                    "name": {"type": "string", "description": "Nombre del personaje (ej. 'Marco', 'Lucía')."},
+                    "appearance_prompt": {"type": "string", "description": "Descripción física del rostro, pelo, edad y vestimenta."},
+                    "anchor_image_rel": {"type": "string", "description": "`rel_path` de su retrato/foto ancla en Colab."},
+                    "voice_id": {"type": "string", "enum": voice_ids, "default": "es-ES-AlvaroNeural"},
+                    "default_face_side": {
+                        "type": "string",
+                        "enum": ["largest", "leftmost", "rightmost", "center"],
+                        "default": "largest",
+                    },
+                },
+            },
+        },
+        {
+            "name": "studio_higgsfield_director",
+            "description": (
+                "MODO HIGGSFIELD TODO-EN-UNO (100% local en Colab, 0€ APIs): ejecuta cualquiera de los 4 estudios Higgsfield:\n"
+                "- `action='scene_director'`: crea plano Cinema Studio + anima movimiento Higgsfield + locuta diálogos + LipSync HD + Ambiente Auto-Ducking.\n"
+                "- `action='cinema_shot'`: fotografía un fotograma con Cámara + Lente + Focal + Apertura + Personajes del Vault.\n"
+                "- `action='motion_clip'`: anima una imagen con un preset Higgsfield Motion (`crash_zoom`, `dolly_zoom_vertigo`, `bullet_time_orbit`, etc.).\n"
+                "- `action='smart_clip_9_16'`: recorta y reencuadra inteligentemente al rostro un vídeo 16:9 a formato vertical 9:16 Reels/Shorts."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["scene_director", "cinema_shot", "motion_clip", "smart_clip_9_16"],
+                        "default": "scene_director",
+                    },
+                    "prompt": {"type": "string", "description": "Acción o escena cinematográfica."},
+                    "camera_id": {"type": "string", "enum": list(CINEMA_CAMERAS.keys()), "default": "arri_full_frame_8k"},
+                    "lens_id": {"type": "string", "enum": list(CINEMA_LENSES.keys()), "default": "classic_anamorphic"},
+                    "focal_mm": {"type": "string", "enum": list(FOCAL_LENGTHS.keys()), "default": "35"},
+                    "aperture": {"type": "string", "enum": list(APERTURES.keys()), "default": "f/2.8"},
+                    "lighting_id": {"type": "string", "enum": list(LIGHTING_MOODS.keys()), "default": "natural_cinema"},
+                    "motion_id": {"type": "string", "enum": list(HIGGSFIELD_MOTIONS.keys()), "default": "dolly_in_dramatic"},
+                    "video_engine_mode": {
+                        "type": "string",
+                        "enum": ["auto", "ai_14b", "ai_fast", "ffmpeg_instant"],
+                        "default": "auto",
+                    },
+                    "aspect_ratio": {"type": "string", "enum": ["16:9", "9:16", "1:1"], "default": "16:9"},
+                    "duration_seconds": {"type": "number", "default": 4.5, "minimum": 1.5, "maximum": 15.0},
+                    "base_image_rel": {"type": "string", "description": "Imagen inicial opcional (para `cinema_shot`, `motion_clip` o `scene_director`)."},
+                    "video_rel": {"type": "string", "description": "Vídeo de entrada cuando `action='smart_clip_9_16'`."},
+                    "start_sec": {"type": "number", "default": 0.0},
+                    "end_sec": {"type": "number", "default": 0.0},
+                    "character_ids": {"type": "array", "items": {"type": "string"}},
+                    "dialogue_lines": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "character_id": {"type": "string"},
+                                "voice_id": {"type": "string"},
+                                "target_face": {"type": "string", "enum": ["largest", "leftmost", "rightmost", "center"]},
+                                "start_sec": {"type": "number"},
+                                "text": {"type": "string"},
+                            },
+                            "required": ["text"],
+                        },
+                    },
+                    "ambience_preset": {
+                        "type": "string",
+                        "enum": ["none"] + list(AMBIENCE_PRESETS.keys()),
+                        "default": "none",
+                    },
+                    "apply_lipsync": {"type": "boolean", "default": True},
+                    "seed": {"type": "integer", "default": 42},
                     "wait": {"type": "boolean", "default": True},
                 },
             },
@@ -2401,6 +2517,190 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "lines_count": log_content.count("\n"),
             }
         )
+
+    # 19. Modo Higgsfield: listar cámaras, lentes, movimientos y Casting Vault
+    if name == "studio_higgsfield_presets_and_cast":
+        return _ok_result({"ok": True, **get_higgsfield_catalog_payload()})
+
+    # 20. Modo Higgsfield: gestionar fichas del Casting Vault
+    if name == "studio_higgsfield_save_character":
+        act = str(args.get("action") or "save").strip().lower()
+        if act == "delete":
+            cid = str(args.get("char_id") or "").strip()
+            if not cid:
+                return _guided_error("MISSING_CHAR_ID", "Indica `char_id` para borrar.", "Consulta `studio_higgsfield_presets_and_cast`.")
+            deleted = character_vault.delete_character(cid)
+            return _ok_result({"ok": True, "deleted": deleted, "characters": character_vault.list_characters()})
+
+        cname = str(args.get("name") or "").strip()
+        if not cname:
+            return _guided_error("MISSING_CHARACTER_NAME", "Falta `name` para guardar el personaje.", "Ejemplo: `name='Marco'`.")
+        saved = character_vault.save_character(
+            name=cname,
+            appearance_prompt=str(args.get("appearance_prompt") or ""),
+            anchor_image_rel=str(args.get("anchor_image_rel") or ""),
+            voice_id=str(args.get("voice_id") or "es-ES-AlvaroNeural"),
+            default_face_side=str(args.get("default_face_side") or "largest"),
+            char_id=str(args.get("char_id") or "") or None,
+        )
+        return _ok_result({"ok": True, "character": saved, "characters": character_vault.list_characters()})
+
+    # 21. Modo Higgsfield: Auto-Director, Cinema Shot, Higgsfield Motion y Smart Clipper 9:16
+    if name == "studio_higgsfield_director":
+        act = str(args.get("action") or "scene_director").strip().lower()
+        wait_flag = bool(args.get("wait", True))
+
+        if act == "smart_clip_9_16":
+            try:
+                vp = _resolve_rel_safe(args.get("video_rel"))
+            except (ValueError, FileNotFoundError) as exc:
+                return _guided_error("CLIP_VIDEO_NOT_FOUND", str(exc), "Verifica `video_rel` con `studio_list_assets`.")
+            if vp is None:
+                return _guided_error("MISSING_VIDEO_REL", "Falta `video_rel` para recortar a 9:16.", "Pasa el `rel_path` de un MP4.")
+            t_asp = str(args.get("aspect_ratio") or "9:16")
+            st_s = float(args.get("start_sec") or 0.0)
+            en_s = float(args.get("end_sec") or 0.0)
+            job = job_manager.submit(
+                kind="video",
+                title=f"[MCP] ✂️ Smart Clipper ({t_asp} · {vp.name})",
+                fn=lambda j: smart_clip_and_reframe_video(vp, start_sec=st_s, end_sec=en_s, target_aspect=t_asp, job=j),
+            )
+            return _ok_result({"ok": True, "job_id": job.id, "status": job.status} if not wait_flag else _wait_for_job_bounded(job.id))
+
+        if act == "cinema_shot":
+            prm = str(args.get("prompt") or "").strip()
+            if not prm:
+                return _guided_error("MISSING_CINEMA_PROMPT", "Falta `prompt` para `cinema_shot`.", "Describe el plano deseado.")
+            cids = list(args.get("character_ids") or [])
+            chars = [c for cid in cids if (c := character_vault.get_character(cid)) is not None]
+            compiled = compile_cinema_prompt(
+                user_prompt=prm,
+                camera_id=str(args.get("camera_id") or "arri_full_frame_8k"),
+                lens_id=str(args.get("lens_id") or "classic_anamorphic"),
+                focal_mm=str(args.get("focal_mm") or "35"),
+                aperture=str(args.get("aperture") or "f/2.8"),
+                lighting_id=str(args.get("lighting_id") or "natural_cinema"),
+                characters=chars,
+            )
+            anchors: List[Path] = []
+            if args.get("base_image_rel"):
+                bp = _resolve_rel_safe(args.get("base_image_rel"))
+                if bp:
+                    anchors.append(bp)
+            for ch in chars:
+                ap = _resolve_rel_safe(ch.get("anchor_image_rel")) if ch.get("anchor_image_rel") else None
+                if ap and ap not in anchors:
+                    anchors.append(ap)
+            asp = str(args.get("aspect_ratio") or "16:9")
+            w, h = (704, 1280) if asp == "9:16" else ((1024, 1024) if asp == "1:1" else (1280, 704))
+            sd = int(args.get("seed") if args.get("seed") is not None else 42)
+            job = job_manager.submit(
+                kind="image",
+                title=f"[MCP] 🎬 Cinema Shot ({args.get('camera_id', 'arri')} · {args.get('focal_mm', '35')}mm)",
+                fn=lambda j: generate_or_edit_image(
+                    prompt=compiled,
+                    model_id="qwen-image-edit-2511-pack",
+                    base_image_path=anchors[0] if anchors else None,
+                    reference_paths=anchors[:3] if len(anchors) > 1 else None,
+                    width=w,
+                    height=h,
+                    steps=4,
+                    guidance_scale=1.0,
+                    seed=sd,
+                    use_lightning_lora=True,
+                    job=j,
+                ),
+            )
+            return _ok_result({"ok": True, "job_id": job.id, "status": job.status} if not wait_flag else _wait_for_job_bounded(job.id))
+
+        if act == "motion_clip":
+            img_p = _resolve_rel_safe(args.get("base_image_rel"))
+            if img_p is None:
+                return _guided_error("MISSING_BASE_IMAGE", "Indica `base_image_rel` para `motion_clip`.", "Pasa el `rel_path` de una imagen.")
+            mot_id = str(args.get("motion_id") or "dolly_in_dramatic")
+            m_spec = HIGGSFIELD_MOTIONS.get(mot_id) or HIGGSFIELD_MOTIONS["dolly_in_dramatic"]
+            asp = str(args.get("aspect_ratio") or "16:9")
+            vw, vh = (704, 1280) if asp == "9:16" else ((960, 960) if asp == "1:1" else (832, 480))
+            dur_s = float(args.get("duration_seconds") or 4.5)
+            eng_m = str(args.get("video_engine_mode") or "auto").lower()
+
+            def _do_mcp_hf_mot(j: Any) -> Dict[str, Any]:
+                eff = eng_m
+                if eff == "auto":
+                    eff = "ai_14b" if catalog_manager.is_downloaded("wan21-vace-14b-fp8") else (
+                        "ai_fast" if catalog_manager.is_downloaded("wan21-vace-1.3b") else "ffmpeg_instant"
+                    )
+                if eff in ("ai_14b", "ai_fast"):
+                    mid = "wan21-vace-14b-fp8" if eff == "ai_14b" else "wan21-vace-1.3b"
+                    lid = "lora-wan21-14b-fusionx-phantom" if eff == "ai_14b" else "lora-wan21-1.3b-bidirect2"
+                    if not catalog_manager.is_downloaded(lid):
+                        lid = ""
+                    return generate_video_clip(
+                        mode="ai",
+                        video_submode="i2v",
+                        model_id=mid,
+                        video_lora_id=lid or None,
+                        prompt=f"{args.get('prompt', '')}, {m_spec['video_prompt']}".strip(", "),
+                        image_path=img_p,
+                        width=vw,
+                        height=vh,
+                        duration_seconds=dur_s,
+                        fps=16,
+                        steps=6 if lid else 24,
+                        guidance_scale=1.0 if lid else 5.0,
+                        seed=int(args.get("seed") or 42),
+                        job=j,
+                    )
+                VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
+                oname = f"hf_motion_{mot_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+                op = VIDEOS_OUT_DIR / oname
+                info = render_higgsfield_cpu_motion_clip(img_p, op, motion_id=mot_id, width=vw, height=vh, fps=24, duration_sec=dur_s, job=j)
+                meta = {
+                    "id": op.stem,
+                    "filename": oname,
+                    "rel_path": f"outputs/videos/{oname}",
+                    "media_url": f"/media/outputs/videos/{oname}",
+                    "type": "video",
+                    "motion_id": mot_id,
+                    "duration_seconds": info["duration_seconds"],
+                    "width": vw,
+                    "height": vh,
+                }
+                (VIDEOS_OUT_DIR / f"{op.stem}.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                return meta
+
+            job = job_manager.submit(kind="video", title=f"[MCP] 🌪️ Higgsfield Motion: {m_spec['label']}", fn=_do_mcp_hf_mot)
+            return _ok_result({"ok": True, "job_id": job.id, "status": job.status} if not wait_flag else _wait_for_job_bounded(job.id))
+
+        # Default: `scene_director`
+        s_prompt = str(args.get("prompt") or "").strip()
+        if not s_prompt:
+            return _guided_error("MISSING_SCENE_PROMPT", "Falta `prompt` para `scene_director`.", "Describe la escena que quieres dirigir.")
+        job = job_manager.submit(
+            kind="lipsync",
+            title=f"[MCP] 🎬 Auto-Director Higgsfield: {s_prompt[:36]}",
+            fn=lambda j: run_higgsfield_scene_director(
+                job=j,
+                scene_prompt=s_prompt,
+                resolve_rel_fn=lambda r: _resolve_rel_safe(r) if r else None,
+                camera_id=str(args.get("camera_id") or "arri_full_frame_8k"),
+                lens_id=str(args.get("lens_id") or "classic_anamorphic"),
+                focal_mm=str(args.get("focal_mm") or "35"),
+                aperture=str(args.get("aperture") or "f/2.8"),
+                lighting_id=str(args.get("lighting_id") or "natural_cinema"),
+                motion_id=str(args.get("motion_id") or "dolly_in_dramatic"),
+                video_engine_mode=str(args.get("video_engine_mode") or "auto"),
+                aspect_ratio=str(args.get("aspect_ratio") or "16:9"),
+                duration_seconds=float(args.get("duration_seconds") or 4.5),
+                base_image_rel=args.get("base_image_rel"),
+                character_ids=list(args.get("character_ids") or []),
+                dialogue_lines=list(args.get("dialogue_lines") or []),
+                ambience_preset=str(args.get("ambience_preset") or "none"),
+                apply_lipsync=bool(args.get("apply_lipsync", True)),
+                seed=int(args.get("seed") if args.get("seed") is not None else 42),
+            ),
+        )
+        return _ok_result({"ok": True, "job_id": job.id, "status": job.status} if not wait_flag else _wait_for_job_bounded(job.id))
 
     return _guided_error(
         "UNKNOWN_TOOL",

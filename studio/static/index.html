@@ -110,20 +110,39 @@
     </div>
   </div>
 
-  <!-- NAVEGACIÓN PRINCIPAL DE 4 PASOS + CATÁLOGO -->
+  <!-- SELECTOR DE MODO (MODO NORMAL <-> MODO HIGGSFIELD 100% LOCAL COLAB) + PESTAÑAS -->
   <nav class="main-tabs">
-    <button class="tab-btn active" data-tab="tab-image">
-      <span class="step-num">1</span> Imagen · Qwen + LoRAs
-    </button>
-    <button class="tab-btn" data-tab="tab-video">
-      <span class="step-num">2</span> Vídeo · Clips IA / FFmpeg
-    </button>
-    <button class="tab-btn" data-tab="tab-tts">
-      <span class="step-num">3</span> Voces · Texto a Voz
-    </button>
-    <button class="tab-btn" data-tab="tab-montage">
-      <span class="step-num">4</span> Montaje Final · MP4
-    </button>
+    <div class="workspace-mode-switch" role="group" aria-label="Modo de trabajo">
+      <button type="button" class="mode-switch-btn active" id="btn-mode-normal" data-mode="normal" title="Flujo técnico paso a paso original de Studio IA">
+        🛠️ Modo Normal
+      </button>
+      <button type="button" class="mode-switch-btn mode-higgsfield-btn" id="btn-mode-higgsfield" data-mode="higgsfield" title="Cinema Studio óptico, presets de cámara Higgsfield, Casting de Personajes, Auto-Director y Smart Reels 9:16 (100% gratis en tu Colab)">
+        🎬 Modo Higgsfield <span class="hf-free-pill">0€ Local</span>
+      </button>
+    </div>
+
+    <div class="normal-tabs-group" id="normal-tabs-group">
+      <button class="tab-btn active" data-tab="tab-image">
+        <span class="step-num">1</span> Imagen · Qwen + LoRAs
+      </button>
+      <button class="tab-btn" data-tab="tab-video">
+        <span class="step-num">2</span> Vídeo · Clips IA / FFmpeg
+      </button>
+      <button class="tab-btn" data-tab="tab-tts">
+        <span class="step-num">3</span> Voces · Texto a Voz
+      </button>
+      <button class="tab-btn" data-tab="tab-montage">
+        <span class="step-num">4</span> Montaje Final · MP4
+      </button>
+    </div>
+
+    <div class="higgsfield-tabs-group" id="higgsfield-tabs-group" hidden>
+      <button type="button" class="hf-subtab-btn active" data-hf-sub="hf-sub-director">🎬 Auto-Director 1-Clic</button>
+      <button type="button" class="hf-subtab-btn" data-hf-sub="hf-sub-cinema">🎥 Cinema Studio Óptico</button>
+      <button type="button" class="hf-subtab-btn" data-hf-sub="hf-sub-motion">🌪️ Higgsfield Motion</button>
+      <button type="button" class="hf-subtab-btn" data-hf-sub="hf-sub-cast">👤 Casting + ✂️ Reels 9:16</button>
+    </div>
+
     <button class="tab-btn tab-catalog-btn" data-tab="tab-catalog">
       📦 Catálogo HF y Memoria <span class="loaded-pill" id="nav-loaded-count">0 en VRAM</span>
     </button>
@@ -976,6 +995,388 @@
                 <button class="btn btn-secondary" id="btn-add-custom-hf">Añadir</button>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== MODO HIGGSFIELD (100% GRATIS LOCAL / COLAB) ==================== -->
+      <section id="tab-higgsfield" class="view-panel higgsfield-panel">
+        <div class="hf-hero-banner">
+          <div>
+            <div class="row-gap" style="flex-wrap:wrap;">
+              <span class="hf-brand-tag">🎬 MODO HIGGSFIELD · CINEMA & DIRECTOR SUITE</span>
+              <span class="inline-badge-ok">100 % Gratis en tu Google Colab · Sin APIs de pago</span>
+            </div>
+            <p class="muted" style="margin:4px 0 0 0;">
+              Óptica real de cine (ARRI 8K, IMAX 70mm, Anamórfica 2x), 12 movimientos de cámara icónicos, Casting de Personajes persistente, LipSync HD con Auto-Ducking y recortador vertical 9:16 ejecutándose directamente sobre tus motores locales.
+            </p>
+          </div>
+        </div>
+
+        <div class="two-col">
+          <!-- COLUMNA IZQUIERDA HIGGSFIELD: CONTROLES DEL SUB-ESTUDIO ACTIVO -->
+          <div>
+
+            <!-- SUB-ESTUDIO 1: AUTO-DIRECTOR ESCENA COMPLETA EN 1 CLIC -->
+            <div id="hf-sub-director" class="card hf-subpanel">
+              <div class="card-header">
+                <h3>🎬 Auto-Director de Escena Completa (1 Clic)</h3>
+                <span class="muted">Plano Cine → Cámara Higgsfield → Voces → LipSync HD → Ambiente</span>
+              </div>
+
+              <label class="field-label" for="hf-dir-prompt">¿Qué ocurre en la escena?</label>
+              <textarea id="hf-dir-prompt" rows="3" placeholder="Ej: Dos amigos cenando en la mesa de un restaurante italiano íntimo con velas cálidas, conversando con gestos naturales..."></textarea>
+
+              <div class="form-row-3" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-dir-camera">🎥 Cámara de Cine</label>
+                  <select id="hf-dir-camera"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-dir-lens">🔭 Lente Óptica</label>
+                  <select id="hf-dir-lens"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-dir-lighting">🌤️ Luz y Color</label>
+                  <select id="hf-dir-lighting"></select>
+                </div>
+              </div>
+
+              <div class="form-row-3" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-dir-focal">Focal</label>
+                  <select id="hf-dir-focal"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-dir-aperture">Apertura</label>
+                  <select id="hf-dir-aperture"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-dir-motion">🌪️ Movimiento Higgsfield</label>
+                  <select id="hf-dir-motion"></select>
+                </div>
+              </div>
+
+              <div class="form-row-3" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-dir-engine">Motor de Vídeo</label>
+                  <select id="hf-dir-engine">
+                    <option value="auto" selected>⚡ Automático Inteligente (14B → 1.3B → FFmpeg)</option>
+                    <option value="ffmpeg_instant">🚀 Instantáneo Óptico CPU (~1.5s · 0 GB VRAM)</option>
+                    <option value="ai_14b">🎥 Wan 2.1 VACE 14B FP8 Cine</option>
+                    <option value="ai_fast">⚡ Wan 2.1 VACE 1.3B Ligero</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-dir-aspect">Formato</label>
+                  <select id="hf-dir-aspect">
+                    <option value="16:9" selected>16:9 Cine Horizontal</option>
+                    <option value="9:16">9:16 Vertical Reels/TikTok</option>
+                    <option value="1:1">1:1 Cuadrado</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-dir-ambience">🎵 Ambiente Sonoro (Auto-Duck)</label>
+                  <select id="hf-dir-ambience">
+                    <option value="none">Sin ambiente de fondo</option>
+                    <option value="restaurant_warm_murmur" selected>🍽️ Restaurante Cálido Íntimo</option>
+                    <option value="rain_cozy">🌧️ Lluvia Suave Cinematográfica</option>
+                    <option value="cinematic_warm_pad">🎻 Pad Cinematográfico Cálido</option>
+                    <option value="wind_nature">🍃 Exterior Brisa Natural</option>
+                    <option value="room_tone_clean">🎙️ Room Tone Estudio</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-row-2" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-dir-char1">👤 Personaje 1 (Casting Vault opcional)</label>
+                  <select id="hf-dir-char1"><option value="">— Sin ficha asignada —</option></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-dir-char2">👤 Personaje 2 (Casting Vault opcional)</label>
+                  <select id="hf-dir-char2"><option value="">— Sin segundo personaje —</option></select>
+                </div>
+              </div>
+
+              <div class="form-row-2" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-dir-base-img">Fotograma base existente (opcional, ahorra paso 1)</label>
+                  <select id="hf-dir-base-img"><option value="">✨ Generar fotograma Cinema Studio nuevo</option></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-dir-dur">Duración mínima (s)</label>
+                  <input type="number" id="hf-dir-dur" value="4.5" min="2" max="14" step="0.5" />
+                </div>
+              </div>
+
+              <div class="subcard" style="margin-top:10px;">
+                <div class="row-between">
+                  <strong>🗣️ Diálogo Opcional (Locución + LipSync HD Automático)</strong>
+                  <label class="check-row" style="margin:0;">
+                    <input type="checkbox" id="hf-dir-lipsync" checked />
+                    <span>Aplicar LipSync HD si está descargado</span>
+                  </label>
+                </div>
+                <div class="form-row-2" style="margin-top:6px;">
+                  <div>
+                    <label class="field-label">Línea 1 (Rostro Izquierda / Principal)</label>
+                    <input type="text" id="hf-dir-line1" placeholder="Ej: ¡Brindemos por haber terminado el rodaje!" />
+                  </div>
+                  <div>
+                    <label class="field-label">Voz Línea 1</label>
+                    <select id="hf-dir-voice1"></select>
+                  </div>
+                </div>
+                <div class="form-row-2" style="margin-top:6px;">
+                  <div>
+                    <label class="field-label">Línea 2 (Rostro Derecha — respuesta opcional)</label>
+                    <input type="text" id="hf-dir-line2" placeholder="Ej: Ha quedado de película, ¡mira esa luz!" />
+                  </div>
+                  <div>
+                    <label class="field-label">Voz Línea 2</label>
+                    <select id="hf-dir-voice2"></select>
+                  </div>
+                </div>
+              </div>
+
+              <button class="btn btn-primary btn-lg full-w" id="btn-hf-run-director" style="margin-top:12px;">
+                🎬 Rodar Escena Higgsfield Completa (1 Clic)
+              </button>
+            </div>
+
+            <!-- SUB-ESTUDIO 2: CINEMA PHOTO STUDIO ÓPTICO -->
+            <div id="hf-sub-cinema" class="card hf-subpanel" hidden>
+              <div class="card-header">
+                <h3>🎥 Cinema Studio — Fotografía con Óptica Real</h3>
+                <span class="muted">Compilador óptico IMAX / ARRI / Anamórfico sobre Qwen 2511</span>
+              </div>
+
+              <label class="field-label" for="hf-cin-prompt">Descripción del plano</label>
+              <textarea id="hf-cin-prompt" rows="3" placeholder="Ej: Retrato cinematográfico bajo la lluvia frente a un escaparate iluminado..."></textarea>
+
+              <div class="form-row-2" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-cin-camera">Cámara</label>
+                  <select id="hf-cin-camera"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-cin-lens">Lente</label>
+                  <select id="hf-cin-lens"></select>
+                </div>
+              </div>
+
+              <div class="form-row-3" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-cin-focal">Focal</label>
+                  <select id="hf-cin-focal"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-cin-aperture">Apertura</label>
+                  <select id="hf-cin-aperture"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-cin-lighting">Iluminación / Color</label>
+                  <select id="hf-cin-lighting"></select>
+                </div>
+              </div>
+
+              <div class="form-row-3" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-cin-char">Personaje del Vault</label>
+                  <select id="hf-cin-char"><option value="">— Ninguno —</option></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-cin-aspect">Formato</label>
+                  <select id="hf-cin-aspect">
+                    <option value="16:9" selected>16:9 Widescreen</option>
+                    <option value="9:16">9:16 Vertical</option>
+                    <option value="1:1">1:1 Cuadrado</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-cin-seed">Semilla (0 = azar)</label>
+                  <input type="number" id="hf-cin-seed" value="0" min="0" />
+                </div>
+              </div>
+
+              <button class="btn btn-primary btn-lg full-w" id="btn-hf-shoot-cinema" style="margin-top:12px;">
+                📸 Disparar Fotograma Cinema Studio
+              </button>
+            </div>
+
+            <!-- SUB-ESTUDIO 3: HIGGSFIELD MOTION STUDIO -->
+            <div id="hf-sub-motion" class="card hf-subpanel" hidden>
+              <div class="card-header">
+                <h3>🌪️ Higgsfield Motion — Movimientos de Cámara</h3>
+                <span class="muted">Anima cualquier fotograma con movimientos de cine en 1 clic</span>
+              </div>
+
+              <div class="form-row-2">
+                <div>
+                  <label class="field-label" for="hf-mot-img">Fotograma Inicial</label>
+                  <select id="hf-mot-img"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-mot-end-img">Fotograma Final (opcional · Start→End)</label>
+                  <select id="hf-mot-end-img"><option value="">— Libre (solo fotograma inicial) —</option></select>
+                </div>
+              </div>
+
+              <label class="field-label" style="margin-top:10px;">Elige el Movimiento de Cámara Higgsfield</label>
+              <div class="hf-motion-grid" id="hf-motion-pills"></div>
+              <input type="hidden" id="hf-mot-selected" value="dolly_in_dramatic" />
+
+              <label class="field-label" for="hf-mot-prompt" style="margin-top:8px;">Detalle extra de acción (opcional)</label>
+              <input type="text" id="hf-mot-prompt" placeholder="Ej: el viento mueve suavemente el abrigo mientras parpadea..." />
+
+              <div class="form-row-3" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-mot-engine">Motor</label>
+                  <select id="hf-mot-engine">
+                    <option value="auto" selected>⚡ Auto (14B → 1.3B → FFmpeg)</option>
+                    <option value="ffmpeg_instant">🚀 Óptico CPU (~1.5s · 0 GB)</option>
+                    <option value="ai_14b">🎥 Wan 14B FP8</option>
+                    <option value="ai_fast">⚡ Wan 1.3B</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-mot-aspect">Formato</label>
+                  <select id="hf-mot-aspect">
+                    <option value="16:9" selected>16:9 Horizontal</option>
+                    <option value="9:16">9:16 Vertical</option>
+                    <option value="1:1">1:1 Cuadrado</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-mot-dur">Duración (s)</label>
+                  <input type="number" id="hf-mot-dur" value="4.5" min="1.5" max="12" step="0.5" />
+                </div>
+              </div>
+
+              <button class="btn btn-primary btn-lg full-w" id="btn-hf-run-motion" style="margin-top:12px;">
+                🌪️ Animar Plano con Higgsfield Motion
+              </button>
+            </div>
+
+            <!-- SUB-ESTUDIO 4: CASTING VAULT DE PERSONAJES + SMART CLIPPER 9:16 REELS -->
+            <div id="hf-sub-cast" class="hf-subpanel" hidden>
+              <div class="card">
+                <div class="card-header">
+                  <h3>👤 Casting Vault — Creador de Personajes Persistentes</h3>
+                  <span class="muted">Guarda identidad facial + rasgos + voz para usarlos en cualquier escena</span>
+                </div>
+
+                <div class="form-row-2">
+                  <div>
+                    <label class="field-label" for="hf-char-name">Nombre del Personaje</label>
+                    <input type="text" id="hf-char-name" placeholder="Ej: Marco / Detective Lucía" />
+                  </div>
+                  <div>
+                    <label class="field-label" for="hf-char-anchor">Foto Ancla Facial (de tu galería)</label>
+                    <select id="hf-char-anchor"><option value="">— Selecciona retrato existente —</option></select>
+                  </div>
+                </div>
+
+                <div class="form-row-3" style="margin-top:8px;">
+                  <div>
+                    <label class="field-label">Género y Edad</label>
+                    <input type="text" id="hf-trait-age" placeholder="Ej: mujer de 30 años" />
+                  </div>
+                  <div>
+                    <label class="field-label">Pelo y Ojos</label>
+                    <input type="text" id="hf-trait-hair" placeholder="Ej: melena castaña ondulada, ojos verdes" />
+                  </div>
+                  <div>
+                    <label class="field-label">Vestimenta / Estilo</label>
+                    <input type="text" id="hf-trait-outfit" placeholder="Ej: chaqueta cuero negra cine" />
+                  </div>
+                </div>
+
+                <div class="form-row-2" style="margin-top:8px;">
+                  <div>
+                    <label class="field-label" for="hf-char-voice">Voz TTS Predeterminada</label>
+                    <select id="hf-char-voice"></select>
+                  </div>
+                  <div>
+                    <label class="field-label" for="hf-char-side">Posición habitual en diálogos</label>
+                    <select id="hf-char-side">
+                      <option value="largest" selected>🎯 Rostro Principal</option>
+                      <option value="leftmost">⬅️ Izquierda del plano</option>
+                      <option value="rightmost">➡️ Derecha del plano</option>
+                    </select>
+                  </div>
+                </div>
+
+                <button class="btn btn-primary full-w" id="btn-hf-save-char" style="margin-top:10px;">
+                  💾 Guardar Personaje en Casting Vault
+                </button>
+
+                <div id="hf-characters-list" class="hf-char-cards" style="margin-top:10px;"></div>
+              </div>
+
+              <div class="card" style="margin-top:12px;">
+                <div class="card-header">
+                  <h3>✂️ Smart Clipper & Extractor Vertical 9:16 (Reels / Shorts)</h3>
+                  <span class="muted">Centrado facial automático con OpenCV + FFmpeg BT.709 (0 GB VRAM)</span>
+                </div>
+
+                <div class="form-row-2">
+                  <div>
+                    <label class="field-label" for="hf-clip-video">Vídeo MP4 a reencuadrar / recortar</label>
+                    <select id="hf-clip-video"></select>
+                  </div>
+                  <div>
+                    <label class="field-label" for="hf-clip-aspect">Formato Destino</label>
+                    <select id="hf-clip-aspect">
+                      <option value="9:16" selected>📱 9:16 Vertical (Reels / TikTok / Shorts)</option>
+                      <option value="1:1">🟦 1:1 Cuadrado</option>
+                      <option value="16:9">🖥️ 16:9 Horizontal</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-row-2" style="margin-top:8px;">
+                  <div>
+                    <label class="field-label" for="hf-clip-start">Inicio (seg)</label>
+                    <input type="number" id="hf-clip-start" value="0" min="0" step="0.5" />
+                  </div>
+                  <div>
+                    <label class="field-label" for="hf-clip-end">Fin (seg · 0 = hasta el final)</label>
+                    <input type="number" id="hf-clip-end" value="0" min="0" step="0.5" />
+                  </div>
+                </div>
+
+                <button class="btn btn-secondary full-w" id="btn-hf-smart-clip" style="margin-top:10px;">
+                  ✂️ Extraer y Reencuadrar Clip Inteligente
+                </button>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- COLUMNA DERECHA HIGGSFIELD: VISOR CINEMA EN VIVO -->
+          <div class="card preview-card">
+            <div class="card-header">
+              <h3>🎬 Monitor de Rodaje Higgsfield</h3>
+              <span class="muted" id="hf-preview-meta">Listo para rodar en tu Colab</span>
+            </div>
+
+            <div class="stage-box" id="hf-stage-box">
+              <div class="empty-stage" id="hf-empty-stage">
+                <div class="empty-icon">🎬</div>
+                <p>Tus planos Cinema Studio, clips Higgsfield Motion, escenas dirigidas y Reels 9:16 aparecerán aquí al instante.</p>
+              </div>
+              <img id="hf-result-img" class="stage-media" hidden alt="Fotograma Cinema Studio" />
+              <video id="hf-result-video" class="stage-media" controls playsinline hidden></video>
+            </div>
+
+            <div class="quick-send-row" id="hf-result-actions" hidden style="margin-top:10px;">
+              <a class="btn btn-primary btn-sm" id="btn-hf-download" href="#" download>⬇ Descargar Resultado</a>
+              <button class="btn btn-secondary btn-sm" id="btn-hf-send-to-montage">➕ Enviar a Montaje Final</button>
+            </div>
+
+            <div class="provenance-box" id="hf-compiled-prompt-box" hidden style="margin-top:8px;"></div>
           </div>
         </div>
       </section>

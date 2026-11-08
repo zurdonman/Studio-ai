@@ -77,7 +77,27 @@
     return data;
   }
 
+  function setWorkspaceMode(mode) {
+    state.workspaceMode = mode === "higgsfield" ? "higgsfield" : "normal";
+    const isHf = state.workspaceMode === "higgsfield";
+    if ($("btn-mode-normal")) $("btn-mode-normal").classList.toggle("active", !isHf);
+    if ($("btn-mode-higgsfield")) $("btn-mode-higgsfield").classList.toggle("active", isHf);
+    if ($("normal-tabs-group")) $("normal-tabs-group").hidden = isHf;
+    if ($("higgsfield-tabs-group")) $("higgsfield-tabs-group").hidden = !isHf;
+    if (isHf) {
+      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".view-panel").forEach((p) => {
+        p.classList.toggle("active", p.id === "tab-higgsfield");
+      });
+    } else {
+      switchTab(state.lastNormalTab || "tab-image");
+    }
+  }
+
   function switchTab(tabId) {
+    if (tabId !== "tab-catalog" && tabId !== "tab-higgsfield") {
+      state.lastNormalTab = tabId;
+    }
     document.querySelectorAll(".tab-btn").forEach((b) => {
       b.classList.toggle("active", b.dataset.tab === tabId);
     });
@@ -400,6 +420,9 @@
   async function handleJobCompleted(job) {
     await Promise.all([loadCatalog(), loadAssets()]);
     const res = job.result || {};
+    if (res && res.media_url && state.workspaceMode === "higgsfield") {
+      showHiggsfieldStageResult(res);
+    }
     if (job.kind === "image" && res.media_url) {
       showImageResult(res);
       toast("Imagen lista y verificada.", "success");
@@ -1635,6 +1658,7 @@
     renderVideoSelectsAndGallery();
     renderAudioList();
     renderLipSyncSelects();
+    renderHiggsfieldAssetSelects();
     renderMontagePickers();
     renderMontageGallery();
   }
@@ -3210,11 +3234,400 @@
     });
   }
 
+  // ==================== MODO HIGGSFIELD (100% GRATIS LOCAL / COLAB) ====================
+  function fillKeyLabelSelect(selId, dictObj, preferredKey = "") {
+    const el = $(selId);
+    if (!el || !dictObj) return;
+    const prev = el.value || preferredKey;
+    el.innerHTML = Object.entries(dictObj)
+      .map(([k, v]) => `<option value="${escapeHtml(k)}">${escapeHtml(v.label || k)}</option>`)
+      .join("");
+    if (prev && dictObj[prev]) el.value = prev;
+  }
+
+  async function loadHiggsfieldCatalog() {
+    try {
+      const data = await api("/api/higgsfield/catalog");
+      state.higgsfield = data;
+      fillKeyLabelSelect("hf-dir-camera", data.cameras, "arri_full_frame_8k");
+      fillKeyLabelSelect("hf-cin-camera", data.cameras, "arri_full_frame_8k");
+      fillKeyLabelSelect("hf-dir-lens", data.lenses, "classic_anamorphic");
+      fillKeyLabelSelect("hf-cin-lens", data.lenses, "classic_anamorphic");
+      fillKeyLabelSelect("hf-dir-focal", data.focal_lengths, "35");
+      fillKeyLabelSelect("hf-cin-focal", data.focal_lengths, "35");
+      fillKeyLabelSelect("hf-dir-aperture", data.apertures, "f/2.8");
+      fillKeyLabelSelect("hf-cin-aperture", data.apertures, "f/2.8");
+      fillKeyLabelSelect("hf-dir-lighting", data.lighting_moods, "warm_restaurant");
+      fillKeyLabelSelect("hf-cin-lighting", data.lighting_moods, "natural_cinema");
+      fillKeyLabelSelect("hf-dir-motion", data.motions, "over_the_shoulder");
+
+      const pillsBox = $("hf-motion-pills");
+      if (pillsBox && data.motions) {
+        const curMot = ($("hf-mot-selected") && $("hf-mot-selected").value) || "dolly_in_dramatic";
+        pillsBox.innerHTML = Object.entries(data.motions)
+          .map(
+            ([k, v]) =>
+              `<button type="button" class="hf-motion-pill ${k === curMot ? "active" : ""}" data-hf-mot="${escapeHtml(k)}">${escapeHtml(v.label)}</button>`
+          )
+          .join("");
+        pillsBox.querySelectorAll(".hf-motion-pill").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            $("hf-mot-selected").value = btn.dataset.hfMot;
+            pillsBox.querySelectorAll(".hf-motion-pill").forEach((b) => b.classList.remove("active"));
+            btn.classList.add("active");
+          });
+        });
+      }
+
+      renderHiggsfieldCharacters(data.characters || []);
+      renderHiggsfieldVoiceSelects();
+    } catch (e) {
+      console.warn("No se pudo cargar catálogo Higgsfield:", e);
+    }
+  }
+
+  function renderHiggsfieldVoiceSelects() {
+    const voices = state.voices || [];
+    if (!voices.length) return;
+    const opts = voices.map((v) => `<option value="${escapeHtml(v.id)}">${escapeHtml(v.label)}</option>`).join("");
+    ["hf-dir-voice1", "hf-dir-voice2", "hf-char-voice"].forEach((id, idx) => {
+      const el = $(id);
+      if (!el) return;
+      const prev = el.value;
+      el.innerHTML = opts;
+      if (prev && voices.some((v) => v.id === prev)) {
+        el.value = prev;
+      } else if (idx === 1 && voices.some((v) => v.id === "es-ES-ElviraNeural")) {
+        el.value = "es-ES-ElviraNeural";
+      }
+    });
+  }
+
+  function renderHiggsfieldCharacters(chars) {
+    state.hfCharacters = chars || [];
+    const listBox = $("hf-characters-list");
+    if (listBox) {
+      if (!state.hfCharacters.length) {
+        listBox.innerHTML = `<div class="muted" style="font-size:12px;">Aún no hay personajes guardados en el Casting Vault.</div>`;
+      } else {
+        listBox.innerHTML = state.hfCharacters
+          .map(
+            (c) => `
+          <div class="hf-char-card">
+            <div class="row-gap">
+              ${c.media_url ? `<img src="${escapeHtml(c.media_url)}" class="hf-char-thumb" alt="" />` : `<div class="hf-char-thumb"></div>`}
+              <div>
+                <strong>${escapeHtml(c.name)}</strong>
+                <div class="muted" style="font-size:11.5px;">${escapeHtml(c.appearance_prompt || "Sin rasgos extra")} · 🎙️ ${escapeHtml(c.voice_id || "")}</div>
+              </div>
+            </div>
+            <button type="button" class="btn btn-ghost btn-sm" data-del-hfchar="${escapeHtml(c.id)}">🗑</button>
+          </div>`
+          )
+          .join("");
+        listBox.querySelectorAll("[data-del-hfchar]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            try {
+              const r = await api(`/api/higgsfield/characters/${encodeURIComponent(btn.dataset.delHfchar)}`, { method: "DELETE" });
+              renderHiggsfieldCharacters(r.characters || []);
+              toast("Personaje eliminado del Casting Vault.");
+            } catch (e) {
+              toast(e.message, "error");
+            }
+          });
+        });
+      }
+    }
+
+    const baseOpts = state.hfCharacters
+      .map((c) => `<option value="${escapeHtml(c.id)}">👤 ${escapeHtml(c.name)} (${escapeHtml(c.voice_id || "")})</option>`)
+      .join("");
+    [
+      ["hf-dir-char1", "— Sin ficha asignada —"],
+      ["hf-dir-char2", "— Sin segundo personaje —"],
+      ["hf-cin-char", "— Ninguno —"],
+    ].forEach(([sid, emptyLabel]) => {
+      const el = $(sid);
+      if (!el) return;
+      const prev = el.value;
+      el.innerHTML = `<option value="">${emptyLabel}</option>` + baseOpts;
+      if (prev) el.value = prev;
+    });
+  }
+
+  function renderHiggsfieldAssetSelects() {
+    if (!state.assets) return;
+    const imgs = [
+      ...(state.assets.images || []),
+      ...(state.assets.uploads || []).filter((u) => u.type === "image"),
+    ];
+    const vids = [
+      ...(state.assets.videos || []),
+      ...(state.assets.montages || []),
+      ...(state.assets.uploads || []).filter((u) => u.type === "video"),
+    ];
+
+    const imgOpts = imgs.map((i) => `<option value="${escapeHtml(i.rel_path)}">🖼️ ${escapeHtml(i.filename)}</option>`).join("");
+    if ($("hf-dir-base-img")) {
+      const p = $("hf-dir-base-img").value;
+      $("hf-dir-base-img").innerHTML = `<option value="">✨ Generar fotograma Cinema Studio nuevo</option>` + imgOpts;
+      if (p) $("hf-dir-base-img").value = p;
+    }
+    if ($("hf-mot-img")) {
+      const p = $("hf-mot-img").value;
+      $("hf-mot-img").innerHTML = imgOpts || `<option value="">(Sube o genera una imagen primero)</option>`;
+      if (p) $("hf-mot-img").value = p;
+    }
+    if ($("hf-mot-end-img")) {
+      const p = $("hf-mot-end-img").value;
+      $("hf-mot-end-img").innerHTML = `<option value="">— Libre (solo fotograma inicial) —</option>` + imgOpts;
+      if (p) $("hf-mot-end-img").value = p;
+    }
+    if ($("hf-char-anchor")) {
+      const p = $("hf-char-anchor").value;
+      $("hf-char-anchor").innerHTML = `<option value="">— Sin foto ancla (solo rasgos) —</option>` + imgOpts;
+      if (p) $("hf-char-anchor").value = p;
+    }
+    if ($("hf-clip-video")) {
+      const p = $("hf-clip-video").value;
+      $("hf-clip-video").innerHTML =
+        vids.map((v) => `<option value="${escapeHtml(v.rel_path)}">🎬 ${escapeHtml(v.filename)} (${v.duration_seconds || "?"}s)</option>`).join("") ||
+        `<option value="">(Genera o sube un vídeo MP4 primero)</option>`;
+      if (p) $("hf-clip-video").value = p;
+    }
+  }
+
+  function showHiggsfieldStageResult(meta) {
+    state.lastHfResult = meta;
+    if ($("hf-empty-stage")) $("hf-empty-stage").hidden = true;
+    const imgEl = $("hf-result-img");
+    const vidEl = $("hf-result-video");
+    const isVid = meta.type === "video" || (meta.filename && meta.filename.endsWith(".mp4"));
+    if (isVid) {
+      if (imgEl) imgEl.hidden = true;
+      if (vidEl) {
+        vidEl.hidden = false;
+        vidEl.src = `${meta.media_url}?t=${Date.now()}`;
+      }
+    } else {
+      if (vidEl) {
+        vidEl.pause();
+        vidEl.hidden = true;
+      }
+      if (imgEl) {
+        imgEl.hidden = false;
+        imgEl.src = `${meta.media_url}?t=${Date.now()}`;
+      }
+    }
+    if ($("hf-result-actions")) $("hf-result-actions").hidden = false;
+    if ($("btn-hf-download")) {
+      $("btn-hf-download").href = meta.media_url;
+      $("btn-hf-download").download = meta.filename || "higgsfield_out";
+    }
+    if ($("hf-preview-meta")) {
+      $("hf-preview-meta").textContent = `${meta.filename || ""} · ${meta.width || ""}×${meta.height || ""} ${meta.duration_seconds ? `· ${meta.duration_seconds}s` : ""}`;
+    }
+    const pbox = $("hf-compiled-prompt-box");
+    if (pbox) {
+      if (meta.compiled_cinema_prompt) {
+        pbox.hidden = false;
+        pbox.innerHTML = `<span><strong>Óptica aplicada:</strong> ${escapeHtml(meta.compiled_cinema_prompt)}</span>`;
+      } else {
+        pbox.hidden = true;
+      }
+    }
+  }
+
+  function bindHiggsfieldEvents() {
+    if ($("btn-mode-normal")) {
+      $("btn-mode-normal").addEventListener("click", () => setWorkspaceMode("normal"));
+    }
+    if ($("btn-mode-higgsfield")) {
+      $("btn-mode-higgsfield").addEventListener("click", () => setWorkspaceMode("higgsfield"));
+    }
+
+    document.querySelectorAll(".hf-subtab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (state.workspaceMode !== "higgsfield") setWorkspaceMode("higgsfield");
+        document.querySelectorAll(".hf-subtab-btn").forEach((b) => b.classList.toggle("active", b === btn));
+        document.querySelectorAll(".hf-subpanel").forEach((p) => {
+          p.hidden = p.id !== btn.dataset.hfSub;
+        });
+        document.querySelectorAll(".view-panel").forEach((p) => {
+          p.classList.toggle("active", p.id === "tab-higgsfield");
+        });
+      });
+    });
+
+    if ($("btn-hf-run-director")) {
+      $("btn-hf-run-director").addEventListener("click", async () => {
+        try {
+          const cids = [$("hf-dir-char1").value, $("hf-dir-char2").value].filter(Boolean);
+          const dlines = [];
+          if ($("hf-dir-line1").value.trim()) {
+            dlines.push({
+              character_id: $("hf-dir-char1").value || null,
+              voice_id: $("hf-dir-voice1").value,
+              target_face: cids.length > 1 ? "leftmost" : "largest",
+              text: $("hf-dir-line1").value.trim(),
+            });
+          }
+          if ($("hf-dir-line2").value.trim()) {
+            dlines.push({
+              character_id: $("hf-dir-char2").value || null,
+              voice_id: $("hf-dir-voice2").value,
+              target_face: "rightmost",
+              text: $("hf-dir-line2").value.trim(),
+            });
+          }
+          const r = await api("/api/higgsfield/scene-director", {
+            method: "POST",
+            body: JSON.stringify({
+              scene_prompt: $("hf-dir-prompt").value,
+              camera_id: $("hf-dir-camera").value,
+              lens_id: $("hf-dir-lens").value,
+              focal_mm: $("hf-dir-focal").value,
+              aperture: $("hf-dir-aperture").value,
+              lighting_id: $("hf-dir-lighting").value,
+              motion_id: $("hf-dir-motion").value,
+              video_engine_mode: $("hf-dir-engine").value,
+              aspect_ratio: $("hf-dir-aspect").value,
+              duration_seconds: Number($("hf-dir-dur").value || 4.5),
+              base_image_rel: $("hf-dir-base-img").value || null,
+              character_ids: cids,
+              dialogue_lines: dlines,
+              ambience_preset: $("hf-dir-ambience").value,
+              apply_lipsync: $("hf-dir-lipsync").checked,
+            }),
+          });
+          watchJob(r.job);
+          toast("🎬 Auto-Director Higgsfield rodando escena...", "info");
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
+
+    if ($("btn-hf-shoot-cinema")) {
+      $("btn-hf-shoot-cinema").addEventListener("click", async () => {
+        try {
+          const cid = $("hf-cin-char").value;
+          const r = await api("/api/higgsfield/cinema-shot", {
+            method: "POST",
+            body: JSON.stringify({
+              prompt: $("hf-cin-prompt").value,
+              camera_id: $("hf-cin-camera").value,
+              lens_id: $("hf-cin-lens").value,
+              focal_mm: $("hf-cin-focal").value,
+              aperture: $("hf-cin-aperture").value,
+              lighting_id: $("hf-cin-lighting").value,
+              aspect_ratio: $("hf-cin-aspect").value,
+              character_ids: cid ? [cid] : [],
+              seed: Number($("hf-cin-seed").value || 0),
+            }),
+          });
+          watchJob(r.job);
+          toast("📸 Disparando fotograma Cinema Studio...", "info");
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
+
+    if ($("btn-hf-run-motion")) {
+      $("btn-hf-run-motion").addEventListener("click", async () => {
+        try {
+          const r = await api("/api/higgsfield/motion-clip", {
+            method: "POST",
+            body: JSON.stringify({
+              image_rel: $("hf-mot-img").value,
+              end_image_rel: $("hf-mot-end-img").value || null,
+              prompt: $("hf-mot-prompt").value,
+              motion_id: $("hf-mot-selected").value,
+              engine_mode: $("hf-mot-engine").value,
+              aspect_ratio: $("hf-mot-aspect").value,
+              duration_seconds: Number($("hf-mot-dur").value || 4.5),
+            }),
+          });
+          watchJob(r.job);
+          toast("🌪️ Animando cámara Higgsfield...", "info");
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
+
+    if ($("btn-hf-save-char")) {
+      $("btn-hf-save-char").addEventListener("click", async () => {
+        try {
+          const traits = {
+            gender_age: $("hf-trait-age").value,
+            hair: $("hf-trait-hair").value,
+            outfit: $("hf-trait-outfit").value,
+          };
+          const r = await api("/api/higgsfield/characters", {
+            method: "POST",
+            body: JSON.stringify({
+              name: $("hf-char-name").value,
+              traits,
+              anchor_image_rel: $("hf-char-anchor").value,
+              voice_id: $("hf-char-voice").value,
+              default_face_side: $("hf-char-side").value,
+            }),
+          });
+          $("hf-char-name").value = "";
+          renderHiggsfieldCharacters(r.characters || []);
+          toast("👤 Personaje guardado en Casting Vault.", "success");
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
+
+    if ($("btn-hf-smart-clip")) {
+      $("btn-hf-smart-clip").addEventListener("click", async () => {
+        try {
+          const r = await api("/api/higgsfield/smart-clip", {
+            method: "POST",
+            body: JSON.stringify({
+              video_rel: $("hf-clip-video").value,
+              target_aspect: $("hf-clip-aspect").value,
+              start_sec: Number($("hf-clip-start").value || 0),
+              end_sec: Number($("hf-clip-end").value || 0),
+            }),
+          });
+          watchJob(r.job);
+          toast("✂️ Reencuadrando clip inteligente...", "info");
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+    }
+
+    if ($("btn-hf-send-to-montage")) {
+      $("btn-hf-send-to-montage").addEventListener("click", () => {
+        if (!state.lastHfResult) return;
+        state.timeline.push({
+          rel_path: state.lastHfResult.rel_path,
+          filename: state.lastHfResult.filename,
+          type: state.lastHfResult.type || "video",
+          duration_seconds: state.lastHfResult.duration_seconds || 4.0,
+          motion: "zoom_in",
+          audio_rel: "",
+        });
+        renderTimeline();
+        toast("Añadido a la línea de tiempo de Montaje Final.", "success");
+      });
+    }
+  }
+
   // ==================== ARRANQUE ====================
   async function init() {
     setupMaskCanvas();
     bindEvents();
+    bindHiggsfieldEvents();
     await Promise.all([loadCatalog(), loadVoices(), loadAssets()]);
+    await loadHiggsfieldCatalog();
     if ($("select-video-model") && $("select-video-model").value) {
       applyVideoModelDefaults($("select-video-model").value);
     }

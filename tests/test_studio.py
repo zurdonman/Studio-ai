@@ -2090,6 +2090,143 @@ def test_lipsync_engine_multi_turn_dialogue_and_mcp_tool(temp_studio_env, monkey
     assert (data_dir / ls_data["rel_path"]).exists()
 
 
+def test_higgsfield_mode_local_cinema_motion_cast_clipper_and_mcp(temp_studio_env) -> None:
+    """Verifica el Modo Higgsfield 100 % local/Colab (0 € APIs): catálogo óptico, Casting Vault,
+    curvas Crash Zoom / Handheld, Smart Clipper 9:16 centrado en sujeto, Auto-Director y MCP."""
+    client, data_dir = temp_studio_env
+    import json
+    import cv2
+    import numpy as np
+    from studio.engines.ffmpeg_utils import probe_media_info
+
+    # 1. Catálogo óptico y presets Higgsfield + HTML con conmutador Modo Normal <-> Modo Higgsfield
+    html = client.get("/").text
+    assert "btn-mode-normal" in html
+    assert "btn-mode-higgsfield" in html
+    assert "tab-higgsfield" in html
+
+    cat = client.get("/api/higgsfield/catalog").json()
+    assert cat["ok"] is True
+    assert "imax_70mm_film" in cat["cameras"]
+    assert "classic_anamorphic" in cat["lenses"]
+    assert "crash_zoom" in cat["motions"]
+    assert "dolly_zoom_vertigo" in cat["motions"]
+
+    # 2. Subir un fotograma panorámico 16:9 con un sujeto claro en la zona derecha (X ~ 75%)
+    canvas = np.zeros((360, 640, 3), dtype=np.uint8)
+    canvas[:, :] = (25, 30, 42)
+    # Dibujar silueta/rostro detallado a la derecha para comprobar que OpenCV centra el 9:16 ahí
+    cv2.circle(canvas, (480, 130), 46, (215, 190, 170), -1)
+    cv2.circle(canvas, (465, 120), 6, (20, 20, 20), -1)
+    cv2.circle(canvas, (495, 120), 6, (20, 20, 20), -1)
+    cv2.ellipse(canvas, (480, 145), (16, 8), 0, 0, 180, (140, 60, 60), 3)
+    ok_enc, png_buf = cv2.imencode(".png", canvas)
+    assert ok_enc
+    up_img = client.post(
+        "/api/assets/upload",
+        files={"file": ("actor_derecha.png", png_buf.tobytes(), "image/png")},
+    ).json()["asset"]
+
+    # 3. Guardar personaje en el Casting Vault y verificar persistencia
+    r_char = client.post(
+        "/api/higgsfield/characters",
+        json={
+            "name": "Detective Marco",
+            "traits": {
+                "gender_age": "hombre de 38 años",
+                "hair": "pelo corto oscuro",
+                "outfit": "gabardina gris cine noir",
+            },
+            "anchor_image_rel": up_img["rel_path"],
+            "voice_id": "es-ES-AlvaroNeural",
+            "default_face_side": "rightmost",
+        },
+    ).json()
+    assert r_char["ok"] is True
+    char_id = r_char["character"]["id"]
+    assert "gabardina gris" in r_char["character"]["appearance_prompt"]
+
+    # 4. Generar clip Higgsfield Motion (Crash Zoom óptico en CPU)
+    r_mot = client.post(
+        "/api/higgsfield/motion-clip",
+        json={
+            "image_rel": up_img["rel_path"],
+            "motion_id": "crash_zoom",
+            "engine_mode": "ffmpeg_instant",
+            "aspect_ratio": "16:9",
+            "duration_seconds": 2.2,
+        },
+    ).json()
+    j_mot = _wait_job(client, r_mot["job"]["id"])
+    assert j_mot["status"] == "completed", j_mot
+    mot_rel = j_mot["result"]["rel_path"]
+    mot_path = data_dir / mot_rel
+    assert mot_path.exists()
+    mot_info = probe_media_info(mot_path)
+    assert mot_info["has_video"] is True and mot_info["has_audio"] is True
+
+    # 5. Smart Clipper 9:16 Reels: debe centrarse hacia la derecha (>58%) donde está el personaje
+    r_clip = client.post(
+        "/api/higgsfield/smart-clip",
+        json={
+            "video_rel": mot_rel,
+            "target_aspect": "9:16",
+            "start_sec": 0.0,
+            "end_sec": 1.8,
+        },
+    ).json()
+    j_clip = _wait_job(client, r_clip["job"]["id"])
+    assert j_clip["status"] == "completed", j_clip
+    clip_res = j_clip["result"]
+    assert clip_res["width"] == 720 and clip_res["height"] == 1280
+    assert clip_res["subject_center_x_pct"] > 58.0
+
+    # 6. MCP: `studio_higgsfield_presets_and_cast` + `studio_higgsfield_director` (Auto-Director con ambiente)
+    hdrs = {"X-Studio-MCP-Key": client.get("/api/mcp/info").json()["token"]}
+    mcp_cast = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={"jsonrpc": "2.0", "id": 91, "method": "tools/call", "params": {"name": "studio_higgsfield_presets_and_cast", "arguments": {}}},
+    ).json()["result"]
+    assert mcp_cast["isError"] is False
+    cast_payload = json.loads(mcp_cast["content"][0]["text"])
+    assert any(c["id"] == char_id for c in cast_payload["characters"])
+
+    mcp_dir = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 92,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_higgsfield_director",
+                "arguments": {
+                    "action": "scene_director",
+                    "prompt": "Detective observando pistas bajo luces cálidas",
+                    "camera_id": "imax_70mm_film",
+                    "lens_id": "classic_anamorphic",
+                    "motion_id": "handheld_docu",
+                    "video_engine_mode": "ffmpeg_instant",
+                    "character_ids": [char_id],
+                    "duration_seconds": 2.4,
+                    "ambience_preset": "rain_cozy",
+                    "apply_lipsync": False,
+                },
+            },
+        },
+    ).json()["result"]
+    assert mcp_dir["isError"] is False
+    dir_res = json.loads(mcp_dir["content"][0]["text"])["result"]
+    assert dir_res["mode"] == "higgsfield_director"
+    assert (data_dir / dir_res["rel_path"]).exists()
+
+    # Limpieza de ficha de prueba
+    r_del = client.delete(f"/api/higgsfield/characters/{char_id}").json()
+    assert r_del["ok"] is True
+
+
+
 
 
 
