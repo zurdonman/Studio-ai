@@ -118,8 +118,25 @@ node --check studio/static/app.js
 python -m pytest -q
 ```
 
-`177 passed` en CPU: simulaciones, dobles y un hijo real con RSS acotado, **ninguna inferencia GPU**. Las pruebas de
+### Auditar una instancia ya desplegada
+
+`tools/mcp_audit.py` comprueba en modo solo lectura (no genera vídeo, no descarga, no borra) que el túnel responde,
+que el **commit desplegado** es el que crees, que las preferencias están guardadas, que el caso de 30 s compila
+6 clips / 7 keyframes con el entorno correcto, y que las guardas `DURATION_EXCEEDS_SINGLE_CLIP` y `SPEED_LORA_MISSING`
+se disparan antes de llegar al motor:
+
+```bash
+STUDIO_MCP_TOKEN=st_mcp_... python3 tools/mcp_audit.py \
+  --url https://xxxx.trycloudflare.com --expect-commit 4a68ec1 \
+  --out informe_auditoria.md
+```
+
+El token se envía solo en cabecera y nunca se imprime. Un ✅ en el plan es contrato correcto en CPU, **no** validación
+de calidad en GPU.
+
+`179 passed` en CPU: simulaciones, dobles y un hijo real con RSS acotado, **ninguna inferencia GPU**. Las pruebas de
 adaptadores y del inspector 4-bit reproducen las excepciones de Diffusers/bitsandbytes con dobles, no con Torch real.
+`181 passed` incluye también la identidad de build y el propio auditor.
 
 Las regresiones de parámetros, offload y concurrencia usan dobles pequeños sin descargar modelos.
 Estas pruebas no sustituyen una ejecución real de inferencia en la GPU L4 de Colab.

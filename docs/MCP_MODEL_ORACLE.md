@@ -220,13 +220,19 @@ Pedir 30 s en una sola llamada no puede devolver 30 s: el motor recorta a 161 fo
 
 El escenario también se respeta: el plan detecta el entorno pedido (`parque`, `playa`, `interior`, o `calle` por defecto) y describe árboles/setos/banco/fuente, arena/pasarela/olas o pasillo/muebles/lámparas en lugar de forzar acera y escaparates a toda escena. Los prompts visuales de imagen y vídeo llevan ese entorno; las instrucciones meta («el vídeo debe durar 30 segundos») se eliminan del prompt visual y viven solo en los parámetros del plan.
 
+### 8.6. Auditoría de una instancia desplegada
+
+`studio_get_state_and_manual` publica `build` (`commit`, `commit_short`, `commit_date`, `branch`, `dirty`, `source`), leído de solo lectura del checkout. Eso permite distinguir un despliegue nuevo de uno viejo sin adivinar por el número de herramientas.
+
+`python3 tools/mcp_audit.py --url <túnel> --expect-commit <sha>` verifica, sin generar vídeo ni tocar pesos: handshake JSON-RPC, contrato de herramientas, commit real, preferencias, plan de 30 s (6 clips / 7 keyframes y entorno pedido), guardas `DURATION_EXCEEDS_SINGLE_CLIP` / `SPEED_LORA_MISSING`, contenido de `/mcp/guia` y que ninguna respuesta de herramienta reexponga el token. Devuelve un informe markdown y código de salida distinto de cero si algo falla.
+
 Máximo dos reintentos del mismo trabajo; al segundo, `studio_export_session_log(format="md")` y un informe breve. Un trabajo `running` con progreso no es un fallo: se espera el mismo `job_id`.
 
 ## 9. API web equivalente y pruebas reproducibles
 
 - `GET /api/catalog/hf-search?query=Wan&category=video&gpu_profile=auto&only_compatible=true&limit=12&offset=0`
 - `GET /api/memory/status` (vigilancia, presión, reserva y modelos protegidos)
-- `GET /api/runtime/status` (si el proceso tuvo que recargar frameworks por los parches de compatibilidad)
+- `GET /api/runtime/status` (si el proceso tuvo que recargar frameworks por los parches de compatibilidad, y `build` con el commit real)
 - `GET /api/preferences` / `POST /api/preferences` (las mismas preferencias que guarda el agente)
 - `GET /api/models/discovery/status`
 - `POST /api/models/discovery/settings` con `{"auto_refresh":true,"interval_minutes":360}`

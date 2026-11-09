@@ -367,3 +367,34 @@ def test_park_scene_keeps_the_park_and_drops_duration_meta_instructions():
         assert "parque" in text.lower() or "park" in text.lower()
         assert "debe durar" not in text and "30 segundos" not in text
         assert "sidewalk" not in text.lower() and "storefront" not in text.lower()
+
+
+def test_build_identity_is_published_without_touching_the_checkout(temp_studio_env):
+    """The agent must be able to tell a stale deploy from a fresh one."""
+    from studio import runtime_flags
+
+    build = runtime_flags.build_identity()
+    assert build["source"] in ("git", "copy")
+    assert build["root"] and "mtime" in build or build["commit"]
+    if build["source"] == "git":
+        assert len(build["commit"]) == 40 and build["commit_short"] == build["commit"][:7]
+        assert isinstance(build["dirty"], bool)
+    snap = runtime_flags.snapshot()
+    assert snap["build"]["source"] == build["source"]  # same cached identity
+
+
+def test_audit_script_accepts_the_link_the_user_pastes():
+    """`--url https://host/mcp?token=...` must work and never print the token."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "mcp_audit.py"
+    spec = importlib.util.spec_from_file_location("mcp_audit", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    url, token = module._split_link("https://abc.trycloudflare.com/mcp?token=st_mcp_deadbeef", "")
+    assert url == "https://abc.trycloudflare.com" and token == "st_mcp_deadbeef"
+    url2, token2 = module._split_link("https://abc.trycloudflare.com", "st_mcp_x")
+    assert url2 == "https://abc.trycloudflare.com" and token2 == "st_mcp_x"
+    assert "st_mcp" not in module._redact("token=st_mcp_secret and st_mcp_secret")

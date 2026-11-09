@@ -1680,6 +1680,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "active_jobs": job_manager.list_jobs(limit=5, include_logs=False),
             "available_workflow_presets": list_agent_workflow_presets(),
             "runtime": get_runtime_capabilities(),
+            # Qué código se está ejecutando de verdad (commit git, rama, si hay cambios sin commitear).
+            "build": runtime_flags.snapshot()["build"],
             "model_discovery": model_discovery.status(),
             "manual_index": [{"uri": uri, "name": meta["name"]} for uri, meta in MANUAL_RESOURCES.items()],
             "model_policy": "Receta revisada ≠ GPU validada. Compatible = encaje estimado; candidato no ejecutable. Buscar/inspeccionar/refrescar nunca descarga pesos ni ejecuta código remoto.",
