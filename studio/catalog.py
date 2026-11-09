@@ -19,6 +19,17 @@ from studio.jobs import JobRecord
 
 CUSTOM_MODELS_FILE = STATE_DIR / "custom_models.json"
 DISK_SAFETY_MARGIN_GB = 1.0
+_DOWNLOAD_LOCKS_GUARD = threading.Lock()
+_MODEL_DOWNLOAD_LOCKS: Dict[str, threading.RLock] = {}
+
+
+def _get_model_download_lock(model_id: str) -> threading.RLock:
+    with _DOWNLOAD_LOCKS_GUARD:
+        lk = _MODEL_DOWNLOAD_LOCKS.get(model_id)
+        if lk is None:
+            lk = threading.RLock()
+            _MODEL_DOWNLOAD_LOCKS[model_id] = lk
+        return lk
 
 # Perfiles oficiales de GPU disponibles en Google Colab para filtrado y estimación realista
 COLAB_GPU_PROFILES: List[Dict[str, Any]] = [
@@ -3391,6 +3402,16 @@ class CatalogManager:
         job: JobRecord,
         progress_range: Tuple[float, float] = (0.0, 100.0),
     ) -> Dict[str, Any]:
+        with _get_model_download_lock(model_id):
+            job.check_cancelled()
+            return self._download_model_locked(model_id=model_id, job=job, progress_range=progress_range)
+
+    def _download_model_locked(
+        self,
+        model_id: str,
+        job: JobRecord,
+        progress_range: Tuple[float, float] = (0.0, 100.0),
+    ) -> Dict[str, Any]:
         p_min, p_max = float(progress_range[0]), float(progress_range[1])
 
         def _scale_pct(raw_pct: float) -> float:
@@ -3403,6 +3424,14 @@ class CatalogManager:
         if defn.get("builtin_no_download"):
             job.log("Este motor no requiere descargar archivos.", progress=_scale_pct(100.0), step="Listo")
             return {"model_id": model_id, "downloaded_gb": 0.0}
+        if self.is_downloaded(model_id):
+            actual_gb = self.disk_usage_gb(model_id)
+            job.log(
+                f"«{defn['name']}» ya está verificado en disco ({actual_gb} GB).",
+                progress=_scale_pct(100.0),
+                step="Modelo ya en disco",
+            )
+            return {"model_id": model_id, "downloaded_gb": actual_gb}
 
         precheck = self.check_disk_space(model_id)
         if not precheck["ok"]:

@@ -11,16 +11,24 @@ from studio.hardware import colab_console_log, hardware_tracker
 HANG_THRESHOLD_SECONDS = 30.0
 
 
+def model_prepare_job_key(model_id: str, extra_lora_ids: Optional[List[str]] = None) -> str:
+    """Only coalesce preparations with the same model AND adapter requirements."""
+    adapters = sorted({str(lid).strip() for lid in (extra_lora_ids or []) if str(lid).strip()})
+    suffix = f":loras={','.join(adapters)}" if adapters else ""
+    return f"prepare:{model_id}{suffix}"
+
+
 class JobCancelledError(Exception):
     """Excepción lanzada cuando el usuario cancela un trabajo."""
 
 
 class JobRecord:
-    def __init__(self, kind: str, title: str) -> None:
+    def __init__(self, kind: str, title: str, dedup_key: Optional[str] = None) -> None:
         now = time.time()
         self.id: str = uuid.uuid4().hex[:10]
         self.kind: str = kind
         self.title: str = title
+        self.dedup_key: Optional[str] = dedup_key
         self.status: str = "queued"  # queued | running | completed | failed | cancelled
         self.progress: float = 0.0
         self.current_step: str = "En cola..."
@@ -142,6 +150,7 @@ class JobRecord:
                 "id": self.id,
                 "kind": self.kind,
                 "title": self.title,
+                "dedup_key": self.dedup_key,
                 "status": self.status,
                 "progress": round(self.progress, 1),
                 "current_step": self.current_step,
@@ -181,9 +190,20 @@ class JobManager:
         kind: str,
         title: str,
         fn: Callable[[JobRecord], Dict[str, Any]],
+        dedup_key: Optional[str] = None,
     ) -> JobRecord:
-        job = JobRecord(kind=kind, title=title)
         with self._lock:
+            if dedup_key:
+                for jid in self._order:
+                    existing = self._jobs.get(jid)
+                    if (
+                        existing is not None
+                        and existing.dedup_key == dedup_key
+                        and existing.status in ("queued", "running")
+                        and not existing.cancel_requested
+                    ):
+                        return existing
+            job = JobRecord(kind=kind, title=title, dedup_key=dedup_key)
             self._jobs[job.id] = job
             self._order.insert(0, job.id)
             if len(self._order) > 500:
@@ -196,6 +216,7 @@ class JobManager:
             colab_console_log(f"═══ INICIO DE TAREA ({job.id}): {title} ═══", icon="🚀")
             job.log(f"Iniciando: {title}", progress=1.0, step="Iniciando...", emit_console=False)
             try:
+                job.check_cancelled()
                 res = fn(job)
                 job.check_cancelled()
                 job.result = res or {}

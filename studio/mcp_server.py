@@ -27,10 +27,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from studio.agent_presets import (
     AGENT_PRESET_SUMMARY_CATALOG,
+    _sanitize_visual_scene_description,
     compile_agent_workflow_preset,
     list_agent_workflow_presets,
 )
 from studio.catalog import catalog_manager, evaluate_gpu_tier, resolve_gpu_profile
+from studio.compat_patches import apply_runtime_compatibility_patches
 from studio.config import (
     AUDIO_OUT_DIR,
     DATA_ROOT,
@@ -82,6 +84,8 @@ from studio.hardware import (
 )
 from studio.jobs import job_manager
 from studio.memory_manager import memory_manager
+
+apply_runtime_compatibility_patches()
 
 ROOT_REPO_DIR = Path(__file__).resolve().parent.parent
 BRIDGE_SCRIPT_PATH = ROOT_REPO_DIR / "studio_mcp.py"
@@ -202,6 +206,11 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
      * `"corto_1_minuto_multiescena"` → cortos coherentes de 30–60 s (Casting Vault + lote de keyframes + lote de vídeo + BSO Auto-Ducking).
      * `"edicion_fotografica_relight_cine"` → edición fotográfica pro, re-iluminación (`AnyLight` + `Relight`) y piel realista.
    - Si dudas qué modelo suelto elegir, llama también a `studio_recommend_pipeline(task=..., priority=...)`.
+   - Ejecuta el `execution_plan` EN ORDEN y espera cada job hasta `completed` con `studio_wait_for_job` y el MISMO `job_id`. Una respuesta `running`/`queued` o un timeout HTTP NO es un error; no repitas `studio_prepare_model`.
+   - FASES SIN INTERCALAR: TODOS los keyframes → auditoría y reparaciones hasta `all_consistent=true` → TODOS los clips de vídeo → sonido/LipSync/montaje. No prepares el modelo de vídeo antes de terminar y auditar los keyframes.
+   - Imagen y vídeo auto-descargan/auto-cargan el modelo elegido y sus LoRAs. No los prepares por separado. En 4-bit precarga los LoRAs futuros desde la primera imagen con escala 0.0 en los inactivos.
+   - Ante errores de carga/compatibilidad/meta tensor, DETENTE e informa del error conservando los pesos en disco. PROHIBIDO descargar modelos alternativos 14B/13B/1.3B en cascada sin autorización del usuario.
+   - Los prompts de imagen/vídeo describen SOLO la escena física; no copies 'crear los diálogos', 'clip de un minuto', 'utiliza LoRAs rápido' dentro del prompt. La duración/diálogos son parámetros del plan.
    - En `studio_generate_video` y `studio_generate_or_edit_image` mantén `use_official_defaults=true` (valor por defecto): Studio IA aplica automáticamente `steps`, `guidance_scale`, `video_lora_scale`, `width`, `height` y `fps` óptimos del fabricante.
 
 3. REGLAS ESTRICTAS DE VÍDEO Y «FRAME A FRAME» (INICIO → FIN):
@@ -223,7 +232,7 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
    - NUNCA generes el Fotograma 2, 3, 4... desde cero (`Text-to-Image` sin referencia) cuando deban salir las mismas personas, porque cada llamada suelta inventará caras y ropa distintas.
    - DISTINGUE SIEMPRE ENTRE **ESCENA FIJA** Y **ESCENA EN AVANCE (ej. dos personas andando por la calle hablando)**:
      A) **SI VAN ANDANDO / AVANZANDO POR LA CALLE (`coherencia_personajes_entorno_avance`):**
-        1) **Fotograma 1 (Ancla en Punto A):** Usa `plano americano (knee-up) o cuerpo entero` con elementos claros de profundidad en la calle (escaparates, árboles, farolas, acera) y `custom_lora_ids=["qwen-lora-skin-realism", "qwen-lora-flatlog-cinema"]`.
+        1) **Fotograma 1 (Ancla en Punto A):** Usa `plano americano (knee-up) o cuerpo entero` con elementos claros de profundidad en la calle (escaparates, árboles, farolas, acera) y `custom_lora_ids=["qwen-lora-skin-realism", "qwen-lora-flatlog-cinema", "qwen-lora-next-scene", "qwen-lora-anylight-env"]` con `lora_scales={"qwen-lora-skin-realism":0.8,"qwen-lora-flatlog-cinema":0.65,"qwen-lora-next-scene":0.0,"qwen-lora-anylight-env":0.0}` (los dos últimos quedan precargados, sin activar).
         2) **Fotograma 2 (Punto B, 4 metros más adelante — ¡PROHIBIDO CONGELAR EL FONDO!):** Pasa `base_image_rel=FRAME_1`, `reference_rels=[FRAME_1]`, `custom_lora_ids=["qwen-lora-next-scene", "qwen-lora-skin-realism", "qwen-lora-anylight-env"]` y empieza el prompt con `"Next Scene:"` exigiendo **pierna contraria adelantada**, nuevo gesto de conversación y que **las tiendas/farolas del fondo retrocedan 4 metros en perspectiva** manteniendo los mismos rostros, ropa y luz. (Para un Fotograma 3 usa `base_image_rel=FRAME_2` y `reference_rels=[FRAME_1, FRAME_2]`).
         3) **Auditoría Anti-Estática (`studio_analyze_coherence`):** Pasa `expect_spatial_progression=true`. Si devuelve `"TOO_STATIC_NEEDS_ADVANCE"` o `"NEEDS_REPAIR"`, ejecuta el `recommended_repair_tool_call` devuelto antes de animar.
         4) **Prompt de Vídeo en 3 Vectores (`studio_generate_video` en `flf2v`):** Apila `extra_video_lora_ids=["lora-wan21-14b-unianimate-char", "lora-wan21-14b-moviigen-cinema"]` (en GPUs 14B) y redacta SIEMPRE los 3 vectores en el prompt: **(1) Steadicam retrocediendo a velocidad de paseo**, **(2) locomoción continua de piernas/cuerpo + gestos al hablar**, y **(3) paralaje 3D de acera, escaparates y árboles deslizándose detrás**.
@@ -459,6 +468,11 @@ def _wait_for_job_bounded(job_id: str, max_wait_seconds: float = 82.0) -> Dict[s
                 "status": st,
                 "error": snap.get("error") or "Trabajo interrumpido.",
                 "recent_logs": (snap.get("logs") or [])[-8:],
+                "anti_panic_rule": (
+                    "PROHIBIDO descargar múltiples modelos alternativos en cascada ante un error de tarea. "
+                    "Un error de compatibilidad/offload NO se arregla bajando otro 14B/13B/1.3B. "
+                    "Conserva el modelo elegido y sus archivos; revisa el error y comunica el bloqueo al usuario."
+                ),
             }
         if time.time() >= deadline:
             return {
@@ -618,7 +632,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                         "default": 2,
                         "minimum": 1,
                         "maximum": 12,
-                        "description": "Número de tramos de vídeo encadenados de ~5s (ej. 1 = 5s, 2 = 10s continuos, 12 = 60s).",
+                        "description": "Tramos encadenados de ~5s. Si se omite (o vale 2), se infiere de scene_description: 'un minuto'/'60s' = 12 clips; 30s = 6. Un valor explícito distinto de 2 tiene prioridad.",
                     },
                     "aspect_ratio": {
                         "type": "string",
@@ -660,7 +674,9 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
             "name": "studio_prepare_model",
             "description": (
                 "Descarga de Hugging Face (si aún no está en disco, verificando espacio antes) y/o carga en RAM/VRAM "
-                "cualquier modelo o LoRA del catálogo."
+                "cualquier modelo o LoRA del catálogo. Repeticiones idénticas devuelven el mismo job_id activo; "
+                "espera ese trabajo y no lances preparaciones paralelas ni modelos alternativos ante errores. "
+                "Las herramientas de imagen/vídeo ya auto-preparan el modelo y sus LoRAs."
             ),
             "inputSchema": {
                 "type": "object",
@@ -964,7 +980,10 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                                     "type": "string",
                                     "description": "`rel_path` de la imagen o clip de vídeo del plano.",
                                 },
-                                "duration": {"type": "number", "default": 4.0},
+                                "duration": {
+                                    "type": "number", "minimum": 0.25,
+                                    "description": "Opcional; si se omite conserva la duración completa del vídeo (imágenes: 4s).",
+                                },
                                 "motion": {
                                     "type": "string",
                                     "enum": ["none", "zoom_in", "zoom_out", "pan_right", "pan_left"],
@@ -1658,6 +1677,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "ANTES de generar escenas de personajes caminando/hablando, secuencias coherentes o cortos, llama SIEMPRE a `studio_get_workflow_preset` (ej. `preset_id='coherencia_personajes_entorno_avance'`).",
                 "En escenas donde los personajes avanzan (ej. andando por la calle), NUNCA congeles el fondo entre fotogramas: usa `qwen-lora-next-scene` + zancada alterna + `expect_spatial_progression=true` en `studio_analyze_coherence`.",
                 "En `studio_generate_video` deja `use_official_defaults=true` e incluye los 3 vectores de movimiento (cámara + locomoción de personajes + paralaje de entorno).",
+                "FASES: todos los keyframes → auditoría y reparaciones → todos los vídeos → audio/LipSync/montaje. No prepares vídeo antes de acabar los keyframes.",
+                "Un job running/queued requiere esperar el mismo job_id, no volver a preparar. Ante un fallo no descargues modelos alternativos en cascada.",
             ],
         }
         if bool(args.get("include_recent_assets", True)):
@@ -1674,7 +1695,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             scene_description=str(args.get("scene_description") or ""),
             characters_description=str(args.get("characters_description") or ""),
             dialogue_lines=list(args.get("dialogue_lines") or []),
-            num_clips=int(args.get("num_clips") or 2),
+            num_clips=args.get("num_clips"),
             aspect_ratio=str(args.get("aspect_ratio") or "16:9"),
         )
         colab_console_log(
@@ -1757,11 +1778,13 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 )
 
         cat = defn["category"]
+        dedup = f"prepare:{mid}"
         if not load_vram or cat == "lora":
             job = job_manager.submit(
                 kind="download",
                 title=f"[MCP] Descargar: {defn['name']}",
                 fn=lambda j: catalog_manager.download_model(mid, j),
+                dedup_key=f"download:{mid}",
             )
         elif cat == "video":
             gpu_info = query_gpu_info()
@@ -1776,12 +1799,14 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 kind="load_model",
                 title=f"[MCP] Preparar vídeo: {defn['name']}",
                 fn=lambda j: load_video_model_into_memory(model_id=mid, auto_download=True, job=j),
+                dedup_key=dedup,
             )
         elif cat == "image":
             job = job_manager.submit(
                 kind="load_model",
                 title=f"[MCP] Preparar imagen: {defn['name']}",
                 fn=lambda j: load_image_model_into_memory(model_id=mid, auto_download=True, job=j),
+                dedup_key=dedup,
             )
         elif cat == "vision":
             if defn.get("builtin_no_download"):
@@ -1790,6 +1815,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 kind="load_model",
                 title=f"[MCP] Preparar inspector multimodal: {defn['name']}",
                 fn=lambda j: load_coherence_vlm_into_memory(model_id=mid, auto_download=True, job=j),
+                dedup_key=dedup,
             )
         elif cat == "lipsync":
             def _prep_ls(j: Any) -> Dict[str, Any]:
@@ -1803,6 +1829,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 kind="load_model",
                 title=f"[MCP] Preparar LipSync HD: {defn['name']}",
                 fn=_prep_ls,
+                dedup_key=dedup,
             )
         elif cat == "audio":
             if defn.get("builtin_no_download"):
@@ -1811,16 +1838,30 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 kind="download",
                 title=f"[MCP] Preparar audio/música: {defn['name']}",
                 fn=lambda j: catalog_manager.download_model(mid, j),
+                dedup_key=f"download:{mid}",
             )
         else:
             job = job_manager.submit(
                 kind="load_model",
                 title=f"[MCP] Preparar TTS: {defn['name']}",
                 fn=lambda j: load_tts_model_into_memory(model_id=mid, auto_download=True, job=j),
+                dedup_key=dedup,
             )
 
         if not wait_flag:
-            return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
+            return _ok_result(
+                {
+                    "ok": True,
+                    "job_id": job.id,
+                    "status": job.status,
+                    "progress_pct": round(job.progress, 1),
+                    "current_step": job.current_step,
+                    "how_to_wait": (
+                        f"Llama a `studio_wait_for_job(job_id='{job.id}', wait_seconds=80)` hasta completar. "
+                        f"NO lances otro `studio_prepare_model('{mid}')` paralelo."
+                    ),
+                }
+            )
         return _ok_result(_wait_for_job_bounded(job.id))
 
     # 5. Liberar VRAM o borrar modelo del disco
@@ -1920,7 +1961,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
     # 8. Generar o editar imagen Qwen
     if name == "studio_generate_or_edit_image":
-        prompt = str(args.get("prompt") or "").strip()
+        prompt = _sanitize_visual_scene_description(str(args.get("prompt") or ""))
         if not prompt:
             return _guided_error(
                 "EMPTY_IMAGE_PROMPT",
@@ -2005,7 +2046,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "studio_generate_video":
         sub = str(args.get("video_submode") or "").strip().lower()
         mode = str(args.get("mode") or "ai").strip().lower()
-        prompt = str(args.get("prompt") or "").strip()
+        prompt = _sanitize_visual_scene_description(str(args.get("prompt") or ""))
         wait_flag = bool(args.get("wait", True))
 
         if sub not in ("flf2v", "i2v", "t2v"):
@@ -2266,7 +2307,9 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 resolved_items.append(
                     {
                         "path": str(mp),
-                        "duration": float(it.get("duration") or 4.0),
+                        "duration": float(it["duration"]) if it.get("duration") is not None else (
+                            4.0 if mp.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".bmp") else 0.0
+                        ),
                         "motion": str(it.get("motion") or "none"),
                         "audio_path": str(ap) if ap else None,
                         "fit_to_audio": bool(it.get("fit_to_audio", True)),
@@ -2280,8 +2323,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         width = int(args.get("width") or 1280)
         height = int(args.get("height") or 720)
         fps = int(args.get("fps") or 24)
-        g_vol = float(args.get("global_audio_volume") or 0.25)
-        fade_s = float(args.get("fade_seconds") or 0.20)
+        g_vol = float(args.get("global_audio_volume") if args.get("global_audio_volume") is not None else 0.25)
+        fade_s = float(args.get("fade_seconds") if args.get("fade_seconds") is not None else 0.20)
         wait_flag = bool(args.get("wait", True))
 
         def _run_montage(j: Any) -> Dict[str, Any]:
@@ -3029,7 +3072,7 @@ def _dispatch_single_jsonrpc(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             plan = compile_agent_workflow_preset(
                 preset_id=p_name,
                 scene_description=str(p_args.get("scene_description") or ""),
-                num_clips=int(p_args.get("num_clips") or 2),
+                num_clips=int(p_args["num_clips"]) if p_args.get("num_clips") is not None else None,
             )
             return {
                 "jsonrpc": "2.0",
@@ -3285,7 +3328,8 @@ python3 studio_mcp.py --cli studio_get_workflow_preset '{{
 python3 studio_mcp.py --cli studio_generate_or_edit_image '{{
   "model_id": "qwen-image-edit-2511-pack",
   "aspect_ratio": "16:9",
-  "custom_lora_ids": ["qwen-lora-skin-realism", "qwen-lora-flatlog-cinema"],
+  "custom_lora_ids": ["qwen-lora-skin-realism", "qwen-lora-flatlog-cinema", "qwen-lora-next-scene", "qwen-lora-anylight-env"],
+  "lora_scales": {{"qwen-lora-skin-realism": 0.8, "qwen-lora-flatlog-cinema": 0.65, "qwen-lora-next-scene": 0.0, "qwen-lora-anylight-env": 0.0}},
   "prompt": "Cinematic Steadicam front-tracking medium-wide shot (knee-up framing showing walking legs) of two friends walking forward toward camera down a sunlit city sidewalk talking: man on left in dark denim jacket stepping forward with LEFT leg, woman on right in beige trench coat stepping forward with RIGHT leg, warm cafe awning right behind them, trees and shopfronts receding in depth"
 }}'
 ```
@@ -3450,7 +3494,7 @@ async def api_compile_mcp_preset(request: Request) -> Dict[str, Any]:
         scene_description=str(body.get("scene_description") or ""),
         characters_description=str(body.get("characters_description") or ""),
         dialogue_lines=list(body.get("dialogue_lines") or []),
-        num_clips=int(body.get("num_clips") or 2),
+        num_clips=body.get("num_clips"),
         aspect_ratio=str(body.get("aspect_ratio") or "16:9"),
     )
     return plan

@@ -46,6 +46,56 @@ import os, subprocess; subprocess.run("rm -rf /content/studio && (git clone -b a
 
 ---
 
+## Colab Python 3.13: actualizar sin perder los modelos
+
+Si una sesión anterior falló con `_is_hf_initialized`, `Cannot copy out of meta tensor`
+o «ningún modelo de imagen cargado»:
+
+1. **Detén la celda del lanzador**, actualiza el código y vuelve a ejecutar la celda de arranque.
+   El lanzador reinstala las dependencias necesarias y abre el servidor en un **proceso Python nuevo**.
+   No basta con refrescar la página web ni con actualizar el código mientras sigue vivo el servidor antiguo.
+2. Conserva `/content/studio_data`: los pesos ya verificados se reutilizan. **No hace falta volver
+   a descargar Qwen, Wan o LTX ni borrar el disco** para corregir estos errores de runtime.
+   No pulses «Liberar GPU» ni desconectes/elimines el entorno si quieres conservar su disco temporal.
+3. Reconecta el agente usando la nueva guía `/mcp/guia` que muestra el lanzador.
+
+La compatibilidad conserva los metadatos privados de Transformers fuera del constructor de
+`Parameter` / `Params4bit` / `Int8Params`, sin sustituir pesos ni usar `to_empty()` para ocultar
+un error de tensores meta. Lightning y las LoRAs de imagen se montan **antes** del CPU offload.
+Las preparaciones idénticas comparten tarea; las cargas, inferencias y liberaciones de GPU se serializan.
+
+### Flujo MCP para un paseo coherente de un minuto
+
+Pide primero `studio_get_workflow_preset` con
+`preset_id="coherencia_personajes_entorno_avance"` y la descripción completa de la escena.
+Si incluye «un minuto» o «60s» y no fijas otro número de tramos, compila **12 clips de unos 5 s
++ 13 keyframes**. El redondeo de fotogramas/FPS y la duración real de las voces pueden variar
+ligeramente la duración final; mide y ajusta los diálogos antes del LipSync.
+
+- Primero **todos los keyframes**, con las cuatro LoRAs precargadas desde el ancla
+  (Next Scene y AnyLight inicialmente a escala `0.0`). Los fotogramas siguientes cambian
+  adaptadores sin volver a cargar los pesos.
+- Después **auditoría de identidad y avance**, reparando y reauditando antes del vídeo.
+- Después **todos los clips `flf2v` con el mismo modelo**, y finalmente voces, ambiente urbano,
+  LipSync y montaje sin fundidos entre extremos compartidos.
+- Los prompts visuales no incluyen instrucciones de duración, creación de diálogos ni selección de LoRAs.
+  El texto original se conserva por separado como guía para el guion; los diálogos de plantilla son ejemplos
+  que el agente debe adaptar al tema del usuario si no recibió `dialogue_lines`.
+- Un trabajo `running` / `queued` se espera con su **mismo `job_id`**. Un error de compatibilidad
+  no autoriza descargar otros modelos pesados en cascada: el agente debe detenerse y comunicar el error.
+
+### Validación de desarrollo
+
+```bash
+node --check studio/static/app.js
+python -m pytest -q
+```
+
+Las regresiones de parámetros, offload y concurrencia usan dobles pequeños sin descargar modelos.
+Estas pruebas no sustituyen una ejecución real de inferencia en la GPU L4 de Colab.
+
+---
+
 ## Licencia
 
 MIT

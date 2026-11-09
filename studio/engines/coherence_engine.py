@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 from studio.catalog import catalog_manager
+from studio.compat_patches import apply_runtime_compatibility_patches
 from studio.config import DATA_ROOT
 from studio.hardware import colab_console_log, query_gpu_info
 from studio.jobs import JobRecord
@@ -16,6 +17,7 @@ from studio.memory_manager import (
     flush_ram_and_vram,
     memory_manager,
     run_with_live_memory_progress,
+    serialized_gpu_operation,
 )
 
 
@@ -180,6 +182,7 @@ def analyze_pair_fast_cv(anchor_path: Path, candidate_path: Path) -> Dict[str, A
     }
 
 
+@serialized_gpu_operation
 def load_coherence_vlm_into_memory(
     model_id: str = "qwen25-vl-3b-coherence",
     auto_download: bool = True,
@@ -190,6 +193,7 @@ def load_coherence_vlm_into_memory(
     en el slot ligero `vision`. En una GPU L4 (22.5 GB) puede convivir junto a Qwen-Image-Edit-2511
     sin descargar el modelo de imagen de la VRAM.
     """
+    apply_runtime_compatibility_patches()
     defn = catalog_manager.get_definition(model_id)
     if not defn:
         raise ValueError(f"Modelo de visión no encontrado en el catálogo: {model_id}")
@@ -234,15 +238,17 @@ def load_coherence_vlm_into_memory(
                 )
             memory_manager.unload_slot("image")
 
+    dl_job = job or JobRecord("download", f"Auto-descarga {model_id}")
     if not catalog_manager.is_downloaded(model_id):
-        if not auto_download or job is None:
+        if not auto_download:
             raise RuntimeError(f"«{defn['name']}» no está descargado aún.")
-        job.log(
-            f"Descargando inspector multimodal «{defn['name']}» de Hugging Face (~6.4 GB, solo la primera vez)...",
-            progress=5.0,
-            step="Descargando Qwen2.5-VL-3B...",
-        )
-        catalog_manager.download_model(model_id, job, progress_range=(5.0, 55.0))
+        if job:
+            job.log(
+                f"Descargando inspector multimodal «{defn['name']}» de Hugging Face (~6.4 GB, solo la primera vez)...",
+                progress=5.0,
+                step="Descargando Qwen2.5-VL-3B...",
+            )
+        catalog_manager.download_model(model_id, dl_job, progress_range=(5.0, 55.0))
         load_start_pct = 55.0
     else:
         load_start_pct = 12.0
@@ -250,6 +256,7 @@ def load_coherence_vlm_into_memory(
     base_dir = catalog_manager.local_artifact_dir(model_id, "base")
 
     def _do_load() -> Dict[str, Any]:
+        apply_runtime_compatibility_patches()
         import transformers  # type: ignore
         from transformers import AutoProcessor, BitsAndBytesConfig  # type: ignore
 
@@ -337,6 +344,7 @@ def _extract_first_json_dict(raw_text: str) -> Dict[str, Any]:
     return {}
 
 
+@serialized_gpu_operation
 def analyze_pair_qwen_vl(
     anchor_path: Path,
     candidate_path: Path,
@@ -470,6 +478,7 @@ def _to_rel_str(path: Path) -> str:
         return path.name
 
 
+@serialized_gpu_operation
 def run_coherence_analysis(
     anchor_path: Path,
     candidate_paths: List[Path],

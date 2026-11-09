@@ -24,6 +24,7 @@ from studio.catalog import (
     resolve_gpu_profile,
     search_huggingface_live,
 )
+from studio.compat_patches import apply_runtime_compatibility_patches
 from studio.config import (
     AUDIO_OUT_DIR,
     DATA_ROOT,
@@ -80,10 +81,11 @@ from studio.hardware import (
     query_gpu_info,
     request_colab_shutdown,
 )
-from studio.jobs import job_manager
+from studio.jobs import job_manager, model_prepare_job_key
 from studio.mcp_server import mcp_router
 from studio.memory_manager import memory_manager
 
+apply_runtime_compatibility_patches()
 ensure_directories()
 
 STATIC_DIR = Path(__file__).resolve().parent / "studio" / "static"
@@ -461,14 +463,16 @@ def api_download_model(model_id: str) -> Dict[str, Any]:
     if not defn:
         raise HTTPException(status_code=404, detail=f"Modelo desconocido: {model_id}")
 
-    space = catalog_manager.check_disk_space(model_id)
-    if not space["ok"]:
-        raise HTTPException(status_code=400, detail=space)
+    if not catalog_manager.is_downloaded(model_id):
+        space = catalog_manager.check_disk_space(model_id)
+        if not space["ok"]:
+            raise HTTPException(status_code=400, detail=space)
 
     job = job_manager.submit(
         kind="download",
         title=f"Descargar: {defn['name']}",
         fn=lambda j: catalog_manager.download_model(model_id, j),
+        dedup_key=f"download:{model_id}",
     )
     return {"ok": True, "job": job.to_dict()}
 
@@ -517,6 +521,7 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
             kind="load_model",
             title=f"Cargar en RAM/VRAM: {defn['name']}",
             fn=_load_img,
+            dedup_key=model_prepare_job_key(target_id, extra),
         )
     elif cat == "video":
         job = job_manager.submit(
@@ -527,6 +532,7 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
                 auto_download=req.auto_download,
                 job=j,
             ),
+            dedup_key=f"prepare:{req.model_id}",
         )
     elif cat == "tts":
         job = job_manager.submit(
@@ -537,6 +543,7 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
                 auto_download=req.auto_download,
                 job=j,
             ),
+            dedup_key=f"prepare:{req.model_id}",
         )
     elif cat == "vision":
         if defn.get("builtin_no_download"):
@@ -549,6 +556,7 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
                 auto_download=req.auto_download,
                 job=j,
             ),
+            dedup_key=f"prepare:{req.model_id}",
         )
     elif cat == "lipsync":
         def _load_ls(j: Any) -> Dict[str, Any]:
@@ -561,6 +569,7 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
             kind="load_model",
             title=f"Cargar motor LipSync HD: {defn['name']}",
             fn=_load_ls,
+            dedup_key=f"prepare:{req.model_id}",
         )
     elif cat == "audio":
         if defn.get("builtin_no_download"):
@@ -575,6 +584,7 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
             kind="load_model",
             title=f"Preparar motor musical/sonoro: {defn['name']}",
             fn=_load_aud,
+            dedup_key=f"prepare:{req.model_id}",
         )
     else:
         raise HTTPException(status_code=400, detail=f"Categoría no soportada: {cat}")

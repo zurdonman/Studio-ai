@@ -2491,3 +2491,706 @@ def test_mcp_agent_workflow_presets_and_anti_static_coherence(temp_studio_env, t
 
 
 
+# Regression coverage for the Colab L4 / Python 3.13 failures. These tests use
+# small parameter/pipeline doubles: no GPU weights or network downloads needed.
+
+
+def test_colab_parameter_metadata_patch_preserves_peft_and_bnb_contracts(monkeypatch):
+    import inspect
+    import sys
+    import types
+    from contextlib import contextmanager
+    from studio.compat_patches import apply_runtime_compatibility_patches
+
+    class Tensor:
+        __slots__ = ("value", "device", "requires_grad", "__dict__")
+
+        def __new__(cls, data=None, requires_grad=True):
+            obj = object.__new__(cls)
+            obj.value = data.value if isinstance(data, Tensor) else data
+            obj.device = data.device if isinstance(data, Tensor) else "cpu"
+            obj.requires_grad = requires_grad
+            return obj
+
+        def to(self, device):
+            result = Tensor(self.value, self.requires_grad)
+            result.device = device
+            return result
+
+    class Parameter(Tensor):
+        def __new__(cls, data=None, requires_grad=True):
+            return Tensor.__new__(cls, data, requires_grad)
+
+    class Params4bit(Parameter):
+        # Deliberately bypass Parameter.__new__, as bitsandbytes does.
+        def __new__(cls, data=None, requires_grad=False, quant_state=None, blocksize=64, quant_type="nf4"):
+            obj = Tensor.__new__(cls, data, requires_grad)
+            obj.quant_state = quant_state
+            obj.blocksize = blocksize
+            obj.quant_type = quant_type
+            return obj
+
+    class Int8Params(Parameter):
+        def __new__(cls, data=None, requires_grad=False, has_fp16_weights=False, CB=None, SCB=None):
+            obj = Tensor.__new__(cls, data, requires_grad)
+            obj.has_fp16_weights, obj.CB, obj.SCB = has_fp16_weights, CB, SCB
+            return obj
+
+    class Module:
+        def __init__(self):
+            self._parameters, self._buffers = {}, {}
+
+        def register_parameter(self, name, param):
+            self._parameters[name] = param
+
+        def register_buffer(self, name, buffer, persistent=True):
+            self._buffers[name] = buffer
+
+    calls, skip = [], {"value": False}
+
+    @contextmanager
+    def init_empty_weights(include_buffers=None):
+        calls.append(include_buffers)
+        old_register, old_buffer = Module.register_parameter, Module.register_buffer
+
+        def register_empty(module, name, param):
+            old_register(module, name, param)
+            if param is not None and not skip["value"]:
+                kwargs = dict(param.__dict__, requires_grad=param.requires_grad)
+                module._parameters[name] = type(param)(param.to("meta"), **kwargs)
+
+        def register_buffer(module, name, buffer, persistent=True):
+            old_buffer(module, name, buffer, persistent)
+            if buffer is not None:
+                module._buffers[name] = buffer.to("meta")
+
+        Module.register_parameter = register_empty
+        if include_buffers:
+            Module.register_buffer = register_buffer
+        try:
+            yield "original-context"
+        finally:
+            Module.register_parameter, Module.register_buffer = old_register, old_buffer
+
+    torch = types.ModuleType("torch")
+    torch.nn = types.SimpleNamespace(Parameter=Parameter, Module=Module)
+    bnb = types.ModuleType("bitsandbytes")
+    bnb.nn = types.SimpleNamespace(Params4bit=Params4bit, Int8Params=Int8Params)
+    peft, utils, integrations = (types.ModuleType(n) for n in ("peft", "peft.utils", "peft.utils.integrations"))
+    peft.utils, utils.integrations = utils, integrations
+    integrations.init_empty_weights = init_empty_weights
+    for name, mod in (("torch", torch), ("bitsandbytes", bnb), ("peft", peft), ("peft.utils", utils), ("peft.utils.integrations", integrations)):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    # Reproduce the original error before applying compatibility.
+    p = Parameter(Tensor(7), requires_grad=False)
+    p._is_hf_initialized = True
+    with pytest.raises(TypeError, match="_is_hf_initialized"):
+        type(p)(p.to("meta"), **dict(p.__dict__, requires_grad=p.requires_grad))
+
+    original_signature = inspect.signature(Params4bit.__new__)
+    apply_runtime_compatibility_patches()
+    patched_new, patched_context = Parameter.__new__, integrations.init_empty_weights
+    apply_runtime_compatibility_patches()
+    assert Parameter.__new__ is patched_new
+    assert integrations.init_empty_weights is patched_context
+    assert inspect.signature(Params4bit.__new__) == original_signature
+
+    quant_state, cb, scb = object(), object(), object()
+    p4 = Params4bit(Tensor(4), quant_state=quant_state, blocksize=128, _is_hf_initialized=True, _hf_private="kept")
+    p8 = Int8Params(Tensor(8), has_fp16_weights=True, CB=cb, SCB=scb, _is_hf_initialized=True)
+    layer = Module()
+    original_register, original_buffer = Module.register_parameter, Module.register_buffer
+    with pytest.raises(RuntimeError, match="restore hooks"):
+        with integrations.init_empty_weights(include_buffers=True) as ctx:
+            assert ctx == "original-context"
+            for name, param in (("weight", p), ("q4", p4), ("q8", p8)):
+                layer.register_parameter(name, param)
+                rebuilt = layer._parameters[name]
+                assert rebuilt.device == "meta"
+                assert rebuilt.requires_grad is False
+                assert rebuilt._is_hf_initialized is True
+            assert layer._parameters["q4"].quant_state is quant_state
+            assert layer._parameters["q4"].blocksize == 128
+            assert layer._parameters["q4"]._hf_private == "kept"
+            assert layer._parameters["q8"].SCB is scb
+            assert layer._parameters["q8"].CB is cb
+            assert layer._parameters["q8"].has_fp16_weights is True
+            layer.register_buffer("running", Tensor(2), persistent=False)
+            assert layer._buffers["running"].device == "meta"
+            with integrations.init_empty_weights(include_buffers=False):
+                skip["value"] = True
+                layer.register_parameter("skip", p)
+                skip["value"] = False
+                assert layer._parameters["skip"] is p
+            raise RuntimeError("restore hooks")
+    assert calls == [True, False]
+    assert Module.register_parameter is original_register
+    assert Module.register_buffer is original_buffer
+    # Real argument mistakes must still fail; only private metadata is tolerated.
+    with pytest.raises(TypeError, match="requires_grads"):
+        Parameter(Tensor(1), requires_grads=False)
+
+
+def test_job_deduplication_is_atomic_and_does_not_conflate_downloads(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from studio.jobs import JobManager, model_prepare_job_key
+
+    manager = JobManager(max_workers=2)
+    started, release = threading.Event(), threading.Event()
+    executed = []
+
+    def work(job):
+        executed.append(job.id)
+        started.set()
+        assert release.wait(5)
+        return {"model_id": "qwen", "loaded": True}
+
+    try:
+        first = manager.submit("load_model", "prepare qwen", work, dedup_key="prepare:qwen")
+        assert started.wait(2)
+        with ThreadPoolExecutor(max_workers=8) as callers:
+            same = list(callers.map(lambda _: manager.submit("load_model", "duplicate", work, dedup_key="prepare:qwen"), range(16)))
+        assert {job.id for job in same} == {first.id}
+        assert executed == [first.id]
+        downloaded = manager.submit("download", "disk only", lambda _: {"downloaded": True}, dedup_key="download:qwen")
+        assert downloaded.id != first.id
+        assert first.to_dict()["dedup_key"] == "prepare:qwen"
+        # Different adapter requirements are not silently swallowed by a base-only prepare.
+        assert model_prepare_job_key("qwen", ["b", "a", "b"]) == model_prepare_job_key("qwen", ["a", "b"])
+        assert model_prepare_job_key("qwen", ["a"]) != model_prepare_job_key("qwen")
+        release.set()
+        deadline = time.monotonic() + 2
+        while first.status not in ("completed", "failed") and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert first.status == "completed"
+        after = manager.submit("load_model", "new prepare", lambda _: {"loaded": True}, dedup_key="prepare:qwen")
+        assert after.id != first.id
+    finally:
+        release.set()
+        manager._executor.shutdown(wait=True)
+
+
+def test_cancelled_queued_deduplicated_job_does_not_execute():
+    import threading
+    from studio.jobs import JobManager
+
+    manager = JobManager(max_workers=1)
+    started, release = threading.Event(), threading.Event()
+    called = []
+    try:
+        manager.submit("block", "block", lambda _: (started.set(), release.wait(5)) and {})
+        assert started.wait(2)
+        queued = manager.submit("load_model", "queued", lambda _: called.append(True) or {}, dedup_key="prepare:qwen")
+        duplicate = manager.submit("load_model", "same", lambda _: {}, dedup_key="prepare:qwen")
+        assert queued.id == duplicate.id
+        manager.cancel(queued.id)
+    finally:
+        release.set()
+        manager._executor.shutdown(wait=True)
+    assert queued.status == "cancelled"
+    assert called == []
+
+
+def test_same_model_download_lock_prevents_hf_cache_deletion_race(temp_studio_env, monkeypatch, tmp_path):
+    import threading
+    import types
+    from concurrent.futures import ThreadPoolExecutor
+    import studio.catalog as catalog
+    from studio.jobs import JobRecord
+
+    manager = catalog.CatalogManager()
+    mid = "download-race-regression"
+    definition = {"id": mid, "name": "Race", "category": "lora", "estimated_gb": 0.001,
+                  "artifacts": [{"repo_id": "test/race", "subdir": "lora", "filename": "weights.safetensors", "verify_file": "weights.safetensors"}]}
+    monkeypatch.setattr(manager, "get_definition", lambda _mid: definition)
+    monkeypatch.setattr(manager, "model_dir", lambda _mid: tmp_path / _mid)
+    monkeypatch.setattr(manager, "get_hf_token", lambda: None)
+    monkeypatch.setattr(manager, "check_disk_space", lambda *a, **k: {"ok": True})
+    metadata_calls, downloads = [], []
+    in_download, release, second_started = threading.Event(), threading.Event(), threading.Event()
+
+    class API:
+        def __init__(self, **kw):
+            pass
+
+        def model_info(self, **kw):
+            metadata_calls.append(kw)
+            return types.SimpleNamespace(siblings=[types.SimpleNamespace(rfilename="weights.safetensors", size=5)])
+
+    def download(filename, local_dir, **kw):
+        downloads.append(filename)
+        cache = Path(local_dir) / ".cache" / "huggingface" / "download"
+        cache.mkdir(parents=True)
+        (cache / "weights.lock").write_text("locked")
+        in_download.set()
+        assert release.wait(5)
+        assert cache.exists()
+        target = Path(local_dir) / filename
+        target.write_bytes(b"12345")
+        return str(target)
+
+    monkeypatch.setattr(catalog, "HfApi", API)
+    monkeypatch.setattr(catalog, "hf_hub_download", download)
+    jobs = [JobRecord("download", f"race {i}") for i in range(2)]
+
+    def second():
+        second_started.set()
+        return manager.download_model(mid, jobs[1])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(manager.download_model, mid, jobs[0])
+        try:
+            assert in_download.wait(2)
+            other = pool.submit(second)
+            assert second_started.wait(2)
+        finally:
+            release.set()
+        assert first.result(timeout=3)["model_id"] == mid
+        assert other.result(timeout=3)["model_id"] == mid
+    assert downloads == ["weights.safetensors"]
+    assert len(metadata_calls) == 1
+    assert manager.is_downloaded(mid)
+    assert any("ya está verificado" in line["message"] for line in jobs[1].logs)
+    # A marker is never enough if its verified file is empty.
+    (manager.model_dir(mid) / "lora" / "weights.safetensors").write_bytes(b"")
+    assert not manager.is_downloaded(mid)
+
+
+@pytest.fixture
+def mock_colab_image_runtime(temp_studio_env, monkeypatch, tmp_path):
+    import sys
+    import types
+    from studio.engines import image_engine as engine
+    from studio.memory_manager import RuntimeMemoryManager
+    import studio.memory_manager as memory_module
+
+    monkeypatch.setattr(memory_module, "flush_ram_and_vram", lambda: None)
+    manager = RuntimeMemoryManager()
+    monkeypatch.setattr(engine, "memory_manager", manager)
+    monkeypatch.setattr(engine, "flush_ram_and_vram", lambda: None)
+    monkeypatch.setattr(engine, "apply_runtime_compatibility_patches", lambda: None)
+    monkeypatch.setattr(engine, "query_gpu_info", lambda: {"vram_used_gb": 1.0})
+    monkeypatch.setattr(engine, "run_with_live_memory_progress", lambda fn, **kw: fn())
+    monkeypatch.setattr(engine, "IMAGES_OUT_DIR", tmp_path / "images")
+    events, pipes, downloaded = [], [], set()
+    cat = engine.catalog_manager
+    monkeypatch.setattr(cat, "model_dir", lambda mid: tmp_path / "models" / mid)
+    monkeypatch.setattr(cat, "is_downloaded", lambda mid: mid in downloaded)
+
+    def download(mid, job, **kw):
+        events.append(("download", mid))
+        downloaded.add(mid)
+        for art in cat.get_definition(mid)["artifacts"]:
+            fp = cat.model_dir(mid) / art["subdir"] / (art.get("filename") or art.get("verify_file"))
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_bytes(b"weights")
+        return {"model_id": mid}
+
+    monkeypatch.setattr(cat, "download_model", download)
+
+    class Generator:
+        def __init__(self, device):
+            assert device == "cuda"
+
+        def manual_seed(self, seed):
+            return self
+
+    torch = types.ModuleType("torch")
+    torch.cuda = types.SimpleNamespace(is_available=lambda: True)
+    torch.Generator = Generator
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "diffusers", types.ModuleType("diffusers"))
+
+    class Pipeline:
+        def __init__(self):
+            self.offloaded, self.enabled, self.weights = False, True, ([], [])
+            self.loaded, self.prompts = [], []
+
+        def load_lora_weights(self, folder, weight_name=None, adapter_name=None):
+            if self.offloaded:
+                raise NotImplementedError("Cannot copy out of meta tensor; no data!")
+            self.loaded.append(adapter_name)
+            events.append(("lora", adapter_name))
+
+        def set_adapters(self, names, adapter_weights):
+            self.weights = (list(names), list(adapter_weights))
+            events.append(("activate", tuple(names)))
+
+        def enable_model_cpu_offload(self):
+            self.offloaded = True
+            events.append(("offload", len(pipes)))
+
+        def enable_lora(self):
+            self.enabled = True
+
+        def disable_lora(self):
+            self.enabled = False
+
+        def __call__(self, prompt, image=None, true_cfg_scale=1.0, negative_prompt=None, **kw):
+            self.prompts.append(prompt)
+            return types.SimpleNamespace(images=[Image.new("RGB", (512, 512), "navy")])
+
+    def instantiate(*a):
+        events.append(("instantiate", len(pipes)))
+        pipe = Pipeline()
+        pipes.append(pipe)
+        return pipe
+
+    monkeypatch.setattr(engine, "_instantiate_image_pipeline", instantiate)
+    return engine, manager, events, pipes, downloaded
+
+
+def test_colab_image_autoloads_and_preloads_zero_scale_loras_before_offload(mock_colab_image_runtime):
+    from studio.agent_presets import compile_agent_workflow_preset
+
+    engine, manager, events, pipes, downloaded = mock_colab_image_runtime
+    plan = compile_agent_workflow_preset(gpu_override={"has_gpu": True, "vram_total_gb": 22.0})
+    first, second = (plan["execution_plan"][i]["arguments"] for i in (0, 1))
+    assert manager.get_slot("image") is None
+    result = engine.generate_or_edit_image(prompt=first["prompt"], model_id=first["model_id"],
+        custom_lora_ids=first["custom_lora_ids"], lora_scales=first["lora_scales"], use_ffmpeg_bt709=False, seed=10)
+    pipe = pipes[0]
+    assert result["model_id"] == "qwen-image-edit-2511-pack"
+    assert len(pipe.loaded) == 5  # Lightning + all four creative adapters.
+    offload = next(i for i, event in enumerate(events) if event[0] == "offload")
+    assert all(i < offload for i, event in enumerate(events) if event[0] == "lora")
+    instantiate = next(i for i, event in enumerate(events) if event[0] == "instantiate")
+    assert all(i < instantiate for i, event in enumerate(events) if event[0] == "download")
+    assert len(pipe.weights[0]) == 3  # Lightning, skin, flatlog; inactive adapters add no trigger.
+    assert "Next Scene" not in pipe.prompts[-1]
+    assert "AnyLight" not in pipe.prompts[-1]
+    count = len(events)
+    engine.generate_or_edit_image(prompt=second["prompt"], custom_lora_ids=second["custom_lora_ids"],
+        lora_scales=second["lora_scales"], use_ffmpeg_bt709=False, seed=11)
+    assert len(pipes) == 1
+    assert not any(event[0] in ("download", "lora", "offload", "instantiate") for event in events[count:])
+    expected_names = {engine.catalog_manager.get_definition(mid)["adapter_name"] for mid in second["custom_lora_ids"]}
+    assert set(pipe.weights[0]) == {"lightning"} | expected_names
+
+
+def test_colab_new_image_adapter_reloads_once_and_zero_scale_can_be_reenabled(mock_colab_image_runtime):
+    engine, manager, events, pipes, _ = mock_colab_image_runtime
+    engine.generate_or_edit_image(prompt="two friends on a street", use_ffmpeg_bt709=False, seed=20)
+    old_handle = manager.get_slot("image")["handle"]
+    lid = "qwen-lora-next-scene"
+    engine.generate_or_edit_image(prompt="two friends walking", custom_lora_ids=[lid], lora_scales={lid: 0.0},
+        use_lightning_lora=False, use_ffmpeg_bt709=False, seed=21)
+    assert len(pipes) == 2
+    assert old_handle == {}  # No retained slot bundle while allocating a replacement.
+    assert not pipes[-1].enabled
+    count = len(events)
+    engine.generate_or_edit_image(prompt="two friends walking further", custom_lora_ids=[lid], lora_scales={lid: 0.85},
+        use_lightning_lora=False, use_ffmpeg_bt709=False, seed=22)
+    assert len(pipes) == 2
+    assert pipes[-1].enabled
+    assert pipes[-1].weights[1] == [0.85]
+    assert not any(event[0] in ("download", "lora", "offload") for event in events[count:])
+
+
+def test_colab_image_respects_disabled_lora_downloads_and_model_selection(mock_colab_image_runtime):
+    engine, manager, events, pipes, downloaded = mock_colab_image_runtime
+    lid = "qwen-lora-next-scene"
+    engine.generate_or_edit_image(prompt="a street", custom_lora_ids=[lid], auto_download_loras=False,
+        use_ffmpeg_bt709=False, seed=30)
+    assert lid not in downloaded
+    engine.generate_or_edit_image(prompt="a forest", model_id="qwen-image-2512-pack", use_ffmpeg_bt709=False, seed=31)
+    assert manager.get_slot("image")["model_id"] == "qwen-image-2512-pack"
+    assert len(pipes) == 2
+
+
+def test_gpu_model_jobs_and_unloads_do_not_overlap(temp_studio_env, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    import studio.memory_manager as mm
+    from studio.engines import image_engine, video_engine
+
+    monkeypatch.setattr(mm, "flush_ram_and_vram", lambda: None)
+    manager = mm.RuntimeMemoryManager()
+    manager.register_loaded("image", "qwen", "Qwen", {"pipe": object()})
+    active, release, attempted, video_entered = (threading.Event() for _ in range(4))
+    order = []
+
+    @mm.serialized_gpu_operation
+    def infer():
+        active.set()
+        assert release.wait(5)
+        assert manager.get_slot("image") is not None
+        order.append("image_done")
+
+    def prepare_video(**kw):
+        video_entered.set()
+        order.append("video_load")
+        manager.unload_all()
+        return {"model_id": "wan"}
+
+    monkeypatch.setattr(video_engine, "_load_video_model_into_memory_locked", prepare_video)
+
+    def competing_prepare():
+        attempted.set()
+        return video_engine.load_video_model_into_memory(model_id="wan")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(infer)
+        try:
+            assert active.wait(2)
+            second = pool.submit(competing_prepare)
+            assert attempted.wait(2)
+            assert not video_entered.wait(0.05)
+        finally:
+            release.set()
+        first.result(timeout=3)
+        second.result(timeout=3)
+    assert order == ["image_done", "video_load"]
+    assert manager.get_slot("image") is None
+
+
+def test_mcp_and_rest_prepare_reuse_active_job_but_download_is_distinct(temp_studio_env, monkeypatch):
+    import json
+    import threading
+    import app as app_module
+    import studio.mcp_server as mcp
+    from studio.jobs import JobManager
+
+    client, _ = temp_studio_env
+    monkeypatch.setenv("STUDIO_MCP_TOKEN", "")
+    manager = JobManager(max_workers=2)
+    monkeypatch.setattr(app_module, "job_manager", manager)
+    monkeypatch.setattr(mcp, "job_manager", manager)
+    monkeypatch.setattr(mcp.catalog_manager, "is_downloaded", lambda _: True)
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def load(**kw):
+        calls.append(kw["model_id"])
+        started.set()
+        assert release.wait(5)
+        return {"model_id": kw["model_id"], "loaded": True}
+
+    monkeypatch.setattr(mcp, "load_image_model_into_memory", load)
+    monkeypatch.setattr(app_module, "load_image_model_into_memory", load)
+    monkeypatch.setattr(mcp.catalog_manager, "download_model", lambda mid, job: {"model_id": mid, "downloaded": True})
+    mid = "qwen-image-edit-2511-pack"
+    try:
+        first = json.loads(mcp._execute_mcp_tool("studio_prepare_model", {"model_id": mid, "wait": False})["content"][0]["text"])
+        assert started.wait(2)
+        again = client.post("/api/memory/load", json={"model_id": mid, "auto_download": True}).json()
+        assert first["job_id"] == again["job"]["id"]
+        assert "wait_seconds=80" in first["how_to_wait"]
+        download = json.loads(mcp._execute_mcp_tool("studio_prepare_model", {"model_id": mid, "load_into_vram": False, "wait": False})["content"][0]["text"])
+        assert download["job_id"] != first["job_id"]
+        assert calls == [mid]
+    finally:
+        release.set()
+        manager._executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("duration,expected", [("un minuto", 12), ("60s", 12), ("30 segundos", 6), ("medio minuto", 6), ("0,5 minutos", 6), ("one minute", 12), ("20s", 4)])
+def test_workflow_duration_inference_and_visual_prompt_cleanup(duration, expected):
+    from studio.agent_presets import compile_agent_workflow_preset, _sanitize_visual_scene_description
+
+    raw = f"Dos amigos con chaquetas rojas caminan por una avenida con coches. Crear los diálogos, que sea un clip de {duration}, utiliza LoRAs rápido, con lipsync."
+    plan = compile_agent_workflow_preset(scene_description=raw, gpu_override={"has_gpu": True, "vram_total_gb": 22.0})
+    summary = plan["planned_duration_summary"]
+    assert summary["num_clips"] == expected
+    assert summary["num_keyframes"] == expected + 1
+    assert summary["estimated_total_seconds"] == expected * 5.0
+    prompt = plan["execution_plan"][0]["arguments"]["prompt"].lower()
+    assert "chaquetas rojas" in prompt and "avenida con coches" in prompt
+    assert all(fragment not in prompt for fragment in ("crear los diálogos", "clip de", "loras", "lipsync", duration.lower()))
+    assert _sanitize_visual_scene_description("Crear los diálogos, utiliza LoRAs rápido, con lipsync") == ""
+    # Non-default explicit clip counts are not overwritten by a duration in the scene.
+    one = compile_agent_workflow_preset(scene_description=raw, num_clips=1, gpu_override={"has_gpu": False})
+    assert one["planned_duration_summary"]["num_clips"] == 1
+    voices = one["execution_plan"][-2]["parallel_or_sequential_calls"]
+    assert len([v for v in voices if v["tool"] == "studio_generate_speech"]) == 2
+
+
+def test_full_minute_plan_has_strict_phase_barriers_valid_tools_and_all_dialogue(temp_studio_env):
+    from studio.agent_presets import compile_agent_workflow_preset
+    from studio.mcp_server import _build_mcp_tools_schema
+
+    dialogue = [f"Réplica número {i}." for i in range(15)]
+    plan = compile_agent_workflow_preset(scene_description="Dos personas andando por la calle hablando; un clip de un minuto.",
+        dialogue_lines=dialogue, gpu_override={"has_gpu": True, "vram_total_gb": 22.0})
+    steps = plan["execution_plan"]
+    assert all(step.get("tool") == "studio_generate_or_edit_image" for step in steps[:13])
+    assert steps[13]["tool"] == "studio_analyze_coherence"
+    assert steps[13]["required_result"] == {"all_consistent": True, "vlm_semantic_used": True}
+    assert steps[13]["save_output_as"] == "COHERENCE_AUDIT_RESULT"
+    video = steps[14:26]
+    assert len(video) == 12
+    assert {step["arguments"]["model_id"] for step in video} == {"wan21-vace-14b-fp8"}
+    assert all(step["batch"] == "3_all_video_clips" and "COHERENCE_AUDIT_RESULT" in step["requires_outputs"] for step in video)
+    assert plan["execution_policy"]["allow_automatic_fallback_downloads"] is False
+    assert plan["execution_policy"]["gpu_calls_parallel"] is False
+    assert "POSITION M" in steps[12]["arguments"]["prompt"]
+    assert "48 meters beyond" in steps[12]["arguments"]["prompt"]
+    first = steps[0]["arguments"]
+    assert first["lora_scales"]["qwen-lora-next-scene"] == 0.0
+    assert first["lora_scales"]["qwen-lora-anylight-env"] == 0.0
+    assert len(first["custom_lora_ids"]) == 4
+    voices = steps[-2]["parallel_or_sequential_calls"]
+    assert [v["arguments"]["text"] for v in voices if v["tool"] == "studio_generate_speech"] == dialogue
+    post = steps[-1]["recommended_calls"]
+    turns = [turn for call in post if call["tool"] == "studio_lipsync_character" for turn in call["arguments"]["dialogue_turns"]]
+    assert len(turns) == len(dialogue)
+    assert {t["voice_audio_rel"] for t in turns} == {f"<VOICE_{i}_REL>" for i in range(1, 16)}
+    montage = post[-1]["arguments"]
+    assert montage["global_audio_rel"] == "<STREET_AMBIENCE_REL>"
+    assert montage["fade_seconds"] == 0.0
+    assert len(montage["items"]) == 12
+
+    schemas = {tool["name"]: tool["inputSchema"] for tool in _build_mcp_tools_schema()}
+    calls = []
+    for step in steps:
+        if "tool" in step:
+            calls.append(step)
+        calls.extend(step.get("parallel_or_sequential_calls", []))
+        calls.extend(step.get("recommended_calls", []))
+    for call in calls:
+        schema, args = schemas[call["tool"]], call["arguments"]
+        assert set(args) <= set(schema["properties"]), call
+        assert set(schema.get("required", [])) <= set(args), call
+
+
+def test_preset_duration_inference_is_consistent_in_rest_and_mcp(temp_studio_env, monkeypatch):
+    import json
+    import studio.mcp_server as mcp
+
+    client, _ = temp_studio_env
+    monkeypatch.setenv("STUDIO_MCP_TOKEN", "")
+    description = "Dos amigos caminan por la avenida; que sea un clip de un minuto, crear los diálogos, utiliza LoRAs rápido."
+    rest = client.post("/api/mcp/presets/compile", json={"scene_description": description}).json()
+    remote = json.loads(mcp._execute_mcp_tool("studio_get_workflow_preset", {"scene_description": description})["content"][0]["text"])
+    assert rest["planned_duration_summary"] == remote["planned_duration_summary"]
+    assert rest["planned_duration_summary"]["num_clips"] == 12
+    assert "clip de" not in rest["execution_plan"][0]["arguments"]["prompt"]
+
+
+def test_mcp_failed_job_instructs_stop_without_panic_downloading(monkeypatch):
+    import studio.mcp_server as mcp
+    from studio.jobs import JobRecord
+    from types import SimpleNamespace
+
+    failed = JobRecord("load_model", "Qwen")
+    failed.status = "failed"
+    failed.error = "Parameter.__new__() got an unexpected keyword argument '_is_hf_initialized'"
+    monkeypatch.setattr(mcp, "job_manager", SimpleNamespace(get=lambda _: failed))
+    result = mcp._wait_for_job_bounded(failed.id)
+    assert result["ok"] is False
+    assert result["error_code"] == "JOB_FAILED"
+    assert "_is_hf_initialized" in result["error"]
+    assert "PROHIBIDO" in result["anti_panic_rule"]
+    assert "NO se arregla" in result["anti_panic_rule"]
+
+
+def test_mcp_montage_preserves_full_video_duration_and_zero_fade(temp_studio_env, monkeypatch):
+    import json
+    import studio.mcp_server as mcp
+    from studio.config import UPLOADS_DIR
+    from studio.jobs import JobManager
+
+    manager = JobManager()
+    monkeypatch.setattr(mcp, "job_manager", manager)
+    clip = UPLOADS_DIR / "mock_six_second_clip.mp4"
+    clip.write_bytes(b"mock video")
+    captured = {}
+
+    def render(**kw):
+        captured.update(kw)
+        return {"duration_seconds": 6.0, "width": 640, "height": 360, "size_bytes": 100}
+
+    monkeypatch.setattr(mcp, "render_montage_mp4", render)
+    try:
+        result = json.loads(mcp._execute_mcp_tool("studio_render_montage", {"items": [{"media_rel": f"uploads/{clip.name}"}],
+            "fade_seconds": 0.0, "global_audio_volume": 0.0})["content"][0]["text"])
+    finally:
+        manager._executor.shutdown(wait=True)
+    assert result["status"] == "completed"
+    assert captured["items"][0]["duration"] == 0.0  # FFmpeg probes native duration; not the former hard-coded 4s.
+    assert captured["fade_seconds"] == 0.0
+    assert captured["global_audio_volume"] == 0.0
+
+
+def test_video_batch_releases_image_and_vision_slots_before_loading(mock_colab_image_runtime, monkeypatch):
+    from studio.engines import video_engine
+
+    image, manager, events, pipes, downloaded = mock_colab_image_runtime
+    image_handle = {"pipe": object()}
+    vision_handle = {"model": object(), "processor": object()}
+    manager.register_loaded("image", "qwen-image-edit-2511-pack", "Qwen", image_handle)
+    manager.register_loaded("vision", "qwen25-vl-3b-coherence", "Inspector", vision_handle)
+    monkeypatch.setattr(video_engine, "memory_manager", manager)
+    monkeypatch.setattr(video_engine, "apply_runtime_compatibility_patches", lambda: None)
+    monkeypatch.setattr(video_engine, "flush_ram_and_vram", lambda: None)
+    monkeypatch.setattr(video_engine, "query_gpu_info", lambda: {"vram_used_gb": 1.0, "vram_total_gb": 22.0})
+    monkeypatch.setattr(video_engine, "_apply_best_offload", lambda *a, **k: None)
+
+    def instantiate(*a, **k):
+        assert manager.get_slot("image") is None
+        assert manager.get_slot("vision") is None
+        assert image_handle == {} and vision_handle == {}
+        return {"pipe": object()}
+
+    monkeypatch.setattr(video_engine, "_instantiate_video_pipeline", instantiate)
+    result = video_engine.load_video_model_into_memory("wan21-vace-1.3b", auto_download=True)
+    assert result["model_id"] == "wan21-vace-1.3b"
+    assert manager.get_slot("video")["model_id"] == result["model_id"]
+    assert "wan21-vace-1.3b" in downloaded
+
+
+def test_unload_pipeline_bundles_releases_objects_not_shared_catalogue(monkeypatch):
+    import gc
+    import weakref
+    import studio.memory_manager as mm
+
+    class Pipe:
+        def maybe_free_model_hooks(self):
+            pass
+
+    pipe = Pipe()
+    ref = weakref.ref(pipe)
+    definition = {"id": "qwen", "name": "Do not clear the shared catalogue"}
+    handle = {"pipe": pipe, "all_components": {"model": pipe}, "defn": definition}
+    manager = mm.RuntimeMemoryManager()
+    monkeypatch.setattr(mm, "flush_ram_and_vram", lambda: None)
+    manager.register_loaded("image", "qwen", "Qwen", handle)
+    del pipe
+    manager.unload_by_model_id("qwen")
+    gc.collect()
+    assert ref() is None
+    assert handle == {}
+    assert definition["id"] == "qwen"
+
+
+def test_mcp_sanitizes_raw_image_and_video_prompts_before_inference(temp_studio_env, monkeypatch):
+    import json
+    import studio.mcp_server as mcp
+    from studio.jobs import JobManager
+
+    manager = JobManager()
+    monkeypatch.setattr(mcp, "job_manager", manager)
+    prompts = []
+
+    def generate(**kw):
+        prompts.append(kw["prompt"])
+        return {"model_id": kw["model_id"]}
+
+    monkeypatch.setattr(mcp, "generate_or_edit_image", generate)
+    monkeypatch.setattr(mcp, "generate_video_clip", generate)
+    monkeypatch.setattr(mcp.catalog_manager, "check_disk_space", lambda *a, **k: {"ok": True})
+    raw = "Two friends walk down a tree-lined avenue. Crear los diálogos, un clip de 60s, utiliza LoRAs rápido, con lipsync."
+    try:
+        for tool, args in (
+            ("studio_generate_or_edit_image", {"model_id": "qwen-image-edit-2511-pack", "prompt": raw}),
+            ("studio_generate_video", {"model_id": "wan21-vace-1.3b", "video_submode": "t2v", "prompt": raw}),
+        ):
+            result = json.loads(mcp._execute_mcp_tool(tool, args)["content"][0]["text"])
+            assert result["status"] == "completed", result
+    finally:
+        manager._executor.shutdown(wait=True)
+    assert len(prompts) == 2
+    assert all("tree-lined avenue" in prompt for prompt in prompts)
+    assert all(not any(meta in prompt.lower() for meta in ("diálogos", "clip de", "60s", "loras", "lipsync")) for prompt in prompts)

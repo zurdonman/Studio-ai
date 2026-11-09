@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 
 from studio.catalog import catalog_manager
+from studio.compat_patches import apply_runtime_compatibility_patches
 from studio.config import VIDEOS_OUT_DIR
 from studio.engines.ffmpeg_utils import (
     create_motion_clip_from_image,
@@ -28,6 +29,7 @@ from studio.memory_manager import (
     flush_ram_and_vram,
     memory_manager,
     run_with_live_memory_progress,
+    serialized_gpu_operation,
 )
 
 # Prompts negativos oficiales verificados en las model cards de cada fabricante
@@ -937,6 +939,7 @@ def _instantiate_video_pipeline(
     defn: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Instancia la clase exacta de Diffusers con los tipos y schedulers oficiales verificados."""
+    apply_runtime_compatibility_patches()
     import torch  # type: ignore
     import diffusers  # type: ignore
 
@@ -1203,6 +1206,7 @@ def _instantiate_video_pipeline(
     }
 
 
+@serialized_gpu_operation
 def load_video_model_into_memory(
     model_id: str = "wan22-ti2v-5b",
     auto_download: bool = False,
@@ -1210,6 +1214,21 @@ def load_video_model_into_memory(
     progress_range: Tuple[float, float] = (0.0, 100.0),
 ) -> Dict[str, Any]:
     """Carga cualquier modelo de vídeo del catálogo liberando antes otros modelos de VRAM."""
+    return _load_video_model_into_memory_locked(
+        model_id=model_id,
+        auto_download=auto_download,
+        job=job,
+        progress_range=progress_range,
+    )
+
+
+def _load_video_model_into_memory_locked(
+    model_id: str = "wan22-ti2v-5b",
+    auto_download: bool = False,
+    job: Optional[JobRecord] = None,
+    progress_range: Tuple[float, float] = (0.0, 100.0),
+) -> Dict[str, Any]:
+    apply_runtime_compatibility_patches()
     p_lo, p_hi = progress_range
 
     def _span(frac: float) -> float:
@@ -1241,6 +1260,8 @@ def load_video_model_into_memory(
             )
         return {"model_id": model_id, "vram_allocated_gb": vram_now}
 
+    del cur_vid
+
     try:
         import torch  # type: ignore
         import diffusers  # noqa: F401
@@ -1256,15 +1277,17 @@ def load_video_model_into_memory(
         )
 
     if not catalog_manager.is_downloaded(model_id):
-        if auto_download and job is not None:
+        if auto_download:
             dl_start = _span(0.02)
             dl_end = _span(0.72)
-            job.log(
-                f"Descargando «{defn['name']}» de Hugging Face...",
-                progress=dl_start,
-                step="Descargando modelo de vídeo...",
-            )
-            catalog_manager.download_model(model_id, job, progress_range=(dl_start, dl_end))
+            if job:
+                job.log(
+                    f"Descargando «{defn['name']}» de Hugging Face...",
+                    progress=dl_start,
+                    step="Descargando modelo de vídeo...",
+                )
+            dl_job = job or JobRecord("download", f"Auto-descarga {model_id}")
+            catalog_manager.download_model(model_id, dl_job, progress_range=(dl_start, dl_end))
             load_frac_start = 0.72
         else:
             raise RuntimeError(
@@ -1284,7 +1307,7 @@ def load_video_model_into_memory(
 
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    for prev_slot in ("video", "image"):
+    for prev_slot in ("video", "image", "vision"):
         ps = memory_manager.get_slot(prev_slot)
         if ps:
             if job:
@@ -1293,6 +1316,7 @@ def load_video_model_into_memory(
                     progress=_map_pct(0.08),
                     step=f"Liberando VRAM ({prev_slot})...",
                 )
+            del ps
             memory_manager.unload_slot(prev_slot)
 
     flush_ram_and_vram()
@@ -1533,6 +1557,7 @@ def _frames_to_mp4(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+@serialized_gpu_operation
 def generate_video_clip(
     mode: str = "ai",  # "ai" | "ffmpeg_motion"
     video_submode: str = "auto",  # "auto" | "t2v" | "i2v" | "flf2v"
@@ -1672,6 +1697,7 @@ def generate_video_clip(
                 progress=1.0,
                 step="Preparando modelo de vídeo...",
             )
+        slot = None
         load_video_model_into_memory(
             model_id=target_model_id,
             auto_download=True,

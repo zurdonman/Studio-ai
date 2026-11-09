@@ -11,9 +11,74 @@ Cada preset actúa como un «Director Técnico Compilado»:
      anti-estática (`expect_spatial_progression=true`), voces TTS, LipSync HD por turnos y ambiente con Auto-Ducking.
 """
 
-from typing import Any, Dict, List, Optional
+import math
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from studio.hardware import query_gpu_info
+
+
+_DURATION_PATTERN = (
+    r"\b(?:\d+(?:[.,]\d+)?|un|uno|medio|one|a|half)\s*"
+    r"(?:minutos?|minutes?|mins?|segundos?|seconds?|secs?|seg|s)\b"
+)
+_META_INSTRUCTION_PATTERNS = [
+    r"\b(?:crea(?:r|me)?|genera(?:r|me)?|escribe|create|generate|write)\s+"
+    r"(?:(?:los|el|unos|the|some)\s+)?di[aá]log(?:os?|ues?)\b(?:\s+(?:de|para)\s+(?:los\s+)?personajes)?",
+    r"\b(?:los\s+personajes\s+)?que\s+tengan?\s+(?:todos?\s+)?coherencia\b",
+    rf"\b(?:(?:que\s+sea|haz(?:me)?|quiero)\s+)?(?:(?:un|el|a)\s+)?(?:clip|v[ií]deo)\s+(?:de\s+)?{_DURATION_PATTERN}",
+    rf"\b(?:duraci[oó]n\s*(?:de\s*)?|duration\s*:?\s*)?{_DURATION_PATTERN}",
+    r"\b(?:en\s+)?total\s+coherencia\b",
+    r"\b(?:utiliza(?:ndo|r)?|usa(?:ndo|r)?|use)\s+(?:las\s+)?loras?\s*(?:r[aá]pid[oa]s?|fast)?\b",
+    r"\bsincroniza(?:ndo|r)?\s+(?:los\s+)?labios?\b",
+    r"\bcon\s+lip[ -]?sync\b",
+]
+
+
+def _sanitize_visual_scene_description(raw: str) -> str:
+    """Keep physical scene details; never feed workflow directives to a visual model."""
+    cleaned = (raw or "").strip()
+    for pattern in _META_INSTRUCTION_PATTERNS:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.;])", r"\1", cleaned)
+    cleaned = re.sub(r"([,;])\s*[,;]+", r"\1", cleaned)
+    return cleaned.strip(" ,.;:-")
+
+
+def _infer_clip_plan_from_text(scene_raw: str, requested_num_clips: Optional[int]) -> Tuple[int, float]:
+    """Infer 5s batches (60s = 12 clips), without replacing an explicit non-default count."""
+    match = re.search(_DURATION_PATTERN, (scene_raw or "").lower())
+    target_seconds = 0.0
+    if match:
+        duration = match.group(0)
+        number = re.match(r"\d+(?:[.,]\d+)?|un|uno|medio|one|a|half", duration)
+        if number:
+            word = number.group(0)
+            values = {"un": 1.0, "uno": 1.0, "one": 1.0, "a": 1.0, "medio": 0.5, "half": 0.5}
+            amount = values[word] if word in values else float(word.replace(",", "."))
+            target_seconds = amount * (60.0 if "min" in duration else 1.0)
+
+    if target_seconds > 0 and (requested_num_clips is None or int(requested_num_clips) == 2):
+        return max(1, min(12, math.ceil(target_seconds / 5.0))), 5.0
+    n = int(requested_num_clips) if requested_num_clips is not None else 2
+    return max(1, min(12, n)), 5.0
+
+
+_DEFAULT_STREET_DIALOGUE_POOL = [
+    "¿Has visto la luz de esta avenida? Parece una película.",
+    "Sí, hoy apetece caminar sin prisa y mirar alrededor.",
+    "Me encantan los nuevos escaparates y las terrazas del barrio.",
+    "Antes pasábamos corriendo. Hoy podemos disfrutarlo con calma.",
+    "¿Paramos en aquella cafetería de la esquina a tomar algo?",
+    "¡Buena idea! Dicen que preparan un café estupendo.",
+    "Lleguemos al final del bulevar y nos ponemos al día.",
+    "Perfecto, tengo mil cosas que contarte de esta semana.",
+    "Cuéntame, que aún queda un buen tramo por delante.",
+    "No te vas a creer lo bien que salió todo.",
+    "¡Qué alegría! Me encanta verte con tanta energía.",
+    "Gracias. Caminar y charlar contigo siempre me arregla el día.",
+]
 
 AGENT_PRESET_SUMMARY_CATALOG: Dict[str, Dict[str, Any]] = {
     "coherencia_personajes_entorno_avance": {
@@ -207,7 +272,7 @@ def compile_agent_workflow_preset(
     scene_description: str = "",
     characters_description: str = "",
     dialogue_lines: Optional[List[str]] = None,
-    num_clips: int = 2,
+    num_clips: Optional[int] = None,
     aspect_ratio: str = "16:9",
     gpu_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -223,24 +288,23 @@ def compile_agent_workflow_preset(
     has_gpu = bool(gpu.get("has_gpu", vram_gb > 0))
     vid_stack = _select_video_stack_for_gpu(vram_gb=vram_gb, has_gpu=has_gpu)
 
-    n_clips = max(1, min(12, int(num_clips or 2)))
+    n_clips, clip_dur_sec = _infer_clip_plan_from_text(scene_description, num_clips)
     ar = aspect_ratio if aspect_ratio in ("16:9", "9:16", "1:1") else "16:9"
     orient = "portrait" if ar == "9:16" else ("square" if ar == "1:1" else "landscape")
 
+    clean_scene = _sanitize_visual_scene_description(scene_description)
     scene_txt = (
-        scene_description.strip()
+        clean_scene
         or "dos amigos (un hombre joven con chaqueta vaquera oscura y una mujer joven con gabardina beige) andando por una calle peatonal arbolada al atardecer mientras conversan"
     )
     chars_txt = (
-        characters_description.strip()
+        _sanitize_visual_scene_description(characters_description)
         or "Personaje izquierda: hombre de 30 años, pelo castaño corto, barba incipiente, chaqueta vaquera azul oscuro sobre camiseta blanca y pantalón chino gris. Personaje derecha: mujer de 29 años, melena castaña ondulada por los hombros, gabardina beige abierta sobre jersey negro y vaqueros."
     )
     d_lines = [str(x).strip() for x in (dialogue_lines or []) if str(x).strip()]
-    if not d_lines:
-        d_lines = [
-            "¿Te fijaste en lo bien que ha quedado la secuencia? Parece rodada con cámara de cine.",
-            "Totalmente, y lo mejor es que mantenemos el ritmo mientras caminamos por toda la calle.",
-        ]
+    num_turns = max(2, n_clips, len(d_lines))
+    while len(d_lines) < num_turns:
+        d_lines.append(_DEFAULT_STREET_DIALOGUE_POOL[len(d_lines) % len(_DEFAULT_STREET_DIALOGUE_POOL)])
 
     # ==================== PRESET 1: CAMINANDO Y HABLANDO CON AVANCE REAL ====================
     if resolved_id == "coherencia_personajes_entorno_avance":
@@ -262,19 +326,27 @@ def compile_agent_workflow_preset(
                 "phase": "keyframe_1_master_anchor",
                 "purpose": (
                     "Generar el FOTOGRAMA 1 (ANCLA MAESTRA en el Punto A de la calle). "
-                    "REGLA CRÍTICA DE ENCUADRE: Usa plano americano (desde las rodillas hacia arriba) o cuerpo entero "
-                    "con profundidad clara de calle (escaparates, árboles, farolas, baldosas). Si haces un primerísimo plano cerrado "
-                    "con fondo desenfocado, NO se percibirá que avanzan por la calle."
+                    "NO llames antes a `studio_prepare_model`: esta llamada auto-descarga y auto-carga `qwen-image-edit-2511-pack` "
+                    "+ `Lightning` + los 4 LoRAs del flujo de una sola vez (dejando `next-scene` y `anylight` precargados a escala 0.0 "
+                    "para conmutar los Fotogramas 2..N sin volver a cargar los pesos). "
+                    "REGLA CRÍTICA: Describe en el prompt SOLO la escena visual física (sin frases como 'crea los diálogos' o 'clip de un minuto')."
                 ),
                 "tool": "studio_generate_or_edit_image",
                 "arguments": {
                     "model_id": "qwen-image-edit-2511-pack",
                     "aspect_ratio": ar,
                     "use_official_defaults": True,
-                    "custom_lora_ids": ["qwen-lora-skin-realism", "qwen-lora-flatlog-cinema"],
+                    "custom_lora_ids": [
+                        "qwen-lora-skin-realism",
+                        "qwen-lora-flatlog-cinema",
+                        "qwen-lora-next-scene",
+                        "qwen-lora-anylight-env",
+                    ],
                     "lora_scales": {
                         "qwen-lora-skin-realism": 0.80,
                         "qwen-lora-flatlog-cinema": 0.65,
+                        "qwen-lora-next-scene": 0.0,
+                        "qwen-lora-anylight-env": 0.0,
                     },
                     "prompt": anchor_prompt,
                 },
@@ -283,28 +355,25 @@ def compile_agent_workflow_preset(
         )
 
         # Pasos 2..K: Fotogramas progresivos (Punto B, Punto C...) avanzando 4 metros cada uno
-        stride_variants = [
-            (
-                "4 meters further down the same street (POSITION B)",
-                "person on the left now steps forward with their RIGHT leg listening attentively, while person on the right steps forward with their LEFT leg gesturing naturally while replying",
-                "the café awning and streetlamp from Position A have now receded noticeably further back in the background distance behind them, while a new bookstore window and leafy tree appear along the sidewalk beside them",
-            ),
-            (
-                "another 4 meters further forward along the same street (POSITION C)",
-                "person on the left steps forward again with their LEFT leg sharing a laugh, while person on the right steps forward with their RIGHT leg in mid-stride",
-                "the bookstore window is now behind their shoulders in mid-ground perspective and a stone crosswalk with warm evening reflections enters the foreground pavement",
-            ),
-            (
-                "another 4 meters further down the avenue (POSITION D)",
-                "opposite legs stepping forward in continuous natural walking gait, lively natural conversation",
-                "previous shopfronts recede into the far background depth as new warm street details pass by on both sides",
-            ),
+        parallax_variants = [
+            "the café awning and streetlamp from Position A have now receded noticeably further back in the background distance behind them, while a new bookstore window and leafy tree appear along the sidewalk beside them",
+            "the bookstore window is now behind their shoulders in mid-ground perspective and a stone crosswalk with warm evening reflections enters the foreground pavement",
+            "previous shopfronts recede into the far background depth as new warm street details pass by on both sides",
         ]
 
         for kf_idx in range(2, num_keyframes + 1):
             prev_var = f"FRAME_{kf_idx - 1}_REL"
             refs_vars = ["<FRAME_1_REL>"] if kf_idx == 2 else ["<FRAME_1_REL>", f"<{prev_var}>"]
-            pos_txt, stride_txt, parallax_txt = stride_variants[(kf_idx - 2) % len(stride_variants)]
+            parallax_txt = parallax_variants[min(kf_idx - 2, len(parallax_variants) - 1)]
+            pos_txt = (
+                f"4 meters further forward than the previous frame (POSITION {chr(64 + kf_idx)}, "
+                f"{(kf_idx - 1) * 4} meters beyond the master anchor at POSITION A)"
+            )
+            left_leg, right_leg = ("RIGHT", "LEFT") if kf_idx % 2 == 0 else ("LEFT", "RIGHT")
+            stride_txt = (
+                f"person on the left steps forward with their {left_leg} leg while person on the right steps "
+                f"forward with their {right_leg} leg; a fresh natural conversational gesture, continuous walking gait"
+            )
 
             prog_prompt = (
                 f"Next Scene: The exact same two people from the reference image ({chars_txt}) with 100% identical faces, "
@@ -367,6 +436,9 @@ def compile_agent_workflow_preset(
                     "expect_spatial_progression": True,
                     "mode": "hybrid_auto",
                 },
+                "save_output_as": "COHERENCE_AUDIT_RESULT",
+                "required_result": {"all_consistent": True, "vlm_semantic_used": has_gpu},
+                "on_failure": "Reparar fotogramas fallidos y reauditar TODO el lote; no cargar vídeo todavía.",
             }
         )
 
@@ -400,7 +472,7 @@ def compile_agent_workflow_preset(
                         "extra_video_lora_ids": vid_stack["extra_video_lora_ids"],
                         "extra_video_lora_scales": vid_stack["extra_video_lora_scales"],
                         "orientation": orient,
-                        "duration_sec": 5.0,
+                        "duration_sec": clip_dur_sec,
                         "use_official_defaults": True,
                         "image_rel": start_var,
                         "end_image_rel": end_var,
@@ -411,117 +483,192 @@ def compile_agent_workflow_preset(
             )
 
         # Voces + Ambiente de Calle + LipSync HD por turnos + Montaje
+        voice_calls: List[Dict[str, Any]] = []
+        for t_idx in range(1, num_turns + 1):
+            is_left = (t_idx % 2 == 1)
+            voice_calls.append(
+                {
+                    "tool": "studio_generate_speech",
+                    "arguments": {
+                        "voice_id": "es-ES-AlvaroNeural" if is_left else "es-ES-ElviraNeural",
+                        "text": d_lines[t_idx - 1],
+                    },
+                    "save_output_as": f"VOICE_{t_idx}_REL",
+                }
+            )
+        voice_calls.append(
+            {
+                "tool": "studio_generate_music_or_sfx",
+                "arguments": {
+                    "model_id": "procedural-ambience-cpu",
+                    "preset": "city_street_walk",
+                    "duration_seconds": float(n_clips * clip_dur_sec + 2.0),
+                },
+                "save_output_as": "STREET_AMBIENCE_REL",
+            }
+        )
+
         steps.append(
             {
                 "step_number": len(steps) + 1,
                 "phase": "voices_and_street_ambience",
                 "purpose": (
-                    "Generar las locuciones de diálogo (una voz para el personaje izquierdo y otra para el derecho) "
-                    "más la pista de ambiente exterior de calle con pasos suaves (`city_street_walk`, 0 GB VRAM)."
+                    f"Generar las {num_turns} réplicas de conversación alternas (`es-ES-AlvaroNeural` para personaje izquierdo, "
+                    f"`es-ES-ElviraNeural` para personaje derecho) más la pista de ambiente exterior con pasos suaves (`city_street_walk`, 0 GB VRAM)."
                 ),
-                "parallel_or_sequential_calls": [
-                    {
-                        "tool": "studio_generate_speech",
-                        "arguments": {"voice_id": "es-ES-AlvaroNeural", "text": d_lines[0]},
-                        "save_output_as": "VOICE_1_REL",
-                    },
-                    {
-                        "tool": "studio_generate_speech",
-                        "arguments": {
-                            "voice_id": "es-ES-ElviraNeural",
-                            "text": d_lines[1] if len(d_lines) > 1 else "¡Totalmente de acuerdo!",
-                        },
-                        "save_output_as": "VOICE_2_REL",
-                    },
-                    {
-                        "tool": "studio_generate_music_or_sfx",
-                        "arguments": {
-                            "model_id": "procedural-ambience-cpu",
-                            "preset": "city_street_walk",
-                            "duration_seconds": float(n_clips * 5 + 2),
-                        },
-                        "save_output_as": "STREET_AMBIENCE_REL",
-                    },
-                ],
+                "parallel_or_sequential_calls": voice_calls,
             }
         )
+
+        # Para secuencias largas (>= 4 clips, ej. 30-60s), sincronizar labios clip por clip (~5s cada uno)
+        # evita timeouts MCP y mantiene cadencia exacta; luego unir con fade_seconds=0.0 + ambiente urbano.
+        if n_clips >= 4:
+            post_calls: List[Dict[str, Any]] = [
+                {
+                    "tool": "studio_prepare_model",
+                    "arguments": {"model_id": "edtalk-256-lipsync-hd"},
+                }
+            ]
+            for c_idx in range(1, n_clips + 1):
+                clip_turns = [i for i in range(1, num_turns + 1) if min(n_clips, (i - 1) * n_clips // num_turns + 1) == c_idx]
+                first_turn = clip_turns[0]
+                post_calls.append(
+                    {
+                        "tool": "studio_lipsync_character",
+                        "arguments": {
+                            "media_rel": f"<RAW_VIDEO_CLIP_{c_idx}_REL>",
+                            "dialogue_turns": [
+                                {
+                                    "voice_audio_rel": f"<VOICE_{t_idx}_REL>",
+                                    "target_face": "leftmost" if t_idx % 2 == 1 else "rightmost",
+                                    "start_sec": round((t_idx - first_turn) * clip_dur_sec / len(clip_turns), 2),
+                                }
+                                for t_idx in clip_turns
+                            ],
+                        },
+                        "save_output_as": f"LIPSYNC_CLIP_{c_idx}_REL",
+                    }
+                )
+            post_calls.append(
+                {
+                    "tool": "studio_render_montage",
+                    "arguments": {
+                        "title": "paseo_calle_conversacion_master",
+                        "items": [{"media_rel": f"<LIPSYNC_CLIP_{i}_REL>"} for i in range(1, n_clips + 1)],
+                        "fade_seconds": 0.0,
+                        "global_audio_rel": "<STREET_AMBIENCE_REL>",
+                        "global_audio_volume": 0.18,
+                    },
+                    "save_output_as": "FINAL_MASTER_VIDEO_REL",
+                }
+            )
+        else:
+            post_calls = [
+                {
+                    "tool": "studio_prepare_model",
+                    "arguments": {"model_id": "edtalk-256-lipsync-hd"},
+                },
+                *(
+                    [
+                        {
+                            "tool": "studio_render_montage",
+                            "arguments": {
+                                "title": "paseo_continuo_base",
+                                "items": [
+                                    {"media_rel": f"<RAW_VIDEO_CLIP_{i}_REL>"} for i in range(1, n_clips + 1)
+                                ],
+                                "fade_seconds": 0.0,
+                            },
+                            "save_output_as": "JOINED_WALK_VIDEO_REL",
+                        }
+                    ]
+                    if n_clips >= 2
+                    else []
+                ),
+                {
+                    "tool": "studio_lipsync_character",
+                    "arguments": {
+                        "media_rel": "<JOINED_WALK_VIDEO_REL>" if n_clips >= 2 else "<RAW_VIDEO_CLIP_1_REL>",
+                        "dialogue_turns": [
+                            {
+                                "voice_audio_rel": f"<VOICE_{i}_REL>",
+                                "target_face": "leftmost" if (i % 2 == 1) else "rightmost",
+                                "start_sec": round((i - 1) * (n_clips * clip_dur_sec / num_turns) + 0.15, 2),
+                            }
+                            for i in range(1, num_turns + 1)
+                        ],
+                        "ambient_rel": "<STREET_AMBIENCE_REL>",
+                        "ambient_volume": 0.18,
+                    },
+                    "save_output_as": "FINAL_MASTER_VIDEO_REL",
+                },
+            ]
 
         steps.append(
             {
                 "step_number": len(steps) + 1,
                 "phase": "lipsync_and_final_master",
                 "purpose": (
-                    "Si hay más de 1 clip (`n_clips >= 2`), primero únelos sin cortes bruscos con `studio_render_montage` "
-                    "(`fade_seconds=0.0` porque `FRAME_2` ya conecta el final del Clip 1 con el inicio del Clip 2) y luego "
-                    "aplica `studio_lipsync_character` (preparando antes `edtalk-256-lipsync-hd` si no está en disco) con "
-                    "`dialogue_turns` (`leftmost` y `rightmost`) + `ambient_rel` (`STREET_AMBIENCE_REL`) para sincronizar labios "
-                    "y sonido urbano con Auto-Ducking."
+                    "Sincronizar labios por turnos (`leftmost` / `rightmost` con `edtalk-256-lipsync-hd`) y unir los tramos "
+                    "con `fade_seconds=0.0` (porque cada `FRAME_{i+1}` enlaza exactamente el final del Clip `i` con el inicio del Clip `i+1`) "
+                    "más sonido urbano `STREET_AMBIENCE_REL` con Auto-Ducking."
                 ),
-                "recommended_calls": (
-                    [
-                        {
-                            "tool": "studio_prepare_model",
-                            "arguments": {"model_id": "edtalk-256-lipsync-hd"},
-                        },
-                        *(
-                            [
-                                {
-                                    "tool": "studio_render_montage",
-                                    "arguments": {
-                                        "title": "paseo_continuo_base",
-                                        "items": [
-                                            {"media_rel": f"<RAW_VIDEO_CLIP_{i}_REL>"} for i in range(1, n_clips + 1)
-                                        ],
-                                        "fade_seconds": 0.0,
-                                    },
-                                    "save_output_as": "JOINED_WALK_VIDEO_REL",
-                                }
-                            ]
-                            if n_clips >= 2
-                            else []
-                        ),
-                        {
-                            "tool": "studio_lipsync_character",
-                            "arguments": {
-                                "media_rel": "<JOINED_WALK_VIDEO_REL>" if n_clips >= 2 else "<RAW_VIDEO_CLIP_1_REL>",
-                                "dialogue_turns": [
-                                    {
-                                        "voice_audio_rel": "<VOICE_1_REL>",
-                                        "target_face": "leftmost",
-                                        "start_sec": 0.25,
-                                    },
-                                    {
-                                        "voice_audio_rel": "<VOICE_2_REL>",
-                                        "target_face": "rightmost",
-                                        "start_sec": 4.2,
-                                    },
-                                ],
-                                "ambient_rel": "<STREET_AMBIENCE_REL>",
-                                "ambient_volume": 0.18,
-                            },
-                            "save_output_as": "FINAL_MASTER_VIDEO_REL",
-                        },
-                    ]
-                ),
+                "recommended_calls": post_calls,
             }
         )
+
+        keyframe_outputs = [f"FRAME_{i}_REL" for i in range(1, num_keyframes + 1)]
+        for step in steps:
+            phase = step["phase"]
+            if phase.startswith("keyframe_"):
+                step["batch"] = "1_all_keyframes"
+            elif phase == "coherence_and_anti_static_audit":
+                step["batch"] = "2_audit_and_repair"
+                step["requires_outputs"] = keyframe_outputs
+            elif phase.startswith("video_clip_"):
+                step["batch"] = "3_all_video_clips"
+                step["requires_outputs"] = keyframe_outputs + ["COHERENCE_AUDIT_RESULT"]
+                step["requires_audit"] = {"all_consistent": True, "vlm_semantic_used": has_gpu}
+            else:
+                step["batch"] = "4_sound_and_finish"
 
         return {
             "ok": True,
             "preset_id": resolved_id,
             "title": meta["title"],
+            "creative_brief": {
+                "visual_scene": scene_txt,
+                "dialogue_request": scene_description.strip(),
+                "dialogue_lines_source": "provided" if dialogue_lines else "example_draft",
+                "dialogue_instruction": "Respetar los diálogos proporcionados. Si son ejemplos de plantilla, reescribirlos según el tema/tono del usuario antes del TTS, manteniendo voces, turnos y duración del plan.",
+            },
+            "planned_duration_summary": {
+                "num_clips": n_clips,
+                "num_keyframes": num_keyframes,
+                "clip_duration_sec": clip_dur_sec,
+                "estimated_total_seconds": round(n_clips * clip_dur_sec, 1),
+            },
             "detected_gpu": {
                 "gpu_name": gpu.get("gpu_name", "CPU"),
                 "vram_total_gb": vram_gb,
                 "selected_video_stack": vid_stack,
             },
+            "execution_policy": {
+                "order": ["1_all_keyframes", "2_audit_and_repair", "3_all_video_clips", "4_sound_and_finish"],
+                "gpu_calls_parallel": False,
+                "wait_for_each_job_to_complete": True,
+                "running_job_action": "studio_wait_for_job con el MISMO job_id; un timeout HTTP no es un fallo del motor.",
+                "on_model_load_error": "STOP: informar del error, conservar el modelo elegido y los archivos ya descargados. No probar otros 14B/13B/1.3B automáticamente.",
+                "allow_automatic_fallback_downloads": False,
+                "dialogue_timing": "Medir duración real de cada voz; acortar o dividir las réplicas que no quepan en su tramo antes de LipSync.",
+            },
             "golden_rules_mandatory": [
-                "1. PROHIBIDO EL ENCUADRE CERRADO SIN SUELO/FONDO: En el Fotograma 1 usa plano americano (rodillas arriba) o cuerpo entero con elementos claros de calle (escaparates, árboles, farolas, acera) para que el avance sea evidente.",
-                "2. PROHIBIDO CONGELAR EL FONDO ENTRE FOTOGRAMAS: En los Fotogramas 2..N usa SIEMPRE `custom_lora_ids=['qwen-lora-next-scene', 'qwen-lora-skin-realism', 'qwen-lora-anylight-env']`, empieza el prompt con `'Next Scene:'`, alterna la pierna adelantada de cada personaje y pide explícitamente que los escaparates/farolas anteriores retrocedan en perspectiva 4 metros más atrás.",
-                "3. CADENA DE REFERENCIAS SIN DERIVA: Para el Fotograma 3 usa `base_image_rel=FRAME_2` (continuidad espacial desde B→C) y `reference_rels=[FRAME_1, FRAME_2]` (bloquea los rostros y ropa originales del Ancla `FRAME_1`).",
-                "4. AUDITORÍA ANTI-ESTÁTICA OBLIGATORIA: Llama a `studio_analyze_coherence` con `expect_spatial_progression=true` antes de animar vídeo. Si sale `TOO_STATIC_NEEDS_ADVANCE` o `NEEDS_REPAIR`, ejecuta `recommended_repair_tool_call`.",
-                "5. PROMPT DE VÍDEO EN 3 VECTORES (`flf2v`): En `studio_generate_video` incluye SIEMPRE (a) movimiento de cámara Steadicam retrocediendo a velocidad de paseo, (b) locomoción continua de piernas/cuerpo + gestos naturales al hablar, y (c) paralaje 3D de acera, tiendas y árboles deslizándose detrás.",
-                "6. UNIÓN CONTINUA + LIPSYNC POR TURNOS: Si encadenas Clip 1 (`FRAME_1→FRAME_2`) + Clip 2 (`FRAME_2→FRAME_3`), únelos con `fade_seconds=0.0` (porque comparten `FRAME_2` exacto) y aplica `studio_lipsync_character` con `leftmost`/`rightmost` + ambiente `city_street_walk`.",
+                "1. EJECUCIÓN POR LOTES EN VRAM (NO CONMUTES MODELOS IDA Y VUELTA): Genera PRIMERO TODOS los fotogramas (`FRAME_1`..`FRAME_{N+1}`) seguidos mientras Qwen 2511 está en VRAM; audita con `studio_analyze_coherence`; y DESPUÉS genera TODOS los clips de vídeo (`CLIP_1`..`CLIP_N`) seguidos mientras el modelo de vídeo está en VRAM. NO llames a `studio_prepare_model` por separado: `studio_generate_or_edit_image` y `studio_generate_video` auto-cargan el modelo y sus LoRAs automáticamente.",
+                "2. PROHIBIDO EL ENCUADRE CERRADO SIN SUELO/FONDO: En el Fotograma 1 usa plano americano (rodillas arriba) o cuerpo entero con elementos claros de calle (escaparates, árboles, farolas, acera) y un prompt visual limpio (sin instrucciones meta como 'crea los diálogos' o 'clip de un minuto').",
+                "3. PROHIBIDO CONGELAR EL FONDO ENTRE FOTOGRAMAS: En los Fotogramas 2..N usa SIEMPRE `custom_lora_ids=['qwen-lora-next-scene', 'qwen-lora-skin-realism', 'qwen-lora-anylight-env']`, empieza el prompt con `'Next Scene:'`, alterna la pierna adelantada de cada personaje y pide explícitamente que los escaparates/farolas anteriores retrocedan en perspectiva 4 metros más atrás.",
+                "4. CADENA DE REFERENCIAS SIN DERIVA: Para el Fotograma `k` usa `base_image_rel=FRAME_{k-1}` (continuidad espacial progresiva) y `reference_rels=[FRAME_1, FRAME_{k-1}]` (bloquea los rostros y ropa originales del Ancla `FRAME_1`).",
+                "5. AUDITORÍA ANTI-ESTÁTICA OBLIGATORIA: Llama a `studio_analyze_coherence` con `expect_spatial_progression=true` antes de animar vídeo. Si sale `TOO_STATIC_NEEDS_ADVANCE` o `NEEDS_REPAIR`, ejecuta `recommended_repair_tool_call`.",
+                "6. PROMPT DE VÍDEO EN 3 VECTORES (`flf2v`) Y REGLA ANTI-PÁNICO DE DISCO: Incluye SIEMPRE (a) cámara Steadicam retrocediendo, (b) zancada continua + gestos al hablar, y (c) paralaje 3D de acera/tiendas. Si un trabajo falla, NUNCA descargues otros 3 modelos pesados en paralelo llenando el disco.",
             ],
             "execution_plan": steps,
         }
