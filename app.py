@@ -82,6 +82,8 @@ from studio.hardware import (
     query_gpu_info,
     request_colab_shutdown,
 )
+from studio import runtime_flags
+from studio.mcp_preferences import get_preferences, pending_questions, set_preferences
 from studio.jobs import job_manager, model_prepare_job_key
 from studio.mcp_server import mcp_router
 from studio.memory_manager import memory_manager
@@ -380,7 +382,26 @@ def api_status() -> Dict[str, Any]:
         "active_jobs_count": active_cnt,
         "unexported_outputs_count": _count_unexported_outputs(),
         "hf_auth": catalog_manager.hf_auth_status(),
+        "runtime": runtime_flags.snapshot(),
     }
+
+
+@app.get("/api/runtime/status")
+def api_runtime_status() -> Dict[str, Any]:
+    """Whether this process reloaded GPU frameworks for the compatibility patches."""
+    runtime_flags.set_server_pid(os.getpid())
+    return {"ok": True, **runtime_flags.snapshot()}
+
+
+@app.get("/api/preferences")
+def api_get_preferences() -> Dict[str, Any]:
+    return {"ok": True, "preferences": get_preferences(), "pending_questions": pending_questions()}
+
+
+@app.post("/api/preferences")
+def api_set_preferences(req: Dict[str, Any]) -> Dict[str, Any]:
+    saved = set_preferences(req if isinstance(req, dict) else {})
+    return {"ok": True, "preferences": saved, "pending_questions": pending_questions()}
 
 
 @app.get("/api/memory/status")

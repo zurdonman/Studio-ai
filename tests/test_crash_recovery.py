@@ -39,7 +39,6 @@ def test_video_ram_guard_runs_after_release_before_download_or_load(monkeypatch,
     monkeypatch.setattr(engine, "catalog_manager", types.SimpleNamespace(
         get_definition=lambda _: definition, is_downloaded=lambda _: False,
         download_model=lambda *a, **k: events.append("download")))
-    monkeypatch.setattr(engine, "apply_runtime_compatibility_patches", lambda: None)
     monkeypatch.setattr(engine, "flush_ram_and_vram", lambda: None)
     monkeypatch.setattr(engine, "_instantiate_video_pipeline", lambda *a, **k: events.append("instantiate"))
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True)))
@@ -126,7 +125,8 @@ def fake_vision_runtime(monkeypatch, tmp_path, colab_memory):
         return register(**kw)
     monkeypatch.setattr(manager, "register_loaded", register_and_capture)
     monkeypatch.setattr(engine, "memory_manager", manager)
-    monkeypatch.setattr(engine, "apply_runtime_compatibility_patches", lambda: None)
+    monkeypatch.setattr(engine, "ensure_patchable_runtime",
+                        lambda **_kw: {"ok": True, "reimported": False, "notice": ""})
     monkeypatch.setattr(engine, "query_gpu_info", lambda: {"vram_free_gb": 15, "vram_used_gb": 3})
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True), bfloat16="bf16"))
     transformers = types.ModuleType("transformers")

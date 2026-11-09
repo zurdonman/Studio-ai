@@ -191,10 +191,36 @@ La admisión suma **base + componentes + todos los LoRA residentes + reserva**, 
 
 Consultar `studio_get_state_and_manual.memory_guardian`, `GET /api/memory/status` y `job.memory_protection`. `MEMORY_BUDGET_EXCEEDED`/`MEMORY_BUDGET_UNKNOWN` paran la admisión; `MEMORY_SAFETY_STOP` para cooperativamente una operación sin margen. No repetir automáticamente el mismo job ni borrar archivos. Los eventos locales acotados se incluyen en el ZIP de diagnóstico. [Política completa y límites](MEMORY_MANAGEMENT.md): una asignación nativa individual puede adelantarse al muestreo; no es una garantía de cero OOM ni una prueba GPU.
 
+### 8.3. Preferencias del usuario: una sola pregunta, nunca adivinada
+
+El agente no debe renegociar el encargo ni preguntar en cada paso. `studio_get_workflow_preset` devuelve `production_preferences.pending_questions`; si hay alguna pendiente, se pregunta **una vez** con `studio_ask_user(preference_key=...)`, que ya trae la opción recomendada, y la respuesta se guarda con `studio_answer_preference(key=..., value=...)` en `<data>/mcp_preferences.json` (solo preferencias, nunca pesos ni credenciales). Las tareas siguientes reutilizan lo guardado.
+
+| Clave | Recomendado | Efecto |
+|---|---|---|
+| `use_fast_loras` | `true` | `true` → stack con `lora-wan21-14b-fusionx-phantom` (6 pasos). `false` → mismo modelo base y adaptadores de coherencia sin LoRA rápido (más lento por clip). |
+| `clip_duration_sec` | `5.0` | Tramo por clip; 30 s = 6 clips, 60 s = 12. |
+| `aspect_ratio` | `16:9` | Bucket nativo de la receta; `9:16` y `1:1` si el usuario los pide. |
+| `voice_pair` | Álvaro / Elvira | Dos voces distintas para alternar turnos y LipSync por personaje. |
+
+**Caso que falló en producción:** el agente quería LoRAs rápidos, pero llamó a `studio_generate_video` con los adaptadores creativos y `video_lora_id` vacío. No era un error del motor: sin el LoRA destilado los pasos vuelven a los completos. Ahora esa llamada se rechaza con `SPEED_LORA_MISSING` y la acción exacta (incluir el `video_lora_id` rápido). Si el usuario prefiere calidad máxima, se guarda `use_fast_loras=false` y el plan ya no propone el LoRA rápido.
+
+### 8.4. Fallo, reintento acotado y log
+
+Antes de reintentar, `studio_get_work_state` devuelve preferencias, último trabajo (`status`, `error`, `progress`) y el estado real del modelo de vídeo. Códigos que exigen cambiar algo antes de repetir:
+
+- `SPEED_LORA_MISSING`: repetir con `video_lora_id` rápido.
+- `ADAPTER_STACK_INCOMPLETE`: el stack ya se ha retirado limpiamente; repetir el mismo stack una vez.
+- `MODEL_LOAD_ERROR`, `RUNTIME_PATCHES_STALE`, `QWEN_VL_4BIT_STATE_LOST`: entorno/proceso, no la escena. Reiniciar el servidor conservando pesos; el aviso también aparece en la interfaz (`⚙ Compatibilidad`) y en `GET /api/runtime/status`.
+- `MODEL_RESOURCE_CONSTRAINT`, `MEMORY_BUDGET_EXCEEDED`: leer `memory_guardian`; no borrar pesos.
+
+Máximo dos reintentos del mismo trabajo; al segundo, `studio_export_session_log(format="md")` y un informe breve. Un trabajo `running` con progreso no es un fallo: se espera el mismo `job_id`.
+
 ## 9. API web equivalente y pruebas reproducibles
 
 - `GET /api/catalog/hf-search?query=Wan&category=video&gpu_profile=auto&only_compatible=true&limit=12&offset=0`
 - `GET /api/memory/status` (vigilancia, presión, reserva y modelos protegidos)
+- `GET /api/runtime/status` (si el proceso tuvo que recargar frameworks por los parches de compatibilidad)
+- `GET /api/preferences` / `POST /api/preferences` (las mismas preferencias que guarda el agente)
 - `GET /api/models/discovery/status`
 - `POST /api/models/discovery/settings` con `{"auto_refresh":true,"interval_minutes":360}`
 - `POST /api/models/discovery/refresh` con `{"category":"all"}` → job, no pesos.

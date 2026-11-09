@@ -1,11 +1,13 @@
 import inspect
 import json
 import math
+import re
 import os
 import random
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import types
 import wave
@@ -430,6 +432,178 @@ def _read_model_index_json(base_dir: Path) -> Dict[str, Any]:
     return {}
 
 
+_WAN_LORA_SUFFIXES = (
+    ".lora_down.weight",
+    ".lora_up.weight",
+    ".lora_A.weight",
+    ".lora_B.weight",
+    ".diff",
+    ".diff_b",
+    ".alpha",
+)
+
+# A bare key may lose leading characters when a checkpoint is renamed on export
+# (the observed Wan LoRA carries `ing_pose.0.weight`, i.e. a truncated `pose_patch_embedding`).
+# Diffusers only converts the modules it knows; those leftovers are reported and
+# mapped when a target exists instead of aborting the whole adapter stack.
+_WAN_LORA_TRUNCATED_PREFIXES = (
+    ("ing_pose.", "pose_patch_embedding."),
+)
+
+# Wan modules that Diffusers' own LoRA conversion handles explicitly. Anything else
+# in a `diffusion_model.*` state dict makes `load_lora_weights` raise instead of
+# skipping that single tensor.
+_WAN_ORIGINAL_SUPPORTED = re.compile(
+    r"^(blocks\.\d+\.(self_attn|cross_attn)\.(q|k|v|o|k_img|v_img)|blocks\.\d+\.ffn\.[02])"
+)
+_WAN_ORIGINAL_SUPPORTED_PREFIXES = (
+    "time_projection.1",
+    "head.head",
+    "text_embedding.0",
+    "text_embedding.2",
+    "time_embedding.0",
+    "time_embedding.2",
+    "img_emb.proj.1",
+    "img_emb.proj.3",
+)
+
+
+def _wan_lora_key_supported(key: str) -> bool:
+    """Whether Diffusers' Wan LoRA conversion consumes this original-format key."""
+    bare = key[len("diffusion_model."):] if key.startswith("diffusion_model.") else key
+    lora_base = _wan_lora_base_name(bare)
+    if lora_base is not None:
+        bare = lora_base
+    if _WAN_ORIGINAL_SUPPORTED.match(bare):
+        return True
+    return any(bare.startswith(prefix) for prefix in _WAN_ORIGINAL_SUPPORTED_PREFIXES)
+
+
+_WAN_NATIVE_SUPPORTED = re.compile(
+    r"^(blocks\.\d+\.(attn1|attn2|ffn\.net\.[02])"
+    r"|condition_embedder\.(text_embedder|time_embedder|time_proj|image_embedder)"
+    r"|proj_out)"
+)
+
+
+def _drop_unconvertible_wan_lora_keys(sd: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop native keys PEFT cannot attach, returning the survivors.
+
+    A single unknown key aborted every adapter in the stack. Dropping it changes
+    neither the base weights nor the remaining adapters, and the caller reports
+    exactly what was ignored.
+    """
+    kept: Dict[str, Any] = {}
+    for key, value in sd.items():
+        if not key.startswith("transformer."):
+            kept[key] = value
+            continue
+        base = _wan_lora_base_name(key)
+        native_base = (base if base is not None else key)[len("transformer."):]
+        if _WAN_NATIVE_SUPPORTED.match(native_base):
+            kept[key] = value
+    return kept
+
+
+def _pre_scale_all_wan_alphas(sd: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold `alpha/rank` into the down matrix and drop every `.alpha`.
+
+    Diffusers balances the scale between the two matrices when it converts; the
+    product is what reaches the forward pass, so folding into `lora_A`/`lora_down`
+    keeps the same effective scale without leaving keys PEFT cannot read.
+    """
+    out: Dict[str, Any] = {}
+    for key, value in sd.items():
+        if key.endswith(".alpha"):
+            continue
+        out[key] = value
+    for key in list(sd.keys()):
+        if not key.endswith(".alpha"):
+            continue
+        base = key[: -len(".alpha")]
+        down_key = next(
+            (
+                f"{base}{suffix}"
+                for suffix in (".lora_down.weight", ".lora_A.weight")
+                if f"{base}{suffix}" in out
+            ),
+            None,
+        )
+        if down_key is None:
+            continue
+        down_w = out[down_key]
+        rank = int(down_w.shape[0]) if getattr(down_w, "shape", None) and len(down_w.shape) > 0 else 1
+        raw_alpha = sd[key]
+        alpha_val = float(raw_alpha.item()) if hasattr(raw_alpha, "item") else float(raw_alpha)
+        if rank > 0:
+            out[down_key] = down_w * (alpha_val / float(rank))
+    return out
+
+
+def _wan_lora_base_name(key: str) -> Optional[str]:
+    for suffix in _WAN_LORA_SUFFIXES:
+        if key.endswith(suffix):
+            return key[: -len(suffix)]
+    return None
+
+
+def _convert_wan_lora_base_to_diffusers(base: str) -> str:
+    """Translate a ComfyUI/original Wan parameter name to its Diffusers module path."""
+    name = base
+    if name.startswith("diffusion_model."):
+        name = name[len("diffusion_model."):]
+    name = re.sub(r"^blocks\.(\d+)\.self_attn\.", r"blocks.\1.attn1.", name)
+    name = re.sub(r"^blocks\.(\d+)\.cross_attn\.", r"blocks.\1.attn2.", name)
+    name = re.sub(r"^blocks\.(\d+)\.ffn\.0\.", r"blocks.\1.ffn.net.0.proj.", name)
+    name = re.sub(r"^blocks\.(\d+)\.ffn\.2\.", r"blocks.\1.ffn.net.2.", name)
+    for vanilla, diffusers in (
+        ("text_embedding.0.", "condition_embedder.text_embedder.linear_1."),
+        ("text_embedding.2.", "condition_embedder.text_embedder.linear_2."),
+        ("time_embedding.0.", "condition_embedder.time_embedder.linear_1."),
+        ("time_embedding.2.", "condition_embedder.time_embedder.linear_2."),
+        ("time_projection.1.", "condition_embedder.time_proj."),
+        ("head.head", "proj_out"),
+        ("img_emb.proj.1", "condition_embedder.image_embedder.ff.net.0.proj"),
+        ("img_emb.proj.3", "condition_embedder.image_embedder.ff.net.2"),
+    ):
+        if name.startswith(vanilla):
+            return diffusers + name[len(vanilla):]
+    return name
+
+
+_LORA_REPORT = threading.local()
+
+
+def _last_lora_ignored_keys() -> List[str]:
+    return list(getattr(_LORA_REPORT, "ignored", []))
+
+
+def _return_wan_lora_to_diffusers(sd: Dict[str, Any]) -> Dict[str, Any]:
+    """Force every remaining Wan LoRA key into the native PEFT/Diffusers format.
+
+    Diffusers' `_convert_non_diffusers_wan_lora_to_diffusers` raises when any key
+    survives its conversion. Encoding the leftovers first (one-to-one mapping of
+    the same tensors, no re-scaling, no new weights) keeps the adapter usable and
+    makes the ignored keys reportable instead of fatal.
+    """
+    out: Dict[str, Any] = {}
+    for key, value in sd.items():
+        if key.startswith("transformer."):
+            out[key] = value
+            continue
+        lora_base = _wan_lora_base_name(key)
+        if lora_base is None:
+            # A plain (non-LoRA) weight from the export: converted so it is either
+            # attached by name or reported, never left to make the loader raise.
+            bare = key[len("diffusion_model."):] if key.startswith("diffusion_model.") else key
+            out[f"transformer.{_convert_wan_lora_base_to_diffusers(bare)}"] = value
+            continue
+        suffix = key[len(lora_base):]
+        bare = lora_base[len("diffusion_model."):] if lora_base.startswith("diffusion_model.") else lora_base
+        out[f"transformer.{_convert_wan_lora_base_to_diffusers(bare)}{suffix}"] = value
+    return out
+
+
 def _prepare_wan_lora_state_dict(raw_sd: Dict[str, Any]) -> Dict[str, Any]:
     """
     Sanea y normaliza un state_dict LoRA de Wan 2.1 / Wan 2.2 (ComfyUI / Kijai / LightX2V / FastWan / rCM / Diffusers)
@@ -438,6 +612,7 @@ def _prepare_wan_lora_state_dict(raw_sd: Dict[str, Any]) -> Dict[str, Any]:
       - escalares `.alpha` en capas fuera de `blocks.*` (`text_embedding`, `time_embedding`, `time_projection`, `head.head`, `img_emb`)
         que `_convert_non_diffusers_wan_lora_to_diffusers` no consume y provocarían ValueError al final
       - claves `vace_blocks.*` cuando se aplica un LoRA sobre un transformer sin bloques VACE o viceversa.
+      - claves truncadas por el export (`ing_pose.*`) que el conversor no reconoce y hacían abortar todo el stack.
     """
     sd: Dict[str, Any] = dict(raw_sd)
 
@@ -456,6 +631,27 @@ def _prepare_wan_lora_state_dict(raw_sd: Dict[str, Any]) -> Dict[str, Any]:
     ):
         sd = {f"diffusion_model.{k}": v for k, v in sd.items()}
 
+    # Bare keys truncated by the export (`ing_pose.*`) cannot be attached by any loader;
+    # name them so they are reported and dropped instead of aborting the whole stack.
+    dropped_from_file: List[str] = []
+    for k in list(sd.keys()):
+        if k.startswith(("diffusion_model.", "transformer.", "lora_unet_")):
+            continue
+        for short, full in _WAN_LORA_TRUNCATED_PREFIXES:
+            if k.startswith(short):
+                sd[f"diffusion_model.{full}{k[len(short):]}"] = sd.pop(k)
+                break
+        else:
+            # A key with no module name (`.0.weight`) or no LoRA suffix at all is junk
+            # from the export, not an adapter tensor: report it instead of letting
+            # Diffusers raise, and never let it force a whole-file conversion.
+            bare_base = _wan_lora_base_name(k)
+            if bare_base is not None and bare_base and not bare_base.startswith("."):
+                sd[f"diffusion_model.{k}"] = sd.pop(k)
+            else:
+                dropped_from_file.append(k)
+                sd.pop(k, None)
+
     if not any(k.startswith("diffusion_model.") for k in sd):
         return sd
 
@@ -465,6 +661,16 @@ def _prepare_wan_lora_state_dict(raw_sd: Dict[str, Any]) -> Dict[str, Any]:
         if "dora_scale" in k or k.startswith("diffusion_model.vace_blocks."):
             sd.pop(k, None)
             continue
+        if k.startswith("diffusion_model."):
+            bare = k[len("diffusion_model."):]
+            truncated = next(
+                ((short, full) for short, full in _WAN_LORA_TRUNCATED_PREFIXES if bare.startswith(short) and short != full),
+                None,
+            )
+            if truncated is not None:
+                short, full = truncated
+                sd[f"diffusion_model.{full}{bare[len(short):]}"] = sd.pop(k)
+                continue
         if k.endswith(".alpha") and not k.startswith("diffusion_model.blocks."):
             alpha_tensor = sd.pop(k)
             base_prefix = k[: -len(".alpha")]
@@ -480,7 +686,26 @@ def _prepare_wan_lora_state_dict(raw_sd: Dict[str, Any]) -> Dict[str, Any]:
                 if rank > 0:
                     sd[down_key] = down_w * (alpha_val / float(rank))
 
-    return sd
+    _LORA_REPORT.ignored = []
+    _LORA_REPORT.dropped_from_file = sorted(dropped_from_file)
+    if not any(k.startswith("diffusion_model.") for k in sd):
+        return sd
+
+    unsupported = sorted(
+        {k for k in sd if k.startswith("diffusion_model.") and not _wan_lora_key_supported(k)}
+    )
+    if not unsupported:
+        # Diffusers converts this file correctly on its own: keep its exact math.
+        return sd
+
+    # Otherwise convert the WHOLE file here: mixing converted and unconverted keys is
+    # what made Diffusers raise and abort every adapter in the stack.
+    native = _return_wan_lora_to_diffusers(_pre_scale_all_wan_alphas(sd))
+    kept = _drop_unconvertible_wan_lora_keys(native)
+    ignored = sorted(set(native) - set(kept))
+    _LORA_REPORT.ignored = ignored
+    _LORA_REPORT.unsupported = unsupported
+    return kept
 
 
 def _resolve_lora_safetensors_file(lora_id: str) -> Path:
@@ -715,6 +940,40 @@ def _load_single_video_lora_onto_pipe(
         guarded_model_load(pipe.load_lora_weights, str(lora_file.parent), **lora_kw)
 
 
+_VIDEO_ADAPTER_LOCK = threading.RLock()
+_VIDEO_ADAPTER_STACK = "studio_video_lora_stack"
+
+
+def _adapter_names_in_use(pipe: Any) -> set:
+    peft_cfg = getattr(getattr(pipe, "transformer", None), "peft_config", None)
+    return set(peft_cfg.keys()) if hasattr(peft_cfg, "keys") else set()
+
+
+def _clear_video_adapters(handle: Dict[str, Any], pipe: Any) -> List[str]:
+    """Remove every adapter Studio added, keeping the base transformer intact."""
+    errors: List[str] = []
+    for name in sorted(_adapter_names_in_use(pipe)):
+        try:
+            pipe.delete_adapters([name])
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    if hasattr(pipe, "unload_lora_weights"):
+        try:
+            pipe.unload_lora_weights()
+        except Exception as exc:
+            errors.append(f"unload_lora_weights: {exc}")
+    for key in (
+        "active_lora_id",
+        "active_lora_scale",
+        "active_lora_signature",
+        "active_lora_defns",
+        "lora_load_partial",
+    ):
+        handle[key] = None if key != "active_lora_defns" else []
+    memory_manager.update_adapters("video", [])
+    return errors
+
+
 def _sync_video_lora_on_handle(
     handle: Dict[str, Any],
     pipe: Any,
@@ -833,14 +1092,58 @@ def _sync_video_lora_on_handle(
             step="Acoplando LoRAs en GPU...",
         )
 
+    with _VIDEO_ADAPTER_LOCK:
+        return _apply_video_lora_stack(
+            handle=handle,
+            pipe=pipe,
+            resolved_specs=resolved_specs,
+            new_ids_tuple=new_ids_tuple,
+            adapter_names=adapter_names,
+            adapter_weights=adapter_weights,
+            all_defns=all_defns,
+            job=job,
+            pct_base=pct_base,
+        )
+
+
+def _apply_video_lora_stack(
+    *,
+    handle: Dict[str, Any],
+    pipe: Any,
+    resolved_specs: List[Tuple[str, str, float, Dict[str, Any]]],
+    new_ids_tuple: tuple,
+    adapter_names: List[str],
+    adapter_weights: List[float],
+    all_defns: List[Dict[str, Any]],
+    job: Optional[JobRecord],
+    pct_base: float,
+) -> Optional[Dict[str, Any]]:
+    """Load the requested adapters so a mid-way failure never leaves them half-attached.
+
+    The previous code unloaded the current adapters and then loaded the new ones in
+    place. When one file was rejected, the model kept a live adapter whose name made
+    every later attempt fail with `Adapter name ... already in use`, and the handle
+    still described the old stack. Now the old stack is only discarded once the new
+    one is fully attached; otherwise everything is removed and the partial state is
+    recorded so the next attempt starts clean. Weights on disk are untouched.
+    """
     if hasattr(pipe, "remove_all_hooks"):
         try:
             pipe.remove_all_hooks()
         except Exception:
             pass
 
-    if (handle.get("active_lora_id") or cur_sig) and hasattr(pipe, "unload_lora_weights"):
-        pipe.unload_lora_weights()
+    # Retire the previous stack (including adapters the handle never recorded, the
+    # exact cause of `Adapter name ... already in use`) before attaching the new one.
+    if handle.get("active_lora_id") or handle.get("active_lora_signature") or _adapter_names_in_use(pipe):
+        cleanup_errors = _clear_video_adapters(handle, pipe)
+        if job and cleanup_errors:
+            job.log(
+                "Aviso: no se pudieron retirar todos los adaptadores anteriores ("
+                + "; ".join(cleanup_errors[:3])
+                + "); se continúa retirándolos por nombre antes de cargar.",
+                level="warning",
+            )
 
     transformer_mod = getattr(pipe, "transformer", None)
     is_fp8_lc = _is_module_layerwise_fp8(transformer_mod)
@@ -851,9 +1154,46 @@ def _sync_video_lora_on_handle(
         torch_mod = _torch_mod
 
     engine = handle.get("engine", "")
-    for lid, ad_name, _, _ in resolved_specs:
-        l_file = _resolve_lora_safetensors_file(lid)
-        _load_single_video_lora_onto_pipe(pipe, engine, l_file, ad_name, is_fp8_lc, torch_mod)
+    loaded_names: List[str] = []
+    try:
+        for lid, ad_name, _, ldef in resolved_specs:
+            if ad_name in _adapter_names_in_use(pipe):
+                # Same name from an earlier partial attempt: never raise a bare
+                # "already in use"; clear that adapter and reload the file.
+                try:
+                    pipe.delete_adapters([ad_name])
+                except Exception:
+                    pass
+            l_file = _resolve_lora_safetensors_file(lid)
+            _load_single_video_lora_onto_pipe(pipe, engine, l_file, ad_name, is_fp8_lc, torch_mod)
+            loaded_names.append(ad_name)
+            ignored = getattr(_LORA_REPORT, "ignored", []) or []
+            dropped = getattr(_LORA_REPORT, "dropped_from_file", []) or []
+            if job and (ignored or dropped):
+                job.log(
+                    f"Aviso: «{ldef['name'][:40]}» contiene {len(ignored) + len(dropped)} clave(s) que Diffusers "
+                    f"no puede acoplar ({', '.join((ignored + dropped)[:4])}{'…' if len(ignored) + len(dropped) > 4 else ''}); "
+                    "se ignoran solo esas claves, el resto del LoRA y los demás adaptadores se aplican.",
+                    level="warning",
+                )
+        if hasattr(pipe, "set_adapters"):
+            pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
+    except BaseException as exc:
+        errors = _clear_video_adapters(handle, pipe)
+        handle["lora_load_partial"] = {
+            "failed_lora_id": next((lid for lid, name, _, _ in resolved_specs if name not in loaded_names), None),
+            "loaded_before_failure": loaded_names,
+            "cleanup_errors": errors,
+            "error": str(exc)[:300],
+        }
+        _apply_best_offload(pipe, float(query_gpu_info().get("vram_total_gb", 22.0)), float(handle.get("min_vram_gb", 14.0)))
+        if job:
+            job.log(
+                "No se pudo aplicar el conjunto de LoRA: se han retirado TODOS los adaptadores y el modelo base "
+                f"sigue intacto ({len(loaded_names)} cargado(s) antes del fallo). Puedes reintentar en cuanto se corrija el motivo.",
+                level="error",
+            )
+        raise
 
     if is_fp8_lc and transformer_mod is not None and torch_mod is not None:
         try:
@@ -868,20 +1208,22 @@ def _sync_video_lora_on_handle(
                     if p.dtype != torch_mod.bfloat16:
                         p.data = p.data.to(torch_mod.bfloat16)
 
-    if hasattr(pipe, "set_adapters"):
-        pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
-
     shift_defn = next((d for d in all_defns if d.get("recommended_flow_shift") is not None), None)
     if shift_defn is not None:
         _maybe_set_wan_flow_shift(pipe, float(shift_defn["recommended_flow_shift"]))
     elif handle.get("base_flow_shift") is not None:
         _maybe_set_wan_flow_shift(pipe, float(handle["base_flow_shift"]))
 
-    _apply_best_offload(pipe, vram_total, min_vram)
+    _apply_best_offload(
+        pipe,
+        float(query_gpu_info().get("vram_total_gb", 22.0)),
+        float(handle.get("min_vram_gb", 14.0)),
+    )
     handle["active_lora_id"] = resolved_specs[0][0]
     handle["active_lora_scale"] = adapter_weights[0]
     handle["active_lora_signature"] = new_ids_tuple
     handle["active_lora_defns"] = all_defns
+    handle.pop("lora_load_partial", None)
     memory_manager.update_adapters("video", list(new_ids_tuple))
     return next((d for d in all_defns if d.get("max_steps") is not None), all_defns[0])
 

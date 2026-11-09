@@ -158,6 +158,7 @@
       activeCount = snap.active_jobs_count || 0;
       renderHardware(snap.hardware, snap.memory, snap.unexported_outputs_count);
       renderHfAuthStatus(snap.hf_auth);
+      renderRuntimeStatus(snap.runtime);
       renderJobs(snap.jobs);
     } catch (_e) {
       // Silencioso en polling puntual
@@ -173,6 +174,17 @@
     }
     if (_pollTimer) clearTimeout(_pollTimer);
     _tick();
+  }
+
+  function renderRuntimeStatus(runtime) {
+    const pill = $("runtime-pill");
+    if (!pill) return;
+    const rebuilt = runtime && runtime.runtime_rebuilt_for_compatibility;
+    pill.hidden = !rebuilt;
+    if (!rebuilt) return;
+    $("runtime-state").textContent = "Reinicia el servidor";
+    $("runtime-detail").textContent = "Parches aplicados tras cargar las librerías de GPU";
+    pill.title = (runtime && runtime.runtime_rebuild_notice) || "Reinicia el proceso del servidor para evitar clases mezcladas. No hay que volver a descargar pesos.";
   }
 
   function renderHardware(hw, mem, unexportedCount) {

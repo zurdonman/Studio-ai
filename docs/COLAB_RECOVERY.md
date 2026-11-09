@@ -20,6 +20,18 @@
 4. **Registros independientes del servidor**: el proceso padre captura stdout/stderr, avisos nativos, salida de cloudflared, RSS/pico RSS, RAM del sistema y eventos de memoria cgroup v2 si están disponibles. Registra código de salida/señal, y no llama «limpia» a una caída. `PYTHONFAULTHANDLER=1` permite recoger trazas de fallos nativos cuando Python puede emitirlas; **SIGKILL no se puede capturar**.
 5. **Puente MCP**: los fallos transitorios de lectura se reintentan de forma acotada sobre el mismo `job_id`. Nunca se reenvía automáticamente el POST de generación. Si se pierde el enlace, conserva el ID y devuelve `unknown_not_failed`, `do_not_resubmit=true` y una llamada de reanudación. Si el POST perdió su respuesta, su resultado es desconocido: consultar trabajos antes de volver a enviar.
 
+## Fallos de adaptadores y del inspector 4-bit (segunda sesión de producción)
+
+Sesión distinta de la primera caída: aquí el modelo de vídeo **sí** cargó (Wan VACE 14B FP8, 0,52 GB en reposo, RAM 5,39/52,96 GiB) y Wan llegó a prepararse. Los errores son de carga de adaptadores y de cuantización, no de RAM.
+
+Síntomas observados en una sesión real de L4 y su causa en el código, no en la escena:
+
+1. **`ValueError: 'state_dict' should be empty at this point ... '.0.bias', 'ing_pose.0.weight'`** al acoplar FusionX + UniAnimate + MoviiGen. El checkpoint trae claves que el conversor de Diffusers no consume (un prefijo truncado por el export y pares sin nombre de módulo). Antes se abortaba **todo el stack**; ahora esas claves se informan y se descartan, y el resto del LoRA se aplica. No se borra ni se reescribe ningún peso en disco.
+2. **`Adapter name vid_speed_lora already in use`** en el reintento. Tras el fallo anterior quedaba un adaptador vivo que el handle ya no describía. Ahora la carga es transaccional: si un adaptador falla, se retiran todos y el modelo base queda intacto; `studio_get_work_state` muestra `adapters_partial_failure`.
+3. **`AssertionError` en `bitsandbytes/nn/modules.py` (`module.weight.shape[1] == 1`)** al ejecutar el inspector Qwen2.5-VL 4-bit. Los parches de compatibilidad se aplicaban después de crear las clases 4-bit, así que la reconstrucción del parámetro no tenía guarda. Ahora los parches se instalan antes de construir el modelo, la instancia parcial se recarga desde los archivos locales y, si el proceso arrastra clases mezcladas, el resultado es `RUNTIME_PATCHES_STALE` (reiniciar servidor) en lugar de un `AssertionError` dentro de la inferencia. La auditoría queda limitada a fotometría (`identity_verified=false`) y nunca autoriza vídeo.
+
+Los tres casos están cubiertos por pruebas de CPU. **No son una validación GPU**: no se han ejecutado en L4 dentro de este entorno.
+
 ## A. Rescatar lo que queda en la sesión anterior
 
 **No pulses «Liberar GPU», «Desconectar y eliminar entorno» ni borres `/content/studio_data`.** Si el kernel todavía responde, el disco puede seguir intacto aunque la web no abra.

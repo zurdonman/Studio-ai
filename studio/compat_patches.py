@@ -9,13 +9,25 @@ No model weights, tensor devices or quantization settings are changed here.
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import inspect
+import logging
+import sys
 import threading
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any
+from typing import Any, Iterable, Optional
 
 _PATCH_LOCK = threading.RLock()
+LOGGER = logging.getLogger("studio.compat")
+REIMPORT_TARGETS = (
+    "transformers",
+    "diffusers",
+    "bitsandbytes",
+    "accelerate",
+    "peft",
+)
 
 
 def _wrap_parameter_subclass_new(target_cls: type) -> None:
@@ -52,6 +64,62 @@ def _wrap_parameter_subclass_new(target_cls: type) -> None:
     target_cls.__new__ = staticmethod(_safe_new)
 
 
+def _safe_find_spec(name: str) -> Any:
+    try:
+        return importlib.util.find_spec(name)
+    except (ImportError, ValueError, AttributeError):
+        return None
+
+
+def _mark_runtime_rebuilt(modules: Iterable[str]) -> str:
+    from studio import runtime_flags
+
+    runtime_flags.mark_rebuilt(sorted(set(modules)))
+    return runtime_flags.snapshot()["runtime_rebuild_notice"]
+
+
+def ensure_patchable_runtime(*, modules: Optional[Iterable[str]] = None) -> dict[str, Any]:
+    """Apply the compatibility patches before heavy frameworks build their classes.
+
+    Patching after the model class was imported can leave already-created classes
+    (or instances such as a cached 4-bit VLM) without the guard, which is not a
+    quantization problem. When that is detected, the affected framework modules
+    are re-imported once so the next load starts from a consistent state.
+    Returns a report; never downloads weights, never touches saved files.
+    """
+    names = tuple(modules or REIMPORT_TARGETS)
+    apply_runtime_compatibility_patches()
+    from studio import runtime_flags
+
+    already_rebuilt = set(runtime_flags.rebuilt_modules())
+    stale = [
+        name
+        for name in names
+        if name in already_rebuilt
+        and (name in sys.modules or _safe_find_spec(name) is not None)
+    ]
+    if stale:
+        return {
+            "ok": False,
+            "reimported": False,
+            "notice": runtime_flags.snapshot()["runtime_rebuild_notice"],
+        }
+    loaded_late = [name for name in names if name in sys.modules]
+    if not loaded_late:
+        return {"ok": True, "reimported": False, "notice": ""}
+    for name in loaded_late:
+        try:
+            importlib.reload(importlib.import_module(name))
+        except Exception as exc:  # a partially reloaded framework is worse than a notice
+            LOGGER.warning("No se pudo recargar %s tras los parches: %s", name, exc)
+            notice = _mark_runtime_rebuilt(loaded_late)
+            return {"ok": False, "reimported": False, "notice": notice}
+    apply_runtime_compatibility_patches()
+    notice = _mark_runtime_rebuilt(loaded_late)
+    LOGGER.warning("%s", notice)
+    return {"ok": True, "reimported": True, "notice": notice}
+
+
 def _patch_peft_integrations() -> None:
     try:
         import peft.utils.integrations as integrations  # type: ignore
@@ -86,7 +154,9 @@ def apply_runtime_compatibility_patches() -> None:
         except ImportError:
             return
 
-        _wrap_parameter_subclass_new(torch.nn.Parameter)
+        parameter_cls = getattr(getattr(torch, "nn", None), "Parameter", None)
+        if isinstance(parameter_cls, type):
+            _wrap_parameter_subclass_new(parameter_cls)
         try:
             import bitsandbytes as bnb  # type: ignore
         except Exception:
@@ -94,7 +164,7 @@ def apply_runtime_compatibility_patches() -> None:
         if bnb is not None:
             # These subclasses override __new__ and bypass Parameter.__new__.
             for name in ("Params4bit", "Int8Params"):
-                cls = getattr(bnb.nn, name, None)
+                cls = getattr(getattr(bnb, "nn", None), name, None)
                 if isinstance(cls, type):
                     _wrap_parameter_subclass_new(cls)
 

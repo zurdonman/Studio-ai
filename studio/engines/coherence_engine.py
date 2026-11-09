@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 
 from studio.catalog import catalog_manager
-from studio.compat_patches import apply_runtime_compatibility_patches
+from studio.compat_patches import ensure_patchable_runtime
 from studio.config import DATA_ROOT
 from studio.hardware import colab_console_log, query_gpu_info
 from studio.memory_safety_hooks import guarded_model_load, generation_memory_criteria
@@ -184,6 +184,34 @@ def analyze_pair_fast_cv(anchor_path: Path, candidate_path: Path) -> Dict[str, A
     }
 
 
+_VLM_UNPATCHED_KEY = "loaded_before_compat_patches"
+
+
+def _check_four_bit_modules_patchable(cls_vlm: Any) -> None:
+    """Fail early with a diagnosis instead of `AssertionError` mid-inference.
+
+    bitsandbytes rebuilds a 4-bit module's parameter from the module when the
+    quantization state was lost. If Studio's constructor guard is not active on
+    that class, the rebuild raises a bare `AssertionError` the first time the
+    model runs. Nothing is downloaded or re-quantized here.
+    """
+    if cls_vlm is None:
+        return
+    try:
+        import bitsandbytes as bnb  # type: ignore
+    except Exception:
+        return  # configured elsewhere; the loader reports the real error
+    if getattr(bnb.nn, "Linear4bit", None) is None:
+        return
+    if getattr(bnb.nn.Params4bit.__new__, "_studio_safe_wrapped", False):
+        return
+    raise RuntimeError(
+        "RUNTIME_PATCHES_STALE: las clases 4-bit de bitsandbytes se crearon antes de los parches "
+        "de compatibilidad de Studio IA. Reinicia el proceso del servidor (no recargues solo el "
+        "módulo de memoria) y vuelve a auditar; los 7 GB del inspector ya están en disco, no hay "
+        "que descargarlos otra vez."
+    )
+
 @serialized_gpu_operation(slots=("vision",), managed=True)
 def load_coherence_vlm_into_memory(
     model_id: str = "qwen25-vl-3b-coherence",
@@ -195,7 +223,6 @@ def load_coherence_vlm_into_memory(
     en el slot ligero `vision`. En una GPU L4 (22.5 GB) puede convivir junto a Qwen-Image-Edit-2511
     sin descargar el modelo de imagen de la VRAM.
     """
-    apply_runtime_compatibility_patches()
     defn = catalog_manager.get_definition(model_id)
     if not defn:
         raise ValueError(f"Modelo de visión no encontrado en el catálogo: {model_id}")
@@ -203,7 +230,7 @@ def load_coherence_vlm_into_memory(
     if defn.get("validation_state") == "candidate":
         raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato de visión sin receta revisada.")
     cur = memory_manager.get_slot("vision")
-    if cur and cur.get("model_id") == model_id:
+    if cur and cur.get("model_id") == model_id and not cur.get("handle", {}).get(_VLM_UNPATCHED_KEY):
         vram_now = query_gpu_info()["vram_used_gb"]
         if job:
             job.log(
@@ -213,6 +240,22 @@ def load_coherence_vlm_into_memory(
                 step="Inspector Qwen2.5-VL activo en memoria",
             )
         return {"model_id": model_id, "vram_used_gb": vram_now}
+    if cur and cur.get("handle", {}).get(_VLM_UNPATCHED_KEY):
+        # Built before the compatibility patches were active: its 4-bit modules are
+        # half-patched. Reloading is the supported recovery (no new weights needed).
+        if job:
+            job.log(
+                "El inspector se cargó antes de los parches de compatibilidad; se recarga desde los archivos locales.",
+                level="warning",
+                progress=8.0,
+            )
+        memory_manager.unload_slot("vision")
+        cur = None
+
+    # Primes the guard on the 4-bit classes BEFORE transformers/bitsandbytes build them.
+    runtime_report = ensure_patchable_runtime(modules=("transformers", "bitsandbytes", "accelerate", "peft", "diffusers"))
+    if runtime_report.get("notice") and job:
+        job.log(runtime_report["notice"], level="warning")
 
     import torch  # type: ignore
 
@@ -250,13 +293,14 @@ def load_coherence_vlm_into_memory(
     memory_manager.prepare_for_load(defn, job=job)
 
     def _do_load() -> Dict[str, Any]:
-        apply_runtime_compatibility_patches()
+        ensure_patchable_runtime(modules=("transformers", "bitsandbytes", "accelerate", "peft"))
         import transformers  # type: ignore
         from transformers import AutoProcessor, BitsAndBytesConfig  # type: ignore
 
         cls_vlm = getattr(transformers, "Qwen2_5_VLForConditionalGeneration", None) or getattr(
             transformers, "AutoModelForImageTextToText", None
         )
+        _check_four_bit_modules_patchable(cls_vlm)
         if cls_vlm is None:
             raise RuntimeError(
                 f"Tu versión de transformers ({transformers.__version__}) no incluye Qwen2_5_VLForConditionalGeneration. "
@@ -293,6 +337,9 @@ def load_coherence_vlm_into_memory(
         fn=_do_load,
         expected_seconds=18.0,
     )
+    # A rebuild notice means this load may still be half-patched; do not hand the
+    # cached 4-bit instance to a later job as if it were healthy.
+    handle[_VLM_UNPATCHED_KEY] = bool(runtime_report.get("notice")) and not runtime_report.get("reimported")
     memory_manager.register_loaded(
         slot="vision",
         model_id=model_id,
@@ -408,13 +455,22 @@ def analyze_pair_qwen_vl(
     inputs = {k: (v.to(target_dev) if hasattr(v, "to") else v) for k, v in inputs.items()}
 
     checkpoint_current_operation(force=True)
+    _check_four_bit_modules_patchable(type(model))
     with torch.inference_mode():
-        generated_ids = model.generate(
-            **inputs,
-            max_new_tokens=420,
-            do_sample=False,
-            stopping_criteria=generation_memory_criteria(),
-        )
+        try:
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=420,
+                do_sample=False,
+                stopping_criteria=generation_memory_criteria(),
+            )
+        except AssertionError as exc:
+            # bitsandbytes' state-recovery assert, not a measurement of image quality.
+            raise RuntimeError(
+                "QWEN_VL_4BIT_STATE_LOST: el inspector 4-bit perdió su estado de cuantización al "
+                "ejecutarse. Reinicia el proceso del servidor (los pesos ya están en disco) y "
+                "reaudita; mientras tanto la auditoría es solo fotométrica y no verifica identidad."
+            ) from exc
 
     in_len = inputs["input_ids"].shape[1]
     trimmed = [out_ids[in_len:] for out_ids in generated_ids]
@@ -537,11 +593,23 @@ def run_coherence_analysis(
             if mode == "vlm_qwen":
                 raise
             vlm_fallback_reason = str(exc)
+            runtime_blocker = any(
+                token in str(exc)
+                for token in ("RUNTIME_PATCHES_STALE", "QWEN_VL_4BIT_STATE_LOST", "MEMORY_", "FP8_RUNTIME_UNSUPPORTED")
+            )
             if job:
-                job.log(
-                    f"Aviso: No se pudo activar Qwen2.5-VL ({exc}); entregando resultado fotométrico OpenCV.",
-                    level="warning",
-                )
+                if runtime_blocker:
+                    job.log(
+                        "⛔ El inspector quedó bloqueado por un problema de compatibilidad/runtime, no por la escena: "
+                        f"{str(exc)[:220]}. El resultado será SOLO fotométrico y NO autoriza vídeo. "
+                        "No se reintenta ni se descarga nada: reinicia el proceso del servidor y reaudita.",
+                        level="warning",
+                    )
+                else:
+                    job.log(
+                        f"Aviso: No se pudo activar Qwen2.5-VL ({exc}); entregando resultado fotométrico OpenCV.",
+                        level="warning",
+                    )
 
     comparisons: List[Dict[str, Any]] = []
     inconsistent_rels: List[str] = []
@@ -666,6 +734,10 @@ def run_coherence_analysis(
         )
 
     comparisons_ok = len(inconsistent_rels) == 0
+    audit_blocked = bool(vlm_fallback_reason) and any(
+        token in str(vlm_fallback_reason)
+        for token in ("RUNTIME_PATCHES_STALE", "QWEN_VL_4BIT_STATE_LOST")
+    )
     cv_threshold = (threshold - 16.0) if expect_spatial_progression else (threshold - 10.0)
     photometric_ok = all(
         r["cv_overall_score"] >= cv_threshold and r["aspect_ratio_compatible"]
@@ -687,6 +759,13 @@ def run_coherence_analysis(
         "strictness_threshold": threshold,
         "effective_comparison_threshold": threshold if vlm_loaded_ok else ((threshold - 16.0) if expect_spatial_progression else (threshold - 10.0)),
         "assessment_scope": "semantic_and_photometric" if vlm_loaded_ok else "photometric_only_not_identity",
+        "audit_blocked_by_runtime": audit_blocked,
+        "recommended_action": (
+            "Restart the server process, then rerun mode='vlm_qwen' for these frames; "
+            "weights are already on disk and nothing needs re-downloading."
+            if audit_blocked
+            else ""
+        ),
         "photometric_consistent": photometric_ok,
         "identity_verified": vlm_loaded_ok and all_ok,
         "ready_for_video": vlm_loaded_ok and all_ok,

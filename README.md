@@ -102,12 +102,24 @@ ligeramente la duración final; mide y ajusta los diálogos antes del LipSync.
 - Un trabajo `running` / `queued` se espera con su **mismo `job_id`**. Un error de compatibilidad
   no autoriza descargar otros modelos pesados en cascada: el agente debe detenerse y comunicar el error.
 
+### Preguntas de producción y reintentos (agentes pequeños)
+
+El plan trae `production_preferences.pending_questions` y el agente pregunta **como máximo una vez**
+(`studio_ask_user` → `studio_answer_preference`), guardando la respuesta en el servidor. LoRAs rápidos,
+duración de clip, formato y voces dejan de depender de lo que el agente recuerde. Un fallo se consulta con
+`studio_get_work_state` antes de reintentar, y un «generación rápida» sin `video_lora_id` rápido se rechaza con
+`SPEED_LORA_MISSING` en lugar de ejecutarse lento sin avisar. Detalle en
+[el manual del oráculo](docs/MCP_MODEL_ORACLE.md#83-preferencias-del-usuario-una-sola-pregunta-nunca-adivinada).
+
 ### Validación de desarrollo
 
 ```bash
 node --check studio/static/app.js
 python -m pytest -q
 ```
+
+`177 passed` en CPU: simulaciones, dobles y un hijo real con RSS acotado, **ninguna inferencia GPU**. Las pruebas de
+adaptadores y del inspector 4-bit reproducen las excepciones de Diffusers/bitsandbytes con dobles, no con Torch real.
 
 Las regresiones de parámetros, offload y concurrencia usan dobles pequeños sin descargar modelos.
 Estas pruebas no sustituyen una ejecución real de inferencia en la GPU L4 de Colab.

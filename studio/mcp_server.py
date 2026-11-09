@@ -82,10 +82,17 @@ from studio.hardware import (
     hardware_tracker,
     query_gpu_info,
 )
+from studio import runtime_flags
 from studio.jobs import job_manager
 from studio.memory_manager import memory_manager
 from studio.model_discovery import model_discovery, CATEGORIES
 from studio.model_compatibility import assessment_context, assess_definition, assess_model_stack, get_runtime_capabilities
+from studio.mcp_preferences import (
+    PREFERENCE_QUESTIONS,
+    guidance_block,
+    pending_questions,
+    set_preferences,
+)
 from studio.model_recipes import ENGINE_CONTRACTS, image_defaults
 from studio.model_oracle import recommend_pipeline
 
@@ -254,7 +261,35 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
    - Para MEZCLAR VOCES + MÚSICA + AMBIENTE sin bajar el volumen de las voces ni congelar el vídeo:
      - Usa `studio_mix_audio_tracks` (o pasa `music_rel` y `ambient_rel` directamente a `studio_lipsync_character` / `studio_render_montage`). Aplica Auto-Ducking (`sidechaincompress`) atenuando música/ambiente automáticamente mientras alguien habla y extiende el vídeo con fluidez (`setpts` / ping-pong) si el diálogo dura más que el clip.
 
-6. GESTIÓN DE ESPACIO EN DISCO, MEMORIA Y EXPORTACIÓN DE LOGS EN COLAB:
+6. ASISTENTE PERSONAL Y PREGUNTAS QUE SOLO EL USUARIO PUEDE RESPONDER (NO BLOQUEANTES):
+   - Trabajas para una persona que ya te ha dado el encargo (ej. «animación de 30 s de dos personas andando por un parque
+     hablando de un tema polémico, en tono parodia»). Tu trabajo es EJECUTARLO, no renegociarlo ni pedir permiso en cada paso.
+   - Haz como máximo UNA pregunta de producción en toda la tarea, y solo si `studio_get_workflow_preset` devuelve
+     `production_preferences.pending_questions` no vacío. Usa `studio_ask_user(preference_key=...)` para obtener el texto
+     exacto con la opción recomendada ya marcada y guarda la respuesta con `studio_answer_preference`.
+   - Caso típico: **LoRAs de generación rápida** (`use_fast_loras`). Si el usuario los quiere y están guardados, incluye
+     SIEMPRE el `video_lora_id` rápido que devuelve el plan (`lora-wan21-14b-fusionx-phantom` en 14B) JUNTO a los
+     `extra_video_lora_ids`. Si los omites, Studio IA responde `SPEED_LORA_MISSING`: no es un fallo del motor, es la
+     petición de "rápido" sin el LoRA que la hace rápida. Si el usuario prefiere máxima calidad, guarda `use_fast_loras=false`
+     y deja `video_lora_id=""`.
+   - No bloquees la fase de imágenes esperando la respuesta: pídesela en el chat mientras generas los keyframes.
+   - Si una réplica de diálogo es más larga que su tramo, recórtala o divídela ANTES del TTS; nunca inventes diálogos nuevos
+     ni cambies el tema que pidió el usuario.
+
+7. PROTOCOLO DE FALLO, REINTENTO Y LOG (OBLIGATORIO PARA NO PERDER TIEMPO NI DESCARGAS):
+   - Tras cualquier error, llama a `studio_get_work_state` (preferencias, último trabajo, estado real de los adaptadores)
+     en lugar de repetir la misma llamada a ciegas.
+   - `error_code` = qué corregir. Reintentar solo después de cambiar lo que indica:
+     * `SPEED_LORA_MISSING` → repite la llamada con el `video_lora_id` rápido.
+     * `ADAPTER_STACK_INCOMPLETE` → el stack ya se limpió solo; reintenta el MISMO stack una vez.
+     * `MODEL_LOAD_ERROR` / `RUNTIME_PATCHES_STALE` / `QWEN_VL_4BIT_STATE_LOST` → problema de proceso/entorno, no de la
+       escena: informa, pide reiniciar el servidor (los pesos siguen en disco) y NO descargues nada más.
+     * `MODEL_RESOURCE_CONSTRAINT` / `MEMORY_BUDGET_EXCEEDED` → lee `memory_guardian`; no borres pesos sin permiso.
+   - Máximo 2 reintentos del mismo trabajo. Al segundo fallo: `studio_export_session_log(format="md")` y termina con un
+     informe breve (qué se generó, qué falló, qué archivo contiene el log).
+   - Si el usuario dice que va a cancelar o pide un log, exporta el log YA; no esperes a que se agote el tiempo.
+
+8. GESTIÓN DE ESPACIO EN DISCO, MEMORIA Y EXPORTACIÓN DE LOGS EN COLAB:
    - Si una descarga avisa `DISK_SPACE_INSUFFICIENT`, consulta las sugerencias devueltas y usa `studio_free_memory_or_disk(action="delete_from_disk", target=...)` (preguntando antes al usuario si procede).
    - Si el usuario pide el registro completo de lo ocurrido en la sesión, llama a `studio_export_session_log(format="md")`.
    - Todo lo que ejecutes se muestra EN TIEMPO REAL en la celda de Google Colab del usuario.
@@ -774,6 +809,59 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                     },
                 },
             },
+        },
+        {
+            "name": "studio_answer_preference",
+            "description": (
+                "Guardar la respuesta del usuario a UNA pregunta de producción (LoRAs rápidos, duración de clip, formato, "
+                "voces). Pregúntala una sola vez por sesión/perfil y reutiliza lo guardado en las siguientes tareas. "
+                "No reinicia ni recarga nada."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "enum": list(PREFERENCE_QUESTIONS.keys()),
+                        "description": "Clave exacta de la preferencia respondida.",
+                    },
+                    "value": {
+                        "description": (
+                            "Valor respondido. `use_fast_loras`: true/false. `clip_duration_sec`: 5 o 6 u 8. "
+                            "`aspect_ratio`: '16:9'|'9:16'|'1:1'. `voice_pair`: lista de 2 IDs de voz."
+                        ),
+                    },
+                },
+                "required": ["key", "value"],
+            },
+        },
+        {
+            "name": "studio_ask_user",
+            "description": (
+                "Devuelve la pregunta EXACTA que el agente debe hacer al usuario una sola vez (p. ej. LoRAs de generación "
+                "rápida) con la respuesta recomendada, y cómo guardarla. No bloquea el plan: los keyframes no dependen de ella."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "preference_key": {
+                        "type": "string",
+                        "enum": list(PREFERENCE_QUESTIONS.keys()),
+                        "description": "Preferencia sobre la que preguntar; si se omite, se usa `question`.",
+                    },
+                    "question": {"type": "string", "description": "Pregunta libre si no hay preferencia registrada."},
+                    "suggested_answer": {"description": "Respuesta que el plan recomienda por defecto."},
+                },
+            },
+        },
+        {
+            "name": "studio_get_work_state",
+            "description": (
+                "Estado operativo compacto antes de reintentar: preferencias guardadas, preguntas pendientes, último trabajo "
+                "con su estado/errores y si el modelo de vídeo quedó con adaptadores parciales. Úsalo tras un fallo en vez de "
+                "repetir la misma llamada a ciegas."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
         },
         {
             "name": "studio_list_models",
@@ -1578,6 +1666,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "hardware": hw,
             "loaded_in_vram": loaded,
             "memory_guardian": memory_manager.guardian_status(),
+            "runtime_compatibility": runtime_flags.snapshot(),
             "downloaded_on_disk": downloaded_models,
             "active_jobs": job_manager.list_jobs(limit=5, include_logs=False),
             "available_workflow_presets": list_agent_workflow_presets(),
@@ -1592,6 +1681,9 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "FASES: todos los keyframes → auditoría y reparaciones → todos los vídeos → audio/LipSync/montaje. No prepares vídeo antes de acabar los keyframes.",
                 "Un job running/queued requiere esperar el mismo job_id, no volver a preparar. Ante un fallo no descargues modelos alternativos en cascada.",
                 "La memoria se gestiona automáticamente: solo se expulsan modelos inactivos, nunca sus archivos. MEMORY_SAFETY_STOP o MEMORY_BUDGET_EXCEEDED requieren revisar memory_guardian; no repetir ciegamente ni borrar pesos.",
+                "Revisa `production_preferences.pending_questions` al pedir el plan: haz UNA pregunta (recomendada ya marcada) y guárdala con `studio_answer_preference`; no vuelvas a preguntar lo guardado.",
+                "Si el usuario quiere LoRAs rápidos, pasa el `video_lora_id` rápido del plan además de los adaptadores creativos; sin él la llamada se rechaza con SPEED_LORA_MISSING.",
+                "Tras un fallo llama a `studio_get_work_state` antes de reintentar; máximo 2 reintentos y, al segundo, `studio_export_session_log(format='md')`.",
             ],
         }
         if bool(args.get("include_model_manual", False)):
@@ -1601,6 +1693,35 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return _ok_result(payload)
 
     # 2. Oráculo de recomendación y Presets Compilados de Flujo para Agentes
+    if name == "studio_ask_user":
+        # A plan step the agent itself cannot answer: ask the user once, then remember.
+        key = str(args.get("preference_key") or "").strip()
+        entry = PREFERENCE_QUESTIONS.get(key)
+        if key and entry:
+            return _ok_result({
+                "ok": True,
+                "action": "ASK_USER_ONCE",
+                "preference_key": key,
+                "question": str(args.get("question") or entry["ask_once"]),
+                "recommended": entry["recommended"],
+                "options": entry["options"],
+                "why": entry["why"],
+                "how_to_store": f"studio_answer_preference(key='{key}', value=<respuesta>)",
+                "blocking": False,
+                "note": (
+                    "Haz esta única pregunta al usuario en lenguaje natural mientras preparas los keyframes. "
+                    "No bloquees la fase de imágenes: los fotogramas no dependen de esta respuesta."
+                ),
+            })
+        return _ok_result({
+            "ok": True,
+            "action": "ASK_USER_ONCE",
+            "question": str(args.get("question") or ""),
+            "recommended": args.get("suggested_answer"),
+            "blocking": False,
+            "note": "Pregunta una sola vez; no repitas la pregunta en cada turno ni inventes la respuesta.",
+        })
+
     if name == "studio_get_workflow_preset":
         pid_raw = str(args.get("preset_id") or "coherencia_personajes_entorno_avance").strip()
         if pid_raw.lower() == "list":
@@ -1619,6 +1740,54 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             icon="🧭",
         )
         return _ok_result(compiled_plan)
+
+    if name == "studio_answer_preference":
+        key = str(args.get("key") or "").strip()
+        if key not in PREFERENCE_QUESTIONS:
+            return _guided_error(
+                "UNKNOWN_PREFERENCE_KEY",
+                f"«{key}» no es una preferencia de producción.",
+                "Usa una de: " + ", ".join(PREFERENCE_QUESTIONS.keys()) + ".",
+            )
+        saved = set_preferences({key: args.get("value")})
+        colab_console_log(f"[MCP] Preferencia guardada · {key} = {saved.get(key)!r}", icon="⚙️")
+        return _ok_result({
+            "ok": True,
+            "saved": {key: saved.get(key)},
+            "all_preferences": saved,
+            "pending_questions": pending_questions(),
+            "next": "Continúa el plan; no vuelvas a preguntar lo ya guardado.",
+        })
+
+    if name == "studio_get_work_state":
+        recent = job_manager.list_jobs(limit=5, include_logs=False)
+        last = recent[0] if recent else {}
+        video_slot = memory_manager.get_slot("video") or {}
+        handle = video_slot.get("handle") or {}
+        partial = handle.get("lora_load_partial")
+        return _ok_result({
+            "ok": True,
+            "preferences": guidance_block(),
+            "last_job": {
+                "id": last.get("id"),
+                "status": last.get("status"),
+                "title": (last.get("title") or "")[:120],
+                "error": (last.get("error") or "")[:400],
+                "progress": last.get("progress"),
+                "elapsed_seconds": last.get("elapsed_seconds"),
+                "possibly_hung": last.get("possibly_hung"),
+            } if last else None,
+            "video_model": {
+                "model_id": video_slot.get("model_id"),
+                "active_lora_ids": video_slot.get("adapters") or [],
+                "adapters_partial_failure": partial or None,
+            } if video_slot else None,
+            "retry_policy": (
+                "Un fallo de herramientas no se reintenta a ciegas: corrige la causa indicada por error_code. "
+                "`adapters_partial_failure` ya se ha limpiado; reintentar el mismo stack es seguro. "
+                "Si el error es MODEL_LOAD_ERROR/RUNTIME_PATCHES_STALE, reinicia el servidor y conserva los pesos."
+            ),
+        })
 
     if name == "studio_recommend_pipeline":
         task = str(args.get("task") or "video_flf2v")
@@ -2036,6 +2205,45 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
         if m_defn.get("category") != "video" or m_defn.get("validation_state") == "candidate":
             return _guided_error("MODEL_RECIPE_UNVALIDATED", "No es una receta de vídeo revisada.", "Usa studio_inspect_model; no se descargan ni cargan candidatos.")
+        lora_id = str(args.get("video_lora_id") or "").strip() or None
+        lora_defn = catalog_manager.get_definition(lora_id) if lora_id else None
+        extra_raw = [str(x).strip() for x in (args.get("extra_video_lora_ids") or []) if str(x).strip()]
+        if mode == "ai" and sub == "flf2v" and extra_raw:
+            # A distilled/step-reduced LoRA fixes 6-8 fixed steps. When it is stacked,
+            # leaving it out of the call (as the log shows) silently disables the speed
+            # recipe and runs the full CFG loop, which is why a "fast" attempt ran slow.
+            speed_ready = bool(
+                lora_defn and (lora_defn.get("recommended_steps") or lora_defn.get("flf2v_recommended_steps"))
+            )
+            if not speed_ready:
+                speed_ids = [
+                    x["id"]
+                    for x in catalog_manager.get_all_definitions()
+                    if x["category"] == "lora"
+                    and x.get("lora_target") == "video"
+                    and model_id in (x.get("compatible_models") or [])
+                    and (x.get("recommended_steps") or x.get("flf2v_recommended_steps"))
+                    and not x.get("causal_attention")
+                ]
+                return _guided_error(
+                    "SPEED_LORA_MISSING",
+                    "Estás apilando LoRAs creativos sin el LoRA rápido: los pasos serían los completos "
+                    "(~3 min por clip) y la petición de 'generación rápida' no se cumpliría.",
+                    (
+                        f"Repite la llamada INCLUYENDO `video_lora_id` con uno de {speed_ids or ['lora-wan21-14b-fusionx-phantom']} "
+                        "y los mismos `extra_video_lora_ids`. Si el usuario prefiere calidad máxima sin LoRA rápido, "
+                        "llama antes a `studio_answer_preference(key='use_fast_loras', value=false)`."
+                    ),
+                extra={"detected_extra_loras": extra_raw, "speed_lora_candidates": speed_ids},
+            )
+
+        if lora_id and not lora_defn:
+            return _guided_error(
+                "UNKNOWN_VIDEO_LORA",
+                f"El LoRA `{lora_id}` no existe.",
+                "Pasa `video_lora_id=''` o consulta `studio_list_models(category='lora')`.",
+            )
+
         if mode == "ai":
             allowed_modes = m_defn.get("video_modes") or []
             if sub not in allowed_modes:
@@ -2051,33 +2259,6 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     extra={"compatible_model_ids": compat_ids},
                 )
 
-            assessment = assess_definition(m_defn, assessment_context(), catalog=catalog_manager)
-            if not assessment["compatible"]:
-                return _guided_error(
-                    "MODEL_RESOURCE_CONSTRAINT",
-                    "La receta no encaja en los recursos/precisión conocidos de esta sesión.",
-                    "Leer assessment.resources/reasons, liberar memoria sin borrar pesos o consultar el oráculo. No se descarga una variante de fallback.",
-                    extra={"assessment": assessment},
-                )
-
-            if not catalog_manager.is_downloaded(model_id):
-                space = catalog_manager.check_disk_space(model_id)
-                if not space["ok"]:
-                    return _guided_error(
-                        "DISK_SPACE_INSUFFICIENT",
-                        space["message"],
-                        "Libera disco con `studio_free_memory_or_disk(action='delete_from_disk', target=...)` o elige un modelo ya descargado (`studio_get_state_and_manual`).",
-                        extra={"disk_check": space},
-                    )
-
-        lora_id = str(args.get("video_lora_id") or "").strip() or None
-        lora_defn = catalog_manager.get_definition(lora_id) if lora_id else None
-        if lora_id and not lora_defn:
-            return _guided_error(
-                "UNKNOWN_VIDEO_LORA",
-                f"El LoRA `{lora_id}` no existe.",
-                "Pasa `video_lora_id=''` o consulta `studio_list_models(category='lora')`.",
-            )
         if lora_defn and mode == "ai":
             compat_m = lora_defn.get("compatible_models") or []
             if compat_m and model_id not in compat_m:
@@ -2158,6 +2339,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         motion_style = str(args.get("motion_style") or "zoom_in")
         neg_prompt = str(args.get("negative_prompt") or "")
         extra_v_loras = [str(x).strip() for x in (args.get("extra_video_lora_ids") or []) if str(x).strip()]
+        requested_lora_id = lora_id
+        requested_extra_loras = list(extra_v_loras)
         raw_ev_scales = args.get("extra_video_lora_scales") if isinstance(args.get("extra_video_lora_scales"), dict) else {}
         extra_v_scales = {str(k): float(v) for k, v in raw_ev_scales.items()}
 
@@ -2173,6 +2356,26 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     "Leer assessment. No se descargan alternativas, no se borran pesos ni se reenvía el trabajo automáticamente.",
                     extra={"assessment": stack_assessment, "memory_guardian": memory_manager.guardian_status()})
 
+        if mode == "ai":
+            assessment = assess_definition(m_defn, assessment_context(), catalog=catalog_manager)
+            if not assessment["compatible"]:
+                return _guided_error(
+                    "MODEL_RESOURCE_CONSTRAINT",
+                    "La receta no encaja en los recursos/precisión conocidos de esta sesión.",
+                    "Leer assessment.resources/reasons, liberar memoria sin borrar pesos o consultar el oráculo. No se descarga una variante de fallback.",
+                    extra={"assessment": assessment},
+                )
+
+            if not catalog_manager.is_downloaded(model_id):
+                space = catalog_manager.check_disk_space(model_id)
+                if not space["ok"]:
+                    return _guided_error(
+                        "DISK_SPACE_INSUFFICIENT",
+                        space["message"],
+                        "Libera disco con `studio_free_memory_or_disk(action='delete_from_disk', target=...)` o elige un modelo ya descargado (`studio_get_state_and_manual`).",
+                        extra={"disk_check": space},
+                    )
+
         job = job_manager.submit(
             kind="video",
             title=f"[MCP] Vídeo ({sub} · {model_id}): {(prompt or 'animación')[:34]}",
@@ -2180,9 +2383,9 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 mode=mode,
                 video_submode=sub,
                 model_id=model_id,
-                video_lora_id=lora_id,
+                video_lora_id=requested_lora_id,
                 video_lora_scale=lora_scale,
-                extra_video_lora_ids=extra_v_loras,
+                extra_video_lora_ids=requested_extra_loras,
                 extra_video_lora_scales=extra_v_scales,
                 prompt=prompt,
                 negative_prompt=neg_prompt,

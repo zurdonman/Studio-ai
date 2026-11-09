@@ -46,8 +46,17 @@ def _sanitize_visual_scene_description(raw: str) -> str:
     return cleaned.strip(" ,.;:-")
 
 
-def _infer_clip_plan_from_text(scene_raw: str, requested_num_clips: Optional[int]) -> Tuple[int, float]:
-    """Infer 5s batches (60s = 12 clips), without replacing an explicit non-default count."""
+def _infer_clip_plan_from_text(
+    scene_raw: str,
+    requested_num_clips: Optional[int],
+    clip_duration_sec: Optional[float] = None,
+) -> Tuple[int, float]:
+    """Infer 5s batches (60s = 12 clips), without replacing an explicit non-default count.
+
+    `clip_duration_sec` is the user's saved preference (5/6/8 s), never invented here.
+    """
+    batch = float(clip_duration_sec) if clip_duration_sec else 5.0
+    batch = min(8.0, max(5.0, batch))
     match = re.search(_DURATION_PATTERN, (scene_raw or "").lower())
     target_seconds = 0.0
     if match:
@@ -60,9 +69,9 @@ def _infer_clip_plan_from_text(scene_raw: str, requested_num_clips: Optional[int
             target_seconds = amount * (60.0 if "min" in duration else 1.0)
 
     if target_seconds > 0 and (requested_num_clips is None or int(requested_num_clips) == 2):
-        return max(1, min(12, math.ceil(target_seconds / 5.0))), 5.0
+        return max(1, min(12, math.ceil(target_seconds / batch))), batch
     n = int(requested_num_clips) if requested_num_clips is not None else 2
-    return max(1, min(12, n)), 5.0
+    return max(1, min(12, n)), batch
 
 
 _DEFAULT_STREET_DIALOGUE_POOL = [
@@ -227,7 +236,7 @@ def list_agent_workflow_presets() -> List[Dict[str, Any]]:
     return list(AGENT_PRESET_SUMMARY_CATALOG.values())
 
 
-def _select_video_stack_for_gpu(vram_gb: float, has_gpu: bool) -> Dict[str, Any]:
+def _select_video_stack_for_gpu(vram_gb: float, has_gpu: bool, fast_loras: bool = True) -> Dict[str, Any]:
     if not has_gpu or vram_gb < 10.0:
         return {
             "tier": "cpu_fallback",
@@ -240,6 +249,26 @@ def _select_video_stack_for_gpu(vram_gb: float, has_gpu: bool) -> Dict[str, Any]
         }
     if vram_gb >= 19.5:
         # L4 (22.5 GB) o A100 (40/80 GB): Wan 2.1 VACE 14B FP8 + FusionX 6p + UniAnimate + MoviiGen Cinema
+        if not fast_loras:
+            return {
+                "tier": "high_14b_fp8_quality",
+                "model_id": "wan21-vace-14b-fp8",
+                "mode": "ai",
+                "video_lora_id": "",
+                "extra_video_lora_ids": [
+                    "lora-wan21-14b-unianimate-char",
+                    "lora-wan21-14b-moviigen-cinema",
+                ],
+                "extra_video_lora_scales": {
+                    "lora-wan21-14b-unianimate-char": 0.65,
+                    "lora-wan21-14b-moviigen-cinema": 0.60,
+                },
+                "note": (
+                    "GPU >= 20 GB sin LoRA rápido (preferencia del usuario): Wan 2.1 VACE 14B FP8 con pasos completos "
+                    "+ UniAnimate (identidad/anatomía) + MoviiGen (paralaje). Más lento por clip."
+                ),
+                "fast_loras": False,
+            }
         return {
             "tier": "high_14b_fp8",
             "model_id": "wan21-vace-14b-fp8",
@@ -254,6 +283,7 @@ def _select_video_stack_for_gpu(vram_gb: float, has_gpu: bool) -> Dict[str, Any]
                 "lora-wan21-14b-moviigen-cinema": 0.60,
             },
             "note": "GPU >= 20 GB (L4/A100): Wan 2.1 VACE 14B FP8 + FusionX 6p + UniAnimate (identidad/anatomía) + MoviiGen (paralaje cine).",
+            "fast_loras": True,
         }
     # T4 (15 GB): Wan 2.1 VACE 1.3B + Bidirect2 (6-8 pasos)
     return {
@@ -275,6 +305,8 @@ def _compile_agent_workflow_preset(
     num_clips: Optional[int] = None,
     aspect_ratio: str = "16:9",
     gpu_override: Optional[Dict[str, Any]] = None,
+    fast_loras: bool = True,
+    clip_duration_sec: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Compila un plan operativo completo y ejecutable para que el agente MCP siga exactamente
@@ -286,9 +318,9 @@ def _compile_agent_workflow_preset(
     gpu = gpu_override or query_gpu_info()
     vram_gb = float(gpu.get("vram_total_gb") or gpu.get("total_vram_gb") or 0.0)
     has_gpu = bool(gpu.get("has_gpu", vram_gb > 0))
-    vid_stack = _select_video_stack_for_gpu(vram_gb=vram_gb, has_gpu=has_gpu)
+    vid_stack = _select_video_stack_for_gpu(vram_gb=vram_gb, has_gpu=has_gpu, fast_loras=fast_loras)
 
-    n_clips, clip_dur_sec = _infer_clip_plan_from_text(scene_description, num_clips)
+    n_clips, clip_dur_sec = _infer_clip_plan_from_text(scene_description, num_clips, clip_duration_sec)
     ar = aspect_ratio if aspect_ratio in ("16:9", "9:16", "1:1") else "16:9"
     orient = "portrait" if ar == "9:16" else ("square" if ar == "1:1" else "landscape")
 
@@ -922,9 +954,20 @@ def compile_agent_workflow_preset(
     from studio.memory_policy import host_memory
     from studio.model_compatibility import assessment_context, assess_model_stack
 
+    from studio.mcp_preferences import fast_loras_enabled, get_preference
+
     gpu = gpu_override if gpu_override is not None else query_gpu_info()
-    plan = _compile_agent_workflow_preset(preset_id, scene_description, characters_description,
-                                         dialogue_lines, num_clips, aspect_ratio, gpu)
+    plan = _compile_agent_workflow_preset(
+        preset_id,
+        scene_description,
+        characters_description,
+        dialogue_lines,
+        num_clips,
+        aspect_ratio,
+        gpu,
+        fast_loras=fast_loras_enabled(),
+        clip_duration_sec=get_preference("clip_duration_sec"),
+    )
     stack = plan["detected_gpu"]["selected_video_stack"]
     base = catalog_manager.get_definition(stack["model_id"])
     ids = list(dict.fromkeys(([stack["video_lora_id"]] if stack["video_lora_id"] else []) + stack["extra_video_lora_ids"]))
@@ -943,6 +986,21 @@ def compile_agent_workflow_preset(
                   on_memory_admission_failure="STOP con diagnóstico; no repetir, borrar pesos ni descargar otra receta automáticamente.",
                   allow_automatic_fallback_downloads=False,
                   require_full_stack_admission=True)
+    from studio.mcp_preferences import pending_questions
+
+    plan["production_preferences"] = {
+        "applied": {
+            "use_fast_loras": bool(stack.get("fast_loras", True)),
+            "clip_duration_sec": float(plan.get("planned_duration_summary", {}).get("clip_duration_sec") or 5.0),
+            "aspect_ratio": aspect_ratio,
+        },
+        "pending_questions": pending_questions(),
+        "instruction": (
+            "Antes de la primera generación, revisa `pending_questions`: si alguna sigue pendiente, pregunta UNA sola vez "
+            "al usuario (con la opción recomendada ya marcada) y guarda la respuesta con `studio_answer_preference`. "
+            "Nunca vuelvas a preguntar lo que ya está guardado: si `pending_questions` está vacío, empieza directamente."
+        ),
+    }
     plan["video_stack_capacity_ok"] = assessment["compatible"]
     plan["planning_only"] = not assessment["runnable_now"]
     for step in plan.get("execution_plan", []):
