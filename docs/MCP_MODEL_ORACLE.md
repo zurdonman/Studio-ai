@@ -173,6 +173,16 @@ Las importaciones manuales se guardan como `validation_state=candidate`. Se cons
 6. OOM: revisar memoria real, liberar slots, reducir resolución/frames **dentro de la receta**, o elegir otra receta con autorización. No asumir que cualquier combinación de 4-bit, sequential/model/group offload y casting es válida.
 7. Espacio insuficiente: exportar salidas, revisar sugerencias y **pedir permiso** antes de `delete_from_disk`. No borrar cachés/pesos de trabajo sin autorización.
 
+### 8.1. Caída del proceso o túnel, no confundir con un fallo del modelo
+
+Ver [procedimiento de rescate de Colab](COLAB_RECOVERY.md). Wan 14B FP8 usa dtype FP8 explícito y carga meta/CPU: no expandir a FP32 con dtype `None` antes del casting. Se vuelve a medir RAM después de liberar slots y antes de descargar/cargar; `HOST_RAM_BUDGET_EXCEEDED` conserva los pesos y no autoriza una descarga alternativa.
+
+Un 502 o 530/1033 **no confirma OOM ni que la VM haya desaparecido**. El padre puede cerrar el túnel después de que muera solo el servidor. Revisar `state/diagnostics` y la celda de rescate del notebook: código/señal de salida, stderr, cloudflared, RSS/RAM y eventos cgroup. El ZIP de `GET /api/logs/diagnostics` oculta tokens y no incluye pesos/multimedia. Si la VM se elimina, su disco efímero también: descargar antes.
+
+Actualizar también el puente `studio_mcp.py`. Una conexión interrumpida conserva `job_id`, devuelve `unknown_not_failed` y `do_not_resubmit=true`: reanudar consultando el mismo ID. Solo se reintentan lecturas; nunca repetir a ciegas un POST cuya respuesta se perdió.
+
+El inspector usa archivos locales y la API real del catálogo. No hace un segundo intento BF16 tras fallar 4-bit. Si `hybrid_auto` no pudo ejecutar el VLM, `all_consistent=false`, `identity_verified=false`, `ready_for_video=false`: revisar `vlm_fallback_reason`. En `fast_cv` explícito, PASS/`all_consistent` solo se refieren a fotometría con el `effective_comparison_threshold` publicado; **no prueban identidad ni autorizan por sí solos el preset semántico de vídeo**.
+
 ## 9. API web equivalente y pruebas reproducibles
 
 - `GET /api/catalog/hf-search?query=Wan&category=video&gpu_profile=auto&only_compatible=true&limit=12&offset=0`

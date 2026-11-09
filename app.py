@@ -1630,6 +1630,7 @@ class CoherenceAnalyzeReq(BaseModel):
     scene_goal: str = ""
     mode: str = "hybrid_auto"
     strictness_threshold: float = 78.0
+    expect_spatial_progression: bool = False
 
 
 @app.post("/api/coherence/analyze")
@@ -1653,6 +1654,7 @@ def api_analyze_coherence(req: CoherenceAnalyzeReq) -> Dict[str, Any]:
             scene_goal=req.scene_goal,
             mode=req.mode,
             strictness_threshold=req.strictness_threshold,
+            expect_spatial_progression=req.expect_spatial_progression,
             job=j,
         ),
     )
@@ -1676,6 +1678,14 @@ def _generate_current_session_report(fmt: str = "md") -> tuple[str, str]:
         downloaded_models=downloaded,
         fmt=fmt,
     )
+
+
+@app.get("/api/logs/diagnostics")
+def api_export_diagnostics() -> FileResponse:
+    """Bounded, redacted raw process/tunnel/memory logs; no weights or output media."""
+    from studio.diagnostics import export_diagnostic_bundle
+    path = export_diagnostic_bundle(DATA_ROOT, TEMP_DIR / f"studio_diagnostics_{uuid.uuid4().hex[:10]}.zip")
+    return FileResponse(path, media_type="application/zip", filename=path.name)
 
 
 @app.get("/api/logs/export")

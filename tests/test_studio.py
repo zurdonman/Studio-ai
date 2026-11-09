@@ -1241,8 +1241,13 @@ def test_quantized_14b_distilled_13b_models_and_fp8_loader(monkeypatch, tmp_path
             return []
 
     class FakeTransformerCls:
+        enable_layerwise_casting = lambda *args, **kwargs: None
+
         @classmethod
-        def from_single_file(cls, sd, config=None, subfolder=None, torch_dtype=None, local_files_only=False):
+        def from_single_file(cls, sd, config=None, subfolder=None, torch_dtype=None, local_files_only=False,
+                             low_cpu_mem_usage=False, device=None):
+            assert torch_dtype == fake_torch.float8_e4m3fn
+            assert low_cpu_mem_usage is True and device == "cpu" and local_files_only is True
             saved_captured["sd"] = dict(sd)
             saved_captured["subfolder"] = subfolder
             pos_p = FakeParam(np.zeros((1, 514, 8), dtype=np.float32), dtype="float8_e4m3fn")
@@ -3136,6 +3141,10 @@ def test_video_batch_releases_image_and_vision_slots_before_loading(mock_colab_i
     monkeypatch.setattr(video_engine, "flush_ram_and_vram", lambda: None)
     monkeypatch.setattr(video_engine, "query_gpu_info", lambda: {"vram_used_gb": 1.0, "vram_total_gb": 22.0})
     monkeypatch.setattr(video_engine, "_apply_best_offload", lambda *a, **k: None)
+    # This is a simulated high-RAM Colab, not the sandbox's 4 GiB host.
+    import studio.memory_manager as mm
+    from types import SimpleNamespace
+    monkeypatch.setattr(mm.psutil, "virtual_memory", lambda: SimpleNamespace(total=64 * 1024**3, available=52 * 1024**3, used=12 * 1024**3))
 
     def instantiate(*a, **k):
         assert manager.get_slot("image") is None

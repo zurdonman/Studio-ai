@@ -75,6 +75,25 @@ def flush_ram_and_vram() -> None:
         pass
 
 
+def require_available_host_ram(required_gb: float, *, stage: str, job: Any = None) -> Dict[str, float]:
+    """Re-measure after unloading, before native allocations that SIGKILL cannot catch.
+
+    A planning guard, not a hard memory limit or a guarantee against OOM.
+    """
+    vm = psutil.virtual_memory()
+    available = vm.available / (1024**3)
+    total = vm.total / (1024**3)
+    message = f"RAM antes de {stage}: {available:.2f}/{total:.2f} GiB libres; presupuesto estimado {required_gb:.2f} GiB."
+    if available < required_gb:
+        raise RuntimeError(
+            f"HOST_RAM_BUDGET_EXCEEDED: {message} Carga detenida antes de reservar tensores. "
+            "Libera memoria o usa explícitamente otra receta tras consultar el oráculo; los pesos en disco se conservan."
+        )
+    if job:
+        job.log(message, step="Comprobando RAM disponible antes de cargar")
+    return {"available_gb": available, "total_gb": total, "required_gb": required_gb}
+
+
 def run_with_live_memory_progress(
     job: Any,
     start_pct: float,

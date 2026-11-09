@@ -255,7 +255,8 @@ def load_coherence_vlm_into_memory(
     else:
         load_start_pct = 12.0
 
-    base_dir = catalog_manager.local_artifact_dir(model_id, "base")
+    base_artifact = next(a for a in defn.get("artifacts", []) if a.get("role") == "base")
+    base_dir = catalog_manager.model_dir(model_id) / base_artifact["subdir"]
 
     def _do_load() -> Dict[str, Any]:
         apply_runtime_compatibility_patches()
@@ -271,33 +272,25 @@ def load_coherence_vlm_into_memory(
                 "Ejecuta pip install -U 'transformers>=4.49.0'."
             )
 
-        processor = AutoProcessor.from_pretrained(str(base_dir))
-        try:
-            bnb_cfg = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_use_double_quant=True,
-                llm_int8_skip_modules=["visual"],
-            )
-            model = cls_vlm.from_pretrained(
-                str(base_dir),
-                quantization_config=bnb_cfg,
-                torch_dtype=torch.bfloat16,
-                device_map={"": 0},
-                low_cpu_mem_usage=True,
-            )
-        except Exception as bnb_exc:
-            colab_console_log(
-                f"Aviso 4-bit en Qwen2.5-VL ({bnb_exc}); cargando en BF16 directo...",
-                icon="⚠️",
-            )
-            model = cls_vlm.from_pretrained(
-                str(base_dir),
-                torch_dtype=torch.bfloat16,
-                device_map={"": 0},
-                low_cpu_mem_usage=True,
-            )
+        processor = AutoProcessor.from_pretrained(str(base_dir), local_files_only=True, trust_remote_code=False)
+        bnb_cfg = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            llm_int8_skip_modules=["visual"],
+        )
+        # A quantization failure is not permission to allocate another full model
+        # in BF16. hybrid_auto may return an explicitly limited CV result instead.
+        model = cls_vlm.from_pretrained(
+            str(base_dir),
+            quantization_config=bnb_cfg,
+            torch_dtype=torch.bfloat16,
+            device_map={"": 0},
+            low_cpu_mem_usage=True,
+            local_files_only=True,
+            trust_remote_code=False,
+        )
         model.eval()
         return {"model": model, "processor": processor}
 
@@ -655,6 +648,8 @@ def run_coherence_analysis(
             "candidate_rel": crel,
             "verdict": verdict,
             "overall_coherence_score": combined,
+            "assessment_scope": "semantic_and_photometric" if vlm_loaded_ok else "photometric_only_not_identity",
+            "effective_threshold": threshold if vlm_loaded_ok else eff_cv_thresh,
             "fast_cv": cv_r,
             "semantic_vlm": vlm_r,
             "recommended_repair_tool_call": repair_call,
@@ -672,7 +667,17 @@ def run_coherence_analysis(
             icon=icon_v,
         )
 
-    all_ok = len(inconsistent_rels) == 0
+    comparisons_ok = len(inconsistent_rels) == 0
+    cv_threshold = (threshold - 16.0) if expect_spatial_progression else (threshold - 10.0)
+    photometric_ok = all(
+        r["cv_overall_score"] >= cv_threshold and r["aspect_ratio_compatible"]
+        and (not expect_spatial_progression or r["step_displacement_from_prev_pct"] >= 8.0)
+        for r in cv_results
+    )
+    # Explicit fast_cv remains a photometric filter for callers that requested it.
+    # A requested semantic audit that fell back to CV cannot clear the GPU
+    # workflow's identity gate, even if all relaxed CV thresholds pass.
+    all_ok = comparisons_ok and (vlm_loaded_ok or mode == "fast_cv")
     avg_score = round(sum(c["overall_coherence_score"] for c in comparisons) / len(comparisons), 1)
 
     return {
@@ -682,12 +687,21 @@ def run_coherence_analysis(
         "vlm_fallback_reason": vlm_fallback_reason,
         "anchor_image_rel": anchor_rel,
         "strictness_threshold": threshold,
+        "effective_comparison_threshold": threshold if vlm_loaded_ok else ((threshold - 16.0) if expect_spatial_progression else (threshold - 10.0)),
+        "assessment_scope": "semantic_and_photometric" if vlm_loaded_ok else "photometric_only_not_identity",
+        "photometric_consistent": photometric_ok,
+        "identity_verified": vlm_loaded_ok and all_ok,
+        "ready_for_video": vlm_loaded_ok and all_ok,
         "all_consistent": all_ok,
         "average_coherence_score": avg_score,
         "inconsistent_frames": inconsistent_rels,
         "comparisons": comparisons,
         "agent_next_step": (
-            "Todos los fotogramas mantienen la identidad y coherencia con el ancla. Ya puedes pasar a `studio_generate_video`."
+            ("Solo se ha evaluado color/luz/estructura, NO identidad de personajes ni avance 3D real. "
+             "No iniciar vídeo automáticamente ni dar por aprobada la auditoría semántica. "
+             "Revisar vlm_fallback_reason y repetir mode='vlm_qwen' o validar visualmente de forma explícita.")
+            if not vlm_loaded_ok else
+            "Auditoría semántica y fotométrica superada según los umbrales del inspector; no es una garantía de identidad perfecta. Puedes continuar con `studio_generate_video` tras revisar el resultado."
             if all_ok
             else (
                 "Uno o más fotogramas perdieron consistencia respecto al ancla (`NEEDS_REPAIR`). "

@@ -63,6 +63,8 @@ Herramientas MCP: `studio_search_models`, `studio_inspect_model`, `studio_refres
 
 ## Colab Python 3.13: actualizar sin perder los modelos
 
+**Si la aplicación se para al cargar Wan 14B o el túnel devuelve 502/530:** [rescate y diagnóstico sin servidor](docs/COLAB_RECOVERY.md). El lanzador conserva stderr/salida/señales/RAM, el notebook incluye una celda de rescate y el puente mantiene el `job_id`. Los logs locales no sobreviven si Colab elimina la VM.
+
 Si una sesión anterior falló con `_is_hf_initialized`, `Cannot copy out of meta tensor`
 o «ningún modelo de imagen cargado»:
 

@@ -29,6 +29,7 @@ from studio.memory_manager import (
     flush_ram_and_vram,
     memory_manager,
     run_with_live_memory_progress,
+    require_available_host_ram,
     serialized_gpu_operation,
 )
 
@@ -574,7 +575,8 @@ def _load_wan_fp8_single_file_transformer(
 ) -> Any:
     """
     Carga un transformer 14B cuantizado en un único archivo `.safetensors` FP8 (`e4m3fn`) usando
-    la configuración local Diffusers (`base/transformer/config.json`) sin duplicar RAM:
+    la configuración local Diffusers (`base/transformer/config.json`) y dtype FP8 explícito:
+      - Usa init/meta (`low_cpu_mem_usage=True`) en CPU; nunca el dtype None/FP32 implícito.
       - Desescala pesos si incluyen tensores `.scale_weight` / `.weight_scale`.
       - Preserva `img_emb.emb_pos` -> `condition_embedder.image_embedder.pos_embed` (514 tokens en FLF2V-14B),
         que `convert_wan_transformer_to_diffusers` omite en Diffusers <=0.42.1.
@@ -584,6 +586,12 @@ def _load_wan_fp8_single_file_transformer(
     import safetensors.torch  # type: ignore
     import torch  # type: ignore
 
+    storage_dtype = getattr(torch, "float8_e4m3fn", None)
+    if storage_dtype is None or not callable(getattr(transformer_cls, "enable_layerwise_casting", None)):
+        raise RuntimeError(
+            "FP8_RUNTIME_UNSUPPORTED: esta receta necesita Torch FP8 y layerwise casting de Diffusers; "
+            "no se expande el transformer 14B a BF16/FP32 ni se descarga otro modelo."
+        )
     raw_sd = safetensors.torch.load_file(str(sf_path), device="cpu")
 
     # Extraer `img_emb.emb_pos` antes de `from_single_file` para inyectarlo intacto en FLF2V-14B (`pos_embed_seq_len=514`)
@@ -610,22 +618,46 @@ def _load_wan_fp8_single_file_transformer(
                     )
                 break
 
-    transformer = transformer_cls.from_single_file(
-        raw_sd,
-        config=str(base_dir),
-        subfolder="transformer",
-        torch_dtype=None,
-        local_files_only=True,
-    )
-    raw_sd.clear()
+    # The upstream meta loader casts to each empty parameter's dtype when dtype
+    # is None (normally FP32). A 14B checkpoint then becomes >52 GiB BEFORE
+    # layerwise casting runs. Explicit FP8 + meta loading prevents that expansion.
+    # Keep references to the originally higher-precision tensors so excluded
+    # norm/embedding/projection modules can be restored without FP8 rounding.
+    if not any(getattr(v, "dtype", None) == storage_dtype for v in raw_sd.values()):
+        raise RuntimeError("FP8_CHECKPOINT_DTYPE_MISMATCH: no hay tensores e4m3fn en el checkpoint elegido; no se inventa una cuantización.")
+    restore_sd = {k: v for k, v in raw_sd.items()
+                  if getattr(v, "dtype", None) in (torch.bfloat16, getattr(torch, "float16", None), getattr(torch, "float32", None))}
+    original_wan_keys = any(".self_attn." in k or k.startswith(("time_embedding.", "model.diffusion_model.")) for k in raw_sd)
+    if restore_sd and original_wan_keys:
+        from diffusers.loaders.single_file_utils import convert_wan_transformer_to_diffusers
+        restore_sd = convert_wan_transformer_to_diffusers(restore_sd)
 
-    if emb_pos_tensor is not None:
-        img_emb_mod = getattr(getattr(transformer, "condition_embedder", None), "image_embedder", None)
-        pos_param = getattr(img_emb_mod, "pos_embed", None)
-        if pos_param is not None and tuple(pos_param.shape) == tuple(emb_pos_tensor.shape):
-            pos_param.data.copy_(emb_pos_tensor.to(device=pos_param.device, dtype=torch.bfloat16))
+    try:
+        transformer = transformer_cls.from_single_file(
+            raw_sd,
+            config=str(base_dir),
+            subfolder="transformer",
+            torch_dtype=storage_dtype,
+            low_cpu_mem_usage=True,
+            device="cpu",
+            local_files_only=True,
+        )
+        transformer = _enable_fp8_layerwise_casting_safe(transformer)
+        if restore_sd:
+            for name, param in list(transformer.named_parameters()) + list(transformer.named_buffers()):
+                original = restore_sd.get(name)
+                if original is not None and param.dtype != storage_dtype:
+                    param.data.copy_(original.to(device=param.device, dtype=param.dtype))
 
-    return _enable_fp8_layerwise_casting_safe(transformer)
+        if emb_pos_tensor is not None:
+            img_emb_mod = getattr(getattr(transformer, "condition_embedder", None), "image_embedder", None)
+            pos_param = getattr(img_emb_mod, "pos_embed", None)
+            if pos_param is not None and tuple(pos_param.shape) == tuple(emb_pos_tensor.shape):
+                pos_param.data.copy_(emb_pos_tensor.to(device=pos_param.device, dtype=pos_param.dtype))
+        return transformer
+    finally:
+        raw_sd.clear()
+        restore_sd.clear()
 
 
 def _maybe_set_wan_flow_shift(pipe: Any, flow_shift: Optional[float]) -> None:
@@ -1258,6 +1290,30 @@ def _load_video_model_into_memory_locked(
             "Puedes usar «Cámara FFmpeg (0 GB)» o ejecutar en Google Colab con GPU."
         )
 
+    if not auto_download and not catalog_manager.is_downloaded(model_id):
+        raise RuntimeError(f"«{defn['name']}» no está descargado. No se modifica la memoria ni el disco.")
+
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+    for prev_slot in ("video", "image", "vision"):
+        ps = memory_manager.get_slot(prev_slot)
+        if ps:
+            if job:
+                job.log(
+                    f"Liberando «{ps['name']}» de RAM/VRAM (sus archivos siguen en disco)...",
+                    progress=_span(0.01),
+                    step=f"Liberando VRAM ({prev_slot})...",
+                )
+            del ps
+            memory_manager.unload_slot(prev_slot)
+
+    flush_ram_and_vram()
+
+    from studio.model_recipes import ENGINE_CONTRACTS
+    required_ram = defn.get("min_ram_gb", ENGINE_CONTRACTS.get(defn.get("engine"), {}).get("ram_gb"))
+    if required_ram is not None:
+        require_available_host_ram(float(required_ram), stage=f"preparación de {model_id}", job=job)
+
     if not catalog_manager.is_downloaded(model_id):
         if auto_download:
             dl_start = _span(0.02)
@@ -1287,21 +1343,8 @@ def _load_video_model_into_memory_locked(
     def _map_pct(frac: float) -> float:
         return _span(load_frac_start + frac * (1.0 - load_frac_start))
 
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-    for prev_slot in ("video", "image", "vision"):
-        ps = memory_manager.get_slot(prev_slot)
-        if ps:
-            if job:
-                job.log(
-                    f"Liberando «{ps['name']}» de RAM/VRAM (sus archivos siguen en disco)...",
-                    progress=_map_pct(0.08),
-                    step=f"Liberando VRAM ({prev_slot})...",
-                )
-            del ps
-            memory_manager.unload_slot(prev_slot)
-
-    flush_ram_and_vram()
+    if required_ram is not None:
+        require_available_host_ram(float(required_ram), stage=f"carga de {model_id}", job=job)
 
     art = defn["artifacts"][0]
     base_dir = catalog_manager.model_dir(model_id) / art["subdir"]
@@ -1311,7 +1354,7 @@ def _load_video_model_into_memory_locked(
     p_e = _map_pct(0.84)
     if job:
         job.log(
-            f"Cargando pipeline «{defn['name']}» en bfloat16...",
+            f"Cargando pipeline «{defn['name']}» ({'transformer FP8 explícito + componentes BF16/FP32' if engine in ('wan_vace_fp8', 'wan_i2v_14b_fp8') else 'precisión de la receta'})...",
             progress=p_s,
             step="Cargando tensores de vídeo...",
         )

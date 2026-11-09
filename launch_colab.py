@@ -18,8 +18,11 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 from pathlib import Path
+
+from studio.diagnostics import DiagnosticSession, data_root, describe_exit, export_diagnostic_bundle, memory_snapshot, redact_secrets
 
 ROOT_DIR = Path(__file__).resolve().parent
 PORT = int(os.environ.get("PORT", "7860"))
@@ -87,7 +90,7 @@ def ensure_dependencies() -> None:
     print("✅ Dependencias listas.", flush=True)
 
 
-def start_cloudflared_tunnel(port: int) -> tuple[subprocess.Popen | None, str | None]:
+def start_cloudflared_tunnel(port: int, diagnostics: DiagnosticSession | None = None) -> tuple[subprocess.Popen | None, str | None]:
     if platform.system().lower() != "linux":
         return None, None
 
@@ -109,6 +112,7 @@ def start_cloudflared_tunnel(port: int) -> tuple[subprocess.Popen | None, str | 
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        errors="replace",
     )
 
     public_url: list[str] = []
@@ -116,6 +120,8 @@ def start_cloudflared_tunnel(port: int) -> tuple[subprocess.Popen | None, str | 
     def _reader() -> None:
         assert proc.stdout is not None
         for line in proc.stdout:
+            if diagnostics:
+                diagnostics.write("tunnel.log", line)
             m = re.search(r"https://[a-zA-Z0-9\-]+\.trycloudflare\.com", line)
             if m and not public_url:
                 public_url.append(m.group(0))
@@ -164,10 +170,30 @@ def disconnect_colab_if_possible() -> None:
         pass
 
 
-def main() -> None:
-    ensure_dependencies()
+def _stop_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3)
+    except ProcessLookupError:
+        pass
 
-    data_dir = Path("/content/studio_data") if Path("/var/colab").exists() else (ROOT_DIR / "studio_data")
+
+def main() -> None:
+    diagnostics = DiagnosticSession()
+    print(f"📄 Diagnóstico persistente de esta ejecución: {diagnostics.folder}", flush=True)
+    try:
+        ensure_dependencies()
+    except Exception:
+        diagnostics.write("server.log", traceback.format_exc())
+        diagnostics.event("dependency_setup_failed", status="failed")
+        raise
+
+    data_dir = data_root()
     shutdown_flag = data_dir / "state" / "shutdown_requested.flag"
     if shutdown_flag.exists():
         shutdown_flag.unlink()
@@ -178,6 +204,8 @@ def main() -> None:
     env["PORT"] = str(PORT)
     env["PYTHONUNBUFFERED"] = "1"
     env["STUDIO_MCP_TOKEN"] = mcp_token
+    env["PYTHONFAULTHANDLER"] = "1"
+    env["STUDIO_DIAGNOSTIC_DIR"] = str(diagnostics.folder)
     env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     # Capturamos stdout/stderr en un hilo lector hacia print(..., flush=True) para que
@@ -189,14 +217,17 @@ def main() -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        errors="replace",
         bufsize=1,
     )
+    diagnostics.event("server_started", status="starting", server_pid=server_proc.pid)
 
     def _stream_server_logs() -> None:
         assert server_proc.stdout is not None
         for line in iter(server_proc.stdout.readline, ""):
             if line:
-                print(line, end="", flush=True)
+                diagnostics.write("server.log", line)
+                print(redact_secrets(line), end="", flush=True)
 
     log_thread = threading.Thread(target=_stream_server_logs, daemon=True)
     log_thread.start()
@@ -204,11 +235,14 @@ def main() -> None:
     initial_status = wait_for_local_server(PORT, timeout=35.0)
     if not initial_status:
         print("❌ El servidor tardó demasiado en responder.", flush=True)
-        server_proc.terminate()
-        sys.exit(1)
+        _stop_process(server_proc)
+        log_thread.join(timeout=2)
+        diagnostics.event("startup_failed", status="failed", exit=describe_exit(server_proc.returncode, diagnostics.before, memory_snapshot()))
+        print(f"📄 Consulta el diagnóstico local: {diagnostics.folder}", flush=True)
+        raise RuntimeError("Studio no pudo arrancar; ver server.log. Los pesos no se han borrado.")
 
     print("🔗 [3/3] Abriendo enlace de acceso y conector MCP...", flush=True)
-    cf_proc, cf_url = start_cloudflared_tunnel(PORT)
+    cf_proc, cf_url = start_cloudflared_tunnel(PORT, diagnostics=diagnostics)
     colab_url = try_colab_proxy_url(PORT)
 
     if cf_url:
@@ -254,31 +288,53 @@ def main() -> None:
     msg_lines.append("📡 Debajo verás EN TIEMPO REAL todo lo que hagas tú en la Web o tu Agente vía MCP:")
     _print_box(msg_lines)
 
+    diagnostics.event("ready", status="running", public_url=cf_url, tunnel_pid=cf_proc.pid if cf_proc else None)
+    requested_stop = False
+    tunnel_exit_reported = False
+    last_sample = 0.0
     try:
         while server_proc.poll() is None:
+            if time.monotonic() - last_sample >= 3:
+                diagnostics.sample(server_proc.pid, cf_proc.pid if cf_proc else None)
+                last_sample = time.monotonic()
+            if cf_proc and cf_proc.poll() is not None and not tunnel_exit_reported:
+                tunnel_exit_reported = True
+                diagnostics.event("tunnel_exited", tunnel_returncode=cf_proc.returncode)
+                print("⚠️ El túnel terminó, pero el servidor local sigue activo. No repitas la generación; conserva el job_id y consulta el diagnóstico de Colab.", flush=True)
             if shutdown_flag.exists():
+                requested_stop = True
                 print("\n🛑 Solicitud de «Liberar GPU» recibida desde la interfaz.", flush=True)
                 shutdown_flag.unlink(missing_ok=True)
-                server_proc.terminate()
+                _stop_process(server_proc)
                 if cf_proc:
-                    cf_proc.terminate()
+                    _stop_process(cf_proc)
+                log_thread.join(timeout=2)
+                diagnostics.event("user_shutdown", status="stopped")
                 disconnect_colab_if_possible()
                 return
             time.sleep(0.8)
     except KeyboardInterrupt:
-        print("\n⏹️ Deteniendo Studio IA...", flush=True)
+        requested_stop = True
+        print("\n⏹️ Deteniendo Studio IA por solicitud del usuario...", flush=True)
     finally:
-        try:
-            if server_proc.poll() is None:
-                server_proc.terminate()
-        except BaseException:
-            pass
-        try:
-            if cf_proc and cf_proc.poll() is None:
-                cf_proc.terminate()
-        except BaseException:
-            pass
-        print("✅ Servidor Studio IA detenido limpiamente.", flush=True)
+        already_exited = server_proc.poll() is not None
+        _stop_process(server_proc)
+        if cf_proc:
+            _stop_process(cf_proc)
+        log_thread.join(timeout=2)
+        exit_info = describe_exit(server_proc.returncode, diagnostics.before, memory_snapshot())
+        unexpected = already_exited and not requested_stop
+        diagnostics.event("server_exited", status="unexpected_exit" if unexpected else "stopped", exit=exit_info)
+        if unexpected:
+            print(f"❌ Studio IA terminó: {exit_info['explanation']}", flush=True)
+            print("El lanzador cierra entonces su túnel; un 530 posterior no confirma por sí solo que se haya perdido la VM.", flush=True)
+            try:
+                bundle = export_diagnostic_bundle(data_dir)
+                print(f"📦 Diagnóstico guardado sin pesos ni tokens: {bundle}", flush=True)
+            except Exception as exc:
+                print(f"⚠️ No se pudo crear el ZIP: {exc}. Los logs están en {diagnostics.folder}", flush=True)
+        else:
+            print("✅ Servidor Studio IA detenido por solicitud del usuario; archivos en disco intactos.", flush=True)
 
 
 if __name__ == "__main__":

@@ -217,6 +217,13 @@ ASYNC_JOB_TOOLS = {
 }
 
 
+class BridgeTransportError(RuntimeError):
+    def __init__(self, message: str, *, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = status_code is None or status_code in (408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 530)
+
+
 class StudioColabBridge:
     def __init__(self, base_url: str, token: str = "", out_dir: Optional[str] = None) -> None:
         cleaned = base_url.strip().rstrip("/")
@@ -262,10 +269,11 @@ class StudioColabBridge:
                 body = he.read().decode("utf-8", errors="replace")
             except Exception:
                 pass
-            raise RuntimeError(f"HTTP {he.code} desde Studio IA ({path}): {body or he.reason}") from he
-        except urllib.error.URLError as ue:
-            raise RuntimeError(
-                f"No se pudo conectar con Google Colab en {self.base_url} ({ue.reason}). "
+            detail = (body or str(he.reason))[:2000].replace(self.token, "[REDACTED]") if self.token else (body or str(he.reason))[:2000]
+            raise BridgeTransportError(f"HTTP {he.code} desde Studio IA ({path}): {detail}", status_code=he.code) from he
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as ue:
+            raise BridgeTransportError(
+                f"No se pudo conectar con Google Colab en {self.base_url} ({getattr(ue, 'reason', type(ue).__name__)}). "
                 "Verifica que la celda de Colab siga en ejecución y la URL de cloudflared sea la actual."
             ) from ue
 
@@ -371,8 +379,18 @@ class StudioColabBridge:
         progress_token: Optional[Any] = None,
     ) -> Dict[str, Any]:
         last_pct = -1.0
+        transport_failures = 0
         while True:
-            job = self._http_json("GET", f"/api/jobs/{urllib.parse.quote(job_id)}", timeout=30.0)
+            try:
+                job = self._http_json("GET", f"/api/jobs/{urllib.parse.quote(job_id)}", timeout=30.0)
+                transport_failures = 0
+            except BridgeTransportError as exc:
+                if not exc.retryable or transport_failures >= 3:
+                    raise
+                # Only retry this read, NEVER replay the generation POST.
+                transport_failures += 1
+                time.sleep(2 ** transport_failures)
+                continue
             status = job.get("status")
             pct = float(job.get("progress") or 0.0)
             step_txt = str(job.get("current_step") or "")
@@ -421,6 +439,8 @@ class StudioColabBridge:
         args = dict(params.get("arguments") or {})
         meta = params.get("_meta") or {}
         progress_token = meta.get("progressToken")
+        pending_job_id: Optional[str] = None
+        submission_started = False
 
         try:
             if tool_name == DOWNLOAD_ASSET_TOOL_DEF["name"]:
@@ -513,6 +533,7 @@ class StudioColabBridge:
                     "arguments": args,
                 },
             }
+            submission_started = tool_name in ASYNC_JOB_TOOLS
             remote_resp = self._http_json("POST", "/mcp", payload=forward_msg, timeout=65.0)
             if "error" in remote_resp:
                 return remote_resp
@@ -536,7 +557,8 @@ class StudioColabBridge:
                 and parsed_data.get("job_id")
                 and parsed_data.get("status") in ("queued", "running")
             ):
-                final_job = self._poll_job_until_done(str(parsed_data["job_id"]), progress_token=progress_token)
+                pending_job_id = str(parsed_data["job_id"])
+                final_job = self._poll_job_until_done(pending_job_id, progress_token=progress_token)
                 if final_job.get("status") != "completed":
                     err_payload = {
                         "ok": False,
@@ -608,6 +630,22 @@ class StudioColabBridge:
                     "Verifica que la ruta local del archivo exista en tu PC y que la sesión de Google Colab siga activa."
                 ),
             }
+            if pending_job_id or (submission_started and isinstance(exc, BridgeTransportError)):
+                err_data.update({
+                    "error_code": "JOB_CONNECTION_LOST" if pending_job_id else "SUBMISSION_OUTCOME_UNKNOWN",
+                    "job_id": pending_job_id,
+                    "status": "unknown_not_failed",
+                    "do_not_resubmit": True,
+                    "retryable": bool(getattr(exc, "retryable", False)),
+                    "exact_fix_action": (
+                        "No repetir la generación ni descargar otra receta. Revisar la celda y diagnóstico de Colab. "
+                        "502/530 solo describen la conexión, no prueban OOM ni pérdida de VM. "
+                        + (f"Al recuperar el enlace, consultar studio_get_job(job_id='{pending_job_id}')." if pending_job_id else
+                           "No se recibió job_id; consultar studio_get_state_and_manual para identificar trabajos antes de decidir un nuevo envío.")
+                    ),
+                })
+                if pending_job_id:
+                    err_data["resume_tool_call"] = {"tool": "studio_get_job", "arguments": {"job_id": pending_job_id}}
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,

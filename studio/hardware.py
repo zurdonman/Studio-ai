@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import psutil
 
 from studio.config import DATA_ROOT, STATE_DIR, is_colab_env
+from studio.diagnostics import redact_secrets
 
 CREDITS_STATE_FILE = STATE_DIR / "credits_state.json"
 SHUTDOWN_FLAG_FILE = STATE_DIR / "shutdown_requested.flag"
@@ -39,6 +40,7 @@ _LEGACY_AUTO_RATES = {4.82, 4.50}
 
 def colab_console_log(message: str, icon: str = "🔹") -> None:
     """Imprime una línea inmediata en Google Colab y la archiva en el registro íntegro de sesión."""
+    message = redact_secrets(message)
     now = datetime.now()
     ts_short = now.strftime("%H:%M:%S")
     ts_full = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -474,4 +476,4 @@ def build_full_session_log_document(
         lines.append(f"--- CONSOLA CRONOLÓGICA COMPLETA DESDE EL ENCENDIDO ({len(console_lines)} líneas) ---")
         lines.extend(console_lines)
 
-    return filename, "\n".join(lines) + "\n"
+    return filename, redact_secrets("\n".join(lines)) + "\n"
