@@ -309,3 +309,61 @@ def test_work_state_exposes_partial_adapter_cleanup(temp_studio_env):
         memory_manager._slots.pop("video", None)
     assert state["video_model"]["adapters_partial_failure"]["failed_lora_id"] == "lora-x"
     assert "no se reintenta a ciegas" in state["retry_policy"]
+
+
+def test_overlong_clip_is_refused_with_a_split_plan(temp_studio_env, colab_memory):
+    """Ask for 30 s in one call: never return a silently shorter video."""
+    import io
+
+    from PIL import Image
+
+    from studio.mcp_server import _execute_mcp_tool
+
+    colab_memory(ram=64, available=52, gpu=True, vram=22, vram_free=21)
+    client, _ = temp_studio_env
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (30, 60, 90)).save(buf, format="PNG")
+    rels = [
+        client.post("/api/assets/upload", files={"file": (name, buf.getvalue(), "image/png")}).json()["asset"]["rel_path"]
+        for name in ("a.png", "b.png")
+    ]
+    result = _execute_mcp_tool(
+        "studio_generate_video",
+        {
+            "video_submode": "flf2v",
+            "mode": "ai",
+            "model_id": "wan21-vace-14b-fp8",
+            "video_lora_id": "lora-wan21-14b-fusionx-phantom",
+            "image_rel": rels[0],
+            "end_image_rel": rels[1],
+            "prompt": "two people walking",
+            "duration_sec": 30,
+        },
+    )
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["ok"] is False and payload["error_code"] == "DURATION_EXCEEDS_SINGLE_CLIP"
+    assert payload["max_seconds_per_clip"] == pytest.approx(10.0, abs=0.1)
+    assert payload["recommended_clips"] >= 2 and payload["recommended_clip_duration_sec"] <= 8
+    assert "studio_render_montage" in payload["exact_fix_action"]
+
+
+def test_park_scene_keeps_the_park_and_drops_duration_meta_instructions():
+    from studio.agent_presets import compile_agent_workflow_preset
+
+    plan = compile_agent_workflow_preset(
+        "coherencia_personajes_entorno_avance",
+        scene_description=(
+            "dos personas andando por un parque hablando de algo polémico y haciendo una parodia, "
+            "el vídeo debe durar 30 segundos"
+        ),
+        gpu_override={"has_gpu": True, "gpu_name": "L4", "vram_total_gb": 24, "vram_free_gb": 22},
+    )
+    summary = plan["planned_duration_summary"]
+    assert summary["num_clips"] == 6 and summary["num_keyframes"] == 7
+    assert summary["estimated_total_seconds"] == pytest.approx(30.0)
+    anchor = plan["execution_plan"][0]["arguments"]["prompt"]
+    video = next(s for s in plan["execution_plan"] if s["tool"] == "studio_generate_video")["arguments"]["prompt"]
+    for text in (anchor, video):
+        assert "parque" in text.lower() or "park" in text.lower()
+        assert "debe durar" not in text and "30 segundos" not in text
+        assert "sidewalk" not in text.lower() and "storefront" not in text.lower()

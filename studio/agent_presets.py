@@ -28,6 +28,9 @@ _META_INSTRUCTION_PATTERNS = [
     r"\b(?:los\s+personajes\s+)?que\s+tengan?\s+(?:todos?\s+)?coherencia\b",
     rf"\b(?:(?:que\s+sea|haz(?:me)?|quiero)\s+)?(?:(?:un|el|a)\s+)?(?:clip|v[ií]deo)\s+(?:de\s+)?{_DURATION_PATTERN}",
     rf"\b(?:duraci[oó]n\s*(?:de\s*)?|duration\s*:?\s*)?{_DURATION_PATTERN}",
+    r"\b(?:el|la|este|esta)\s+(?:v[ií]deo|clip|animaci[oó]n|secuencia|montaje)\s+"
+    r"(?:debe|deber[ií]a|ha\s+de|tiene\s+que|va\s+a)\s+(?:durar|ser|tener|medir)\b",
+    r"\bque\s+(?:dure|dura)\b",
     r"\b(?:en\s+)?total\s+coherencia\b",
     r"\b(?:utiliza(?:ndo|r)?|usa(?:ndo|r)?|use)\s+(?:las\s+)?loras?\s*(?:r[aá]pid[oa]s?|fast)?\b",
     r"\bsincroniza(?:ndo|r)?\s+(?:los\s+)?labios?\b",
@@ -44,6 +47,99 @@ def _sanitize_visual_scene_description(raw: str) -> str:
     cleaned = re.sub(r"\s+([,.;])", r"\1", cleaned)
     cleaned = re.sub(r"([,;])\s*[,;]+", r"\1", cleaned)
     return cleaned.strip(" ,.;:-")
+
+
+_ENV_STREET = {
+    "anchor": (
+        "Clear architectural street depth behind them: a warm café awning and vintage streetlamp right behind "
+        "them on the left, trees and shopfronts receding in perspective"
+    ),
+    "parallax": [
+        "the café awning and streetlamp have now receded noticeably further back in the background distance "
+        "behind them, while a new bookstore window and leafy tree appear along the sidewalk beside them",
+        "the bookstore window is now behind their shoulders in mid-ground perspective and a stone crosswalk "
+        "with warm evening reflections enters the foreground pavement",
+        "previous shopfronts recede into the far background depth as new warm street details pass by on both sides",
+    ],
+    "video_env": (
+        "sidewalk pavement moves beneath them while storefronts, streetlamps and trees glide past smoothly "
+        "in the background with natural 3D depth parallax"
+    ),
+}
+
+_ENV_PROFILES = {
+    "parque": {
+        "anchor": (
+            "Clear park depth behind them: a leafy promenade with tall trees framing the shot, a wooden bench and "
+            "trimmed hedges on the left, a gravel-and-paved path receding in perspective, a park fountain in the "
+            "mid-ground and soft bokeh of distant walkers"
+        ),
+        "parallax": [
+            "the wooden bench and hedges from the opening frame have now receded further back behind them, while a "
+            "new row of plane trees and a lamp post appear along the path beside them",
+            "the park fountain is now behind their shoulders in mid-ground perspective and a shaded pergola with "
+            "climbing plants enters the background depth",
+            "previous trees and benches recede into the far background as new lawn, flowerbeds and a gravel "
+            "crosspath pass by on both sides",
+        ],
+        "video_env": (
+            "the park path surface moves beneath them while trees, hedges, benches and the fountain glide past "
+            "smoothly in the background with natural 3D depth parallax, dappled sunlight shifting through the leaves"
+        ),
+    },
+    "playa": {
+        "anchor": (
+            "Clear coastal depth behind them: a wide sandy shoreline with a wooden boardwalk on the left, moored "
+            "small boats and a lifeguard tower receding along the waterline, breaking waves and a soft horizon"
+        ),
+        "parallax": [
+            "the boardwalk and moored boats from the opening frame have now receded further back along the "
+            "waterline, while a new beach bar terrace and straw parasols appear beside them",
+            "the lifeguard tower is now behind their shoulders in mid-ground perspective and wet sand with warm "
+            "reflections enters the foreground",
+            "previous beach structures recede into the far background as new dunes, sea grass and a line of "
+            "sunshades pass by on both sides",
+        ],
+        "video_env": (
+            "the boardwalk and wet sand move beneath them while waves, boats and parasols glide past smoothly in "
+            "the background with natural 3D depth parallax, warm low sun glinting on the water"
+        ),
+    },
+    "interior": {
+        "anchor": (
+            "Clear interior depth behind them: a long hallway with doors and wall lights receding in perspective, "
+            "a sideboard and framed pictures on the left, warm practical lamps and a window with soft daylight"
+        ),
+        "parallax": [
+            "the sideboard and wall lights from the opening frame have now receded further back down the hallway, "
+            "while an open doorway revealing a second room appears beside them",
+            "the window is now behind their shoulders in mid-ground perspective and a staircase with a wooden "
+            "handrail enters the background depth",
+            "previous doorways and furniture recede into the far background as new lamps and rugs pass by on both sides",
+        ],
+        "video_env": (
+            "the floor moves beneath them while door frames, wall lights and furniture glide past smoothly in the "
+            "background with natural 3D depth parallax, steady interior lighting"
+        ),
+    },
+}
+
+_ENV_KEYWORDS = {
+    "parque": ("parque", "park", "jardín", "jardin", "jardines", "bosque", "forest", "sendero", "pradera",
+               "arboleda", "arbolado", "campo", "naturaleza", "garden"),
+    "playa": ("playa", "beach", "mar", "orilla", "costa", "paseo marítimo", "paseo maritimo", "sea", "shore"),
+    "interior": ("interior", "sala", "salón", "salon", "casa", "oficina", "pasillo", "habitación", "habitacion",
+                 "restaurante", "cafetería interior", "indoor", "aula", "estudio"),
+}
+
+
+def _scene_environment_profile(scene_raw: str) -> Dict[str, Any]:
+    """Describe the user's real setting instead of forcing a city street onto every scene."""
+    text = (scene_raw or "").lower()
+    for key, words in _ENV_KEYWORDS.items():
+        if any(word in text for word in words):
+            return {"id": key, **_ENV_PROFILES[key]}
+    return {"id": "calle", **_ENV_STREET}
 
 
 def _infer_clip_plan_from_text(
@@ -341,23 +437,23 @@ def _compile_agent_workflow_preset(
     # ==================== PRESET 1: CAMINANDO Y HABLANDO CON AVANCE REAL ====================
     if resolved_id == "coherencia_personajes_entorno_avance":
         num_keyframes = n_clips + 1
+        env = _scene_environment_profile(scene_description)
         steps: List[Dict[str, Any]] = []
 
         # Paso 1: Fotograma 1 (Ancla Maestra en Punto A de la calle)
         anchor_prompt = (
             f"Cinematic Steadicam front-tracking medium-wide shot (knee-up framing showing walking legs and full upper bodies) "
             f"of {scene_txt}. {chars_txt} "
-            "POSITION A ON THE STREET: Both characters are actively walking forward toward the camera along a detailed sidewalk "
+            "OPENING POSITION: Both characters are actively walking forward toward the camera along the setting described below "
             "(person on the left has LEFT leg stepping forward and gestures naturally while speaking; person on the right has RIGHT leg stepping forward, smiling and looking slightly toward them). "
-            "Clear architectural street depth behind them: a warm café awning and vintage streetlamp right behind them on the left, trees and shopfronts receding in perspective, "
-            "natural golden-hour cinema lighting, 35mm ARRI Alexa lens, natural skin texture."
+            f"{env['anchor']}, natural golden-hour cinema lighting, 35mm ARRI Alexa lens, natural skin texture."
         )
         steps.append(
             {
                 "step_number": 1,
                 "phase": "keyframe_1_master_anchor",
                 "purpose": (
-                    "Generar el FOTOGRAMA 1 (ANCLA MAESTRA en el Punto A de la calle). "
+                    f"Generar el FOTOGRAMA 1 (ANCLA MAESTRA en el Punto A del entorno pedido: {env['id']}). "
                     "NO llames antes a `studio_prepare_model`: esta llamada auto-descarga y auto-carga `qwen-image-edit-2511-pack` "
                     "+ `Lightning` + los 4 LoRAs del flujo de una sola vez (dejando `next-scene` y `anylight` precargados a escala 0.0 "
                     "para conmutar los Fotogramas 2..N sin volver a cargar los pesos). "
@@ -387,11 +483,7 @@ def _compile_agent_workflow_preset(
         )
 
         # Pasos 2..K: Fotogramas progresivos (Punto B, Punto C...) avanzando 4 metros cada uno
-        parallax_variants = [
-            "the café awning and streetlamp from Position A have now receded noticeably further back in the background distance behind them, while a new bookstore window and leafy tree appear along the sidewalk beside them",
-            "the bookstore window is now behind their shoulders in mid-ground perspective and a stone crosswalk with warm evening reflections enters the foreground pavement",
-            "previous shopfronts recede into the far background depth as new warm street details pass by on both sides",
-        ]
+        parallax_variants = env["parallax"]
 
         for kf_idx in range(2, num_keyframes + 1):
             prev_var = f"FRAME_{kf_idx - 1}_REL"
@@ -413,14 +505,15 @@ def _compile_agent_workflow_preset(
                 f"Camera continues tracking backward ahead of them at the same knee-up framing. "
                 f"TRUE WALKING PROGRESSION (NOT STATIC): {stride_txt}. "
                 f"ENVIRONMENT PERSPECTIVE SHIFT: {parallax_txt}. "
-                "Exact same street architecture, golden-hour lighting direction and cinematic color grade."
+                f"Exact same setting as the anchor, same time of day, lighting direction and cinematic color grade "
+                f"(never swap the location for a different one)."
             )
             steps.append(
                 {
                     "step_number": len(steps) + 1,
                     "phase": f"keyframe_{kf_idx}_spatial_advance",
                     "purpose": (
-                        f"Generar FOTOGRAMA {kf_idx} avanzando ~4 metros reales por la calle respecto a `{prev_var}` "
+                        f"Generar FOTOGRAMA {kf_idx} avanzando ~4 metros reales por el entorno pedido respecto a `{prev_var}` "
                         f"manteniendo bloqueada la identidad del ancla `FRAME_1_REL`. "
                         "PROHIBIDO pedir 'mantén exactamente el mismo fondo sin mover nada': debes exigir zancada alterna "
                         "y que las tiendas/farolas del fondo retrocedan en perspectiva (`Next Scene:` + LoRA `qwen-lora-next-scene`)."
@@ -457,7 +550,7 @@ def _compile_agent_workflow_preset(
                 "purpose": (
                     "OBLIGATORIO antes de renderizar vídeo: audita que (1) sigan siendo exactamente las mismas personas "
                     "con la misma ropa y luz, Y (2) `expect_spatial_progression=true` confirme que REALMENTE avanzaron "
-                    "por la calle (`PASS`) y no quedaron congelados (`TOO_STATIC_NEEDS_ADVANCE`). Si algún fotograma no sale `PASS`, "
+                    "por el entorno (`PASS`) y no quedaron congelados (`TOO_STATIC_NEEDS_ADVANCE`). Si algún fotograma no sale `PASS`, "
                     "ejecuta el `recommended_repair_tool_call` devuelto."
                 ),
                 "tool": "studio_analyze_coherence",
@@ -479,10 +572,11 @@ def _compile_agent_workflow_preset(
             start_var = f"<FRAME_{clip_idx}_REL>"
             end_var = f"<FRAME_{clip_idx + 1}_REL>"
             video_3vector_prompt = (
-                "Smooth backward-moving Steadicam tracking shot leading two friends walking forward together down a lively city sidewalk, "
+                "Smooth backward-moving Steadicam tracking shot leading the two people forward together through the exact setting "
+                "of the reference frames, "
                 "both characters walk forward continuously at a natural steady pace with realistic alternating leg strides, subtle hip and shoulder motion, "
                 "natural blinking, warm eye contact and expressive conversational hand gestures as they talk while walking, "
-                "sidewalk pavement moves beneath them while storefronts, streetlamps and trees glide past smoothly in the background with natural 3D depth parallax, "
+                f"{env['video_env']}, "
                 "consistent facial identity, stable anatomy, cinematic 35mm golden hour lighting."
             )
             steps.append(
@@ -696,11 +790,11 @@ def _compile_agent_workflow_preset(
             },
             "golden_rules_mandatory": [
                 "1. EJECUCIÓN POR LOTES EN VRAM (NO CONMUTES MODELOS IDA Y VUELTA): Genera PRIMERO TODOS los fotogramas (`FRAME_1`..`FRAME_{N+1}`) seguidos mientras Qwen 2511 está en VRAM; audita con `studio_analyze_coherence`; y DESPUÉS genera TODOS los clips de vídeo (`CLIP_1`..`CLIP_N`) seguidos mientras el modelo de vídeo está en VRAM. NO llames a `studio_prepare_model` por separado: `studio_generate_or_edit_image` y `studio_generate_video` auto-cargan el modelo y sus LoRAs automáticamente.",
-                "2. PROHIBIDO EL ENCUADRE CERRADO SIN SUELO/FONDO: En el Fotograma 1 usa plano americano (rodillas arriba) o cuerpo entero con elementos claros de calle (escaparates, árboles, farolas, acera) y un prompt visual limpio (sin instrucciones meta como 'crea los diálogos' o 'clip de un minuto').",
-                "3. PROHIBIDO CONGELAR EL FONDO ENTRE FOTOGRAMAS: En los Fotogramas 2..N usa SIEMPRE `custom_lora_ids=['qwen-lora-next-scene', 'qwen-lora-skin-realism', 'qwen-lora-anylight-env']`, empieza el prompt con `'Next Scene:'`, alterna la pierna adelantada de cada personaje y pide explícitamente que los escaparates/farolas anteriores retrocedan en perspectiva 4 metros más atrás.",
+                "2. PROHIBIDO EL ENCUADRE CERRADO SIN SUELO/FONDO: En el Fotograma 1 usa plano americano (rodillas arriba) o cuerpo entero con elementos claros del entorno REAL que pidió el usuario (si es un parque: árboles, setos, banco, sendero; si es una calle: escaparates, farolas, acera) y un prompt visual limpio (sin instrucciones meta como 'crea los diálogos' ni 'clip de un minuto'). Nunca cambies el escenario por otro distinto.",
+                "3. PROHIBIDO CONGELAR EL FONDO ENTRE FOTOGRAMAS: En los Fotogramas 2..N usa SIEMPRE `custom_lora_ids=['qwen-lora-next-scene', 'qwen-lora-skin-realism', 'qwen-lora-anylight-env']`, empieza el prompt con `'Next Scene:'`, alterna la pierna adelantada de cada personaje y pide explícitamente que los elementos del fondo del entorno real (árboles, banco, fuente, escaparates, farolas...) retrocedan en perspectiva 4 metros más atrás.",
                 "4. CADENA DE REFERENCIAS SIN DERIVA: Para el Fotograma `k` usa `base_image_rel=FRAME_{k-1}` (continuidad espacial progresiva) y `reference_rels=[FRAME_1, FRAME_{k-1}]` (bloquea los rostros y ropa originales del Ancla `FRAME_1`).",
                 "5. AUDITORÍA ANTI-ESTÁTICA OBLIGATORIA: Llama a `studio_analyze_coherence` con `expect_spatial_progression=true` antes de animar vídeo. Si sale `TOO_STATIC_NEEDS_ADVANCE` o `NEEDS_REPAIR`, ejecuta `recommended_repair_tool_call`.",
-                "6. PROMPT DE VÍDEO EN 3 VECTORES (`flf2v`) Y REGLA ANTI-PÁNICO DE DISCO: Incluye SIEMPRE (a) cámara Steadicam retrocediendo, (b) zancada continua + gestos al hablar, y (c) paralaje 3D de acera/tiendas. Si un trabajo falla, NUNCA descargues otros 3 modelos pesados en paralelo llenando el disco.",
+                "6. PROMPT DE VÍDEO EN 3 VECTORES (`flf2v`) Y REGLA ANTI-PÁNICO DE DISCO: Incluye SIEMPRE (a) cámara Steadicam retrocediendo, (b) zancada continua + gestos al hablar, y (c) paralaje 3D del entorno real (acera y tiendas, o sendero y árboles). Si un trabajo falla, NUNCA descargues otros 3 modelos pesados en paralelo llenando el disco.",
             ],
             "execution_plan": steps,
         }

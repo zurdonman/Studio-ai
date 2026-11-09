@@ -89,6 +89,7 @@ from studio.model_discovery import model_discovery, CATEGORIES
 from studio.model_compatibility import assessment_context, assess_definition, assess_model_stack, get_runtime_capabilities
 from studio.mcp_preferences import (
     PREFERENCE_QUESTIONS,
+    get_preference,
     guidance_block,
     pending_questions,
     set_preferences,
@@ -229,6 +230,12 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
    - `video_submode="i2v"` → Imagen a Vídeo (requiere `image_rel` o `local_image_path`).
    - `video_submode="flf2v"` → Frame a Frame Inicio → Fin (requiere OBLIGATORIAMENTE imagen inicial Y final: `image_rel` + `end_image_rel`, o `local_image_path` + `local_end_image_path`).
    - En `flf2v` ESTÁ PROHIBIDO usar modelos de 1 sola imagen (`wan22-ti2v-5b`, `wan22-ti2v-5b-turbo`, `sana-video-2b-480p`, `cogvideox-5b-i2v`) y PROHIBIDO usar LoRAs causales (`lora-wan22-ti2v-5b-turbo`).
+   - **DURACIÓN HONESTA (REGLA DURA):** un solo clip admite ~10 s como máximo real (161 fotogramas @ 16 fps). Si el
+     usuario pide 15, 30 o 60 s, NO llames a `studio_generate_video` con `duration_sec=30` esperando que salga: divide
+     en tramos de `production_preferences.clip_duration_sec` (5 s por defecto → 6 clips para 30 s), un keyframe distinto
+     por tramo, y únelos con `studio_render_montage`. Si aun así pides más de lo que cabe, Studio IA responde
+     `DURATION_EXCEEDS_SINGLE_CLIP` con `max_seconds_per_clip` y `recommended_clips`: es una explicación, no un fallo.
+     Nunca digas que el vídeo dura 30 s si el montaje no lo mide (`probe_media_info` te da la duración real).
    - Recetas oficiales `flf2v` en GPU L4 (22.5 GB):
      a) Máxima textura y anatomía (14B FP8 + LoRA 6 pasos, ~1.6 min):
         `model_id="wan21-vace-14b-fp8"` + `video_lora_id="lora-wan21-14b-fusionx-phantom"`
@@ -241,6 +248,7 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
 
 4. CONSISTENCIA ESTRICTA DE PERSONAJES Y AVANCE ESPACIAL REAL (PROHIBIDO EL MOVIMIENTO ESTÁTICO):
    - NUNCA generes el Fotograma 2, 3, 4... desde cero (`Text-to-Image` sin referencia) cuando deban salir las mismas personas, porque cada llamada suelta inventará caras y ropa distintas.
+   - RESPETA EL ESCENARIO QUE PIDIÓ EL USUARIO: si dice «parque», los prompts hablan de árboles, setos, banco, sendero y fuente; si dice «calle», de escaparates, farolas y acera. No cambies un parque por una calle ni al revés (el plan ya trae el entorno correcto en `execution_plan`; cópialo, no lo reescribas).
    - DISTINGUE SIEMPRE ENTRE **ESCENA FIJA** Y **ESCENA EN AVANCE (ej. dos personas andando por la calle hablando)**:
      A) **SI VAN ANDANDO / AVANZANDO POR LA CALLE (`coherencia_personajes_entorno_avance`):**
         1) **Fotograma 1 (Ancla en Punto A):** Usa `plano americano (knee-up) o cuerpo entero` con elementos claros de profundidad en la calle (escaparates, árboles, farolas, acera) y `custom_lora_ids=["qwen-lora-skin-realism", "qwen-lora-flatlog-cinema", "qwen-lora-next-scene", "qwen-lora-anylight-env"]` con `lora_scales={"qwen-lora-skin-realism":0.8,"qwen-lora-flatlog-cinema":0.65,"qwen-lora-next-scene":0.0,"qwen-lora-anylight-env":0.0}` (los dos últimos quedan precargados, sin activar).
@@ -285,6 +293,7 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
      * `MODEL_LOAD_ERROR` / `RUNTIME_PATCHES_STALE` / `QWEN_VL_4BIT_STATE_LOST` → problema de proceso/entorno, no de la
        escena: informa, pide reiniciar el servidor (los pesos siguen en disco) y NO descargues nada más.
      * `MODEL_RESOURCE_CONSTRAINT` / `MEMORY_BUDGET_EXCEEDED` → lee `memory_guardian`; no borres pesos sin permiso.
+     * `DURATION_EXCEEDS_SINGLE_CLIP` → no es un fallo del motor: reparte la duración en `recommended_clips` tramos y monta.
    - Máximo 2 reintentos del mismo trabajo. Al segundo fallo: `studio_export_session_log(format="md")` y termina con un
      informe breve (qué se generó, qué falló, qué archivo contiene el log).
    - Si el usuario dice que va a cancelar o pide un log, exporta el log YA; no esperes a que se agote el tiempo.
@@ -2281,6 +2290,36 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     "CAUSAL_LORA_FORBIDDEN_IN_FLF2V",
                     f"El LoRA «{lora_defn['name']}» usa atención causal y rompe el fotograma final en `flf2v`.",
                     "Usa un LoRA bidireccional (`lora-wan21-14b-fusionx-phantom`, `lora-wan21-14b-fusionx-i2v`, `lora-wan21-1.3b-bidirect2`) o déjalo vacío ''.",
+                )
+
+        # Duración honesta: un clip que no cabe se rechaza con el plan de tramos,
+        # en lugar de devolver en silencio menos segundos de los pedidos.
+        if mode == "ai":
+            from studio.engines.video_engine import compute_official_video_params
+
+            _spec = m_defn.get("official_spec") or {}
+            _fps_probe = int(args.get("fps") or _spec.get("default_fps") or m_defn.get("default_fps") or 16)
+            _probe = compute_official_video_params(
+                m_defn, 832, 480, max(0.0, min(60.0, float(args.get("duration_sec") or 5.0))), _fps_probe,
+                int(args.get("steps") or 28), 1.0,
+            )
+            if float(_probe["num_frames"]) / float(_probe["fps"]) < float(args.get("duration_sec") or 5.0) - 0.34:
+                _usable = float(_probe["num_frames"]) / float(_probe["fps"])
+                _clip_pref = get_preference("clip_duration_sec") or 5.0
+                _n = max(2, int(round(float(args.get("duration_sec") or 5.0) / _clip_pref)))
+                return _guided_error(
+                    "DURATION_EXCEEDS_SINGLE_CLIP",
+                    f"Pediste {float(args.get('duration_sec')):.0f} s en un solo clip, pero el máximo real de "
+                    f"«{m_defn['name']}» aquí son {_usable:.1f} s a {_probe['fps']} fps ({_probe['num_frames']} fotogramas). "
+                    "No voy a devolver un vídeo más corto sin decírtelo.",
+                    (
+                        f"Divide la petición en tramos: llama {_n} veces a `studio_generate_video` con "
+                        f"`duration_sec`≈{_clip_pref} y un fotograma distinto por tramo (`image_rel`/`end_image_rel`), "
+                        "y únelos con `studio_render_montage`. Si la escena es un paseo o personajes que avanzan, "
+                        "genera antes el plan completo con `studio_get_workflow_preset`."
+                    ),
+                    extra={"max_seconds_per_clip": round(_usable, 2), "requested_sec": float(args.get("duration_sec") or 0),
+                           "recommended_clips": _n, "recommended_clip_duration_sec": _clip_pref},
                 )
 
         # Calcular parámetros oficiales exactos si `use_official_defaults=True`

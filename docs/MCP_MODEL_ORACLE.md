@@ -212,6 +212,13 @@ Antes de reintentar, `studio_get_work_state` devuelve preferencias, último trab
 - `ADAPTER_STACK_INCOMPLETE`: el stack ya se ha retirado limpiamente; repetir el mismo stack una vez.
 - `MODEL_LOAD_ERROR`, `RUNTIME_PATCHES_STALE`, `QWEN_VL_4BIT_STATE_LOST`: entorno/proceso, no la escena. Reiniciar el servidor conservando pesos; el aviso también aparece en la interfaz (`⚙ Compatibilidad`) y en `GET /api/runtime/status`.
 - `MODEL_RESOURCE_CONSTRAINT`, `MEMORY_BUDGET_EXCEEDED`: leer `memory_guardian`; no borrar pesos.
+- `DURATION_EXCEEDS_SINGLE_CLIP`: no es un fallo del motor. Un clip real llega a ~10 s (161 fotogramas @ 16 fps); la respuesta trae `max_seconds_per_clip`, `recommended_clips` y `recommended_clip_duration_sec`, y el agente reparte la duración por tramos y monta con `studio_render_montage`.
+
+### 8.5. Duración honesta y escenario real
+
+Pedir 30 s en una sola llamada no puede devolver 30 s: el motor recorta a 161 fotogramas y el resultado sería más corto sin avisar. Por eso el rechazo es explícito y cuantificado, y el preset ya compila **6 clips de 5 s + 7 keyframes** para 30 s (12 + 13 para 60 s). El montaje final se mide con `probe_media_info`; ninguna cifra de duración se comunica sin medirla.
+
+El escenario también se respeta: el plan detecta el entorno pedido (`parque`, `playa`, `interior`, o `calle` por defecto) y describe árboles/setos/banco/fuente, arena/pasarela/olas o pasillo/muebles/lámparas en lugar de forzar acera y escaparates a toda escena. Los prompts visuales de imagen y vídeo llevan ese entorno; las instrucciones meta («el vídeo debe durar 30 segundos») se eliminan del prompt visual y viven solo en los parámetros del plan.
 
 Máximo dos reintentos del mismo trabajo; al segundo, `studio_export_session_log(format="md")` y un informe breve. Un trabajo `running` con progreso no es un fallo: se espera el mismo `job_id`.
 
