@@ -38,6 +38,10 @@
     },
     unexportedCount: 0,
     lastHardware: null,
+    selectedImageModel: "qwen-image-edit-2511-pack",
+    imgLoraGroupFilter: "all",
+    activeImgLoras: {}, // { [loraId]: scale }
+    activeVidExtraLoras: {}, // { [loraId]: scale }
   };
 
   // ==================== HELPERS ====================
@@ -219,21 +223,23 @@
 
   function updateEngineBars(loadedSlots) {
     const imgSlot = loadedSlots.find((s) => s.slot === "image");
-    const qwenDef = state.catalog.find((m) => m.id === "qwen-image-edit-2511-pack");
+    const curImgMid = ($("select-image-model") && $("select-image-model").value) || "qwen-image-edit-2511-pack";
+    const imgDef = state.catalog.find((m) => m.id === curImgMid);
     const imgDot = $("img-engine-dot");
     const btnQwen = $("btn-prepare-qwen");
-    if (imgSlot) {
+    if (imgSlot && imgSlot.model_id === curImgMid) {
       imgDot.className = "status-dot loaded";
       $("img-engine-state").textContent = `Cargado en RAM/VRAM (${imgSlot.name})`;
-      if (!btnQwen.disabled) btnQwen.textContent = "✅ Qwen + Lightning Listo en VRAM";
-    } else if (qwenDef && qwenDef.downloaded) {
+      if (!btnQwen.disabled) btnQwen.textContent = "✅ Modelo Listo en VRAM";
+    } else if (imgDef && imgDef.downloaded) {
       imgDot.className = "status-dot downloaded";
       $("img-engine-state").textContent = "Descargado en disco · Sin cargar en VRAM";
-      if (!btnQwen.disabled) btnQwen.textContent = "⚡ Cargar Qwen + Lightning en VRAM";
+      if (!btnQwen.disabled) btnQwen.textContent = "⚡ Cargar Modelo en VRAM";
     } else {
       imgDot.className = "status-dot";
-      $("img-engine-state").textContent = "No descargado todavía (~16.6 GB)";
-      if (!btnQwen.disabled) btnQwen.textContent = "⬇⚡ Descargar y Cargar Qwen + Lightning (1 clic)";
+      const estGb = imgDef ? imgDef.estimated_gb : "16.6";
+      $("img-engine-state").textContent = `No descargado todavía (~${estGb} GB)`;
+      if (!btnQwen.disabled) btnQwen.textContent = `⬇⚡ Descargar y Cargar (~${estGb} GB)`;
     }
 
     const vidSlot = loadedSlots.find((s) => s.slot === "video");
@@ -528,6 +534,8 @@
     syncGpuPillsUI();
     renderCatalog();
     populateVideoModelSelect();
+    renderImageLoraRack();
+    populateHiggsfieldLoraSelects();
     populateTtsEngineSelect();
     if (state.lastHardware) {
       updateEngineBars(data.loaded_slots || []);
@@ -821,10 +829,13 @@
     const curSub = state.videoSubmode || "i2v";
     const prev = loraSel.value;
 
+    renderVideoExtraLoraRack(modelId);
+
     const compatLoras = state.catalog.filter(
       (m) =>
         m.category === "lora" &&
         m.lora_target === "video" &&
+        !m.stackable_creative &&
         (!Array.isArray(m.compatible_models) || m.compatible_models.includes(modelId)) &&
         (!Array.isArray(m.incompatible_submodes) || !m.incompatible_submodes.includes(curSub))
     );
@@ -874,6 +885,258 @@
       }
     }
     syncLoraQualityPills();
+  }
+
+  function renderImageLoraRack() {
+    const box = $("img-lora-rack-list");
+    const countBadge = $("img-lora-active-count");
+    if (!box) return;
+
+    const imgModelId = ($("select-image-model") && $("select-image-model").value) || "qwen-image-edit-2511-pack";
+    const allCompatImgLoras = state.catalog.filter(
+      (m) =>
+        m.category === "lora" &&
+        (m.lora_target || "image") === "image" &&
+        m.id !== "qwen-lora-lightning-8steps" &&
+        m.id !== "qwen-lora-nsfw" &&
+        (!Array.isArray(m.compatible_models) || m.compatible_models.includes(imgModelId))
+    );
+
+    // Mantener solo LoRAs activos que sigan siendo compatibles con el modelo seleccionado
+    const compatSet = new Set(allCompatImgLoras.map((x) => x.id));
+    Object.keys(state.activeImgLoras).forEach((k) => {
+      if (!compatSet.has(k)) delete state.activeImgLoras[k];
+    });
+
+    const activeCount = Object.keys(state.activeImgLoras).length;
+    if (countBadge) {
+      countBadge.textContent = `${activeCount} activo${activeCount === 1 ? "" : "s"}`;
+      countBadge.classList.toggle("has-active", activeCount > 0);
+    }
+
+    const grp = state.imgLoraGroupFilter || "all";
+    const visible = allCompatImgLoras.filter((m) => grp === "all" || m.lora_group === grp);
+    if (visible.length === 0) {
+      box.innerHTML = `<div class="muted" style="font-size:0.78rem;padding:4px 2px;">No hay LoRAs en este grupo para el modelo actual. Prueba la pestaña «Todos».</div>`;
+      return;
+    }
+
+    box.innerHTML = visible
+      .map((l) => {
+        const isChecked = Object.prototype.hasOwnProperty.call(state.activeImgLoras, l.id);
+        const curScale = isChecked ? state.activeImgLoras[l.id] : Number(l.default_lora_scale || 0.85);
+        const dlBadge = l.downloaded
+          ? `<span class="lora-dl-tag ok">✓ Disco</span>`
+          : `<button type="button" class="lora-dl-btn" data-dl-lora="${escapeHtml(l.id)}" title="Pre-descargar ahora (también se auto-descarga al generar)">⬇ ${l.estimated_gb} GB</button>`;
+        const trigBtn = l.trigger_phrase
+          ? `<button type="button" class="lora-trig-btn" data-trig="${escapeHtml(l.trigger_phrase)}" data-target="img-prompt" title="Insertar frase de activación oficial en el prompt">+ Prompt</button>`
+          : "";
+        return `
+          <div class="lora-rack-item ${isChecked ? "active" : ""}">
+            <div class="lri-top">
+              <label class="lri-check">
+                <input type="checkbox" data-img-lora-chk="${escapeHtml(l.id)}" data-def-scale="${curScale}" ${isChecked ? "checked" : ""} />
+                <span class="lri-title" title="${escapeHtml(l.description || "")}">${escapeHtml(l.name)}</span>
+              </label>
+              <div class="lri-actions">
+                ${trigBtn}
+                ${dlBadge}
+              </div>
+            </div>
+            ${
+              isChecked
+                ? `<div class="lri-scale-row">
+                    <span>Fuerza: <strong id="lbl-isl-${escapeHtml(l.id)}">${curScale.toFixed(2)}</strong></span>
+                    <input type="range" min="0.10" max="1.40" step="0.05" value="${curScale}" data-img-lora-scale="${escapeHtml(l.id)}" />
+                  </div>`
+                : ""
+            }
+          </div>
+        `;
+      })
+      .join("");
+
+    box.querySelectorAll("[data-img-lora-chk]").forEach((chk) => {
+      chk.addEventListener("change", (ev) => {
+        const lid = ev.target.dataset.imgLoraChk;
+        if (ev.target.checked) {
+          state.activeImgLoras[lid] = Number(ev.target.dataset.defScale || 0.85);
+        } else {
+          delete state.activeImgLoras[lid];
+        }
+        renderImageLoraRack();
+      });
+    });
+
+    box.querySelectorAll("[data-img-lora-scale]").forEach((rng) => {
+      rng.addEventListener("input", (ev) => {
+        const lid = ev.target.dataset.imgLoraScale;
+        const val = Number(ev.target.value || 0.85);
+        state.activeImgLoras[lid] = val;
+        const lbl = $(`lbl-isl-${lid}`);
+        if (lbl) lbl.textContent = val.toFixed(2);
+      });
+    });
+
+    box.querySelectorAll("[data-dl-lora]").forEach((btn) => {
+      btn.addEventListener("click", () => downloadModel(btn.dataset.dlLora));
+    });
+
+    box.querySelectorAll("[data-trig]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const trig = btn.dataset.trig || "";
+        const inp = $(btn.dataset.target || "img-prompt");
+        if (!inp || !trig) return;
+        if (!inp.value.toLowerCase().includes(trig.toLowerCase())) {
+          inp.value = inp.value.trim() ? `${trig} ${inp.value.trim()}` : trig;
+          toast(`Frase activadora insertada: «${trig}»`, "info");
+        }
+      });
+    });
+  }
+
+  function renderVideoExtraLoraRack(modelId) {
+    const wrap = $("vid-extra-lora-box");
+    const box = $("vid-extra-lora-list");
+    const countBadge = $("vid-extra-lora-count");
+    if (!wrap || !box) return;
+
+    const curSub = state.videoSubmode || "i2v";
+    const creativeLoras = state.catalog.filter(
+      (m) =>
+        m.category === "lora" &&
+        m.lora_target === "video" &&
+        Boolean(m.stackable_creative) &&
+        (!Array.isArray(m.compatible_models) || m.compatible_models.includes(modelId)) &&
+        (!Array.isArray(m.incompatible_submodes) || !m.incompatible_submodes.includes(curSub))
+    );
+
+    const compatSet = new Set(creativeLoras.map((x) => x.id));
+    Object.keys(state.activeVidExtraLoras).forEach((k) => {
+      if (!compatSet.has(k)) delete state.activeVidExtraLoras[k];
+    });
+
+    if (creativeLoras.length === 0) {
+      wrap.hidden = true;
+      return;
+    }
+    wrap.hidden = false;
+
+    const activeCount = Object.keys(state.activeVidExtraLoras).length;
+    if (countBadge) {
+      countBadge.textContent = `${activeCount} activo${activeCount === 1 ? "" : "s"}`;
+      countBadge.classList.toggle("has-active", activeCount > 0);
+    }
+
+    box.innerHTML = creativeLoras
+      .map((l) => {
+        const isChecked = Object.prototype.hasOwnProperty.call(state.activeVidExtraLoras, l.id);
+        const curScale = isChecked ? state.activeVidExtraLoras[l.id] : Number(l.default_lora_scale || 0.75);
+        const dlBadge = l.downloaded
+          ? `<span class="lora-dl-tag ok">✓ Disco</span>`
+          : `<button type="button" class="lora-dl-btn" data-dl-vlora="${escapeHtml(l.id)}">⬇ ${l.estimated_gb} GB</button>`;
+        const trigBtn = l.trigger_phrase
+          ? `<button type="button" class="lora-trig-btn" data-vtrig="${escapeHtml(l.trigger_phrase)}">+ Prompt</button>`
+          : "";
+        return `
+          <div class="lora-rack-item ${isChecked ? "active" : ""}">
+            <div class="lri-top">
+              <label class="lri-check">
+                <input type="checkbox" data-vid-elora-chk="${escapeHtml(l.id)}" data-def-scale="${curScale}" ${isChecked ? "checked" : ""} />
+                <span class="lri-title" title="${escapeHtml(l.description || "")}">${escapeHtml(l.name)}</span>
+              </label>
+              <div class="lri-actions">
+                ${trigBtn}
+                ${dlBadge}
+              </div>
+            </div>
+            ${
+              isChecked
+                ? `<div class="lri-scale-row">
+                    <span>Fuerza: <strong id="lbl-vsl-${escapeHtml(l.id)}">${curScale.toFixed(2)}</strong></span>
+                    <input type="range" min="0.10" max="1.30" step="0.05" value="${curScale}" data-vid-elora-scale="${escapeHtml(l.id)}" />
+                  </div>`
+                : ""
+            }
+          </div>
+        `;
+      })
+      .join("");
+
+    box.querySelectorAll("[data-vid-elora-chk]").forEach((chk) => {
+      chk.addEventListener("change", (ev) => {
+        const lid = ev.target.dataset.vidEloraChk;
+        if (ev.target.checked) {
+          state.activeVidExtraLoras[lid] = Number(ev.target.dataset.defScale || 0.75);
+        } else {
+          delete state.activeVidExtraLoras[lid];
+        }
+        renderVideoExtraLoraRack(modelId);
+      });
+    });
+
+    box.querySelectorAll("[data-vid-elora-scale]").forEach((rng) => {
+      rng.addEventListener("input", (ev) => {
+        const lid = ev.target.dataset.vidEloraScale;
+        const val = Number(ev.target.value || 0.75);
+        state.activeVidExtraLoras[lid] = val;
+        const lbl = $(`lbl-vsl-${lid}`);
+        if (lbl) lbl.textContent = val.toFixed(2);
+      });
+    });
+
+    box.querySelectorAll("[data-dl-vlora]").forEach((btn) => {
+      btn.addEventListener("click", () => downloadModel(btn.dataset.dlVlora));
+    });
+
+    box.querySelectorAll("[data-vtrig]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const trig = btn.dataset.vtrig || "";
+        const inp = $("vid-prompt");
+        if (!inp || !trig) return;
+        if (!inp.value.toLowerCase().includes(trig.toLowerCase())) {
+          inp.value = inp.value.trim() ? `${trig}, ${inp.value.trim()}` : trig;
+          toast(`Frase activadora insertada: «${trig}»`, "info");
+        }
+      });
+    });
+  }
+
+  function populateHiggsfieldLoraSelects() {
+    const imgLoras = state.catalog.filter(
+      (m) =>
+        m.category === "lora" &&
+        (m.lora_target || "image") === "image" &&
+        m.id !== "qwen-lora-lightning-8steps" &&
+        m.id !== "qwen-lora-nsfw" &&
+        (!Array.isArray(m.compatible_models) || m.compatible_models.includes("qwen-image-edit-2511-pack"))
+    );
+    const vidLoras = state.catalog.filter(
+      (m) => m.category === "lora" && m.lora_target === "video" && Boolean(m.stackable_creative)
+    );
+
+    const imgOpts = imgLoras
+      .map((l) => `<option value="${escapeHtml(l.id)}">${l.downloaded ? "✓ " : "⬇ "}${escapeHtml(l.name)}</option>`)
+      .join("");
+    const vidOpts = vidLoras
+      .map((l) => `<option value="${escapeHtml(l.id)}">${l.downloaded ? "✓ " : "⬇ "}${escapeHtml(l.name)}</option>`)
+      .join("");
+
+    ["hf-dir-img-lora", "hf-cin-img-lora"].forEach((sid) => {
+      const el = $(sid);
+      if (!el) return;
+      const prev = el.value;
+      el.innerHTML = `<option value="">— Ninguno extra (solo Lightning 4p) —</option>` + imgOpts;
+      if (prev) el.value = prev;
+    });
+
+    ["hf-dir-vid-lora", "hf-mot-vid-lora"].forEach((sid) => {
+      const el = $(sid);
+      if (!el) return;
+      const prev = el.value;
+      el.innerHTML = `<option value="">— Ninguno extra —</option>` + vidOpts;
+      if (prev) el.value = prev;
+    });
   }
 
   function getLoraRecommendedForSubmode(loraObj, submode) {
@@ -1886,9 +2149,12 @@
         maskRel = await exportBinaryMaskIfPainted();
       }
       const refRels = state.refs.filter(Boolean).map((r) => r.rel_path);
+      const chosenImgModel = ($("select-image-model") && $("select-image-model").value) || "qwen-image-edit-2511-pack";
+      const customLoraIds = Object.keys(state.activeImgLoras);
       const payload = {
         prompt: $("img-prompt").value,
         negative_prompt: $("img-neg-prompt").value,
+        model_id: chosenImgModel,
         base_image_rel: state.baseImage ? state.baseImage.rel_path : null,
         reference_rels: refRels,
         mask_image_rel: maskRel,
@@ -1900,6 +2166,8 @@
         use_lightning_lora: $("chk-lightning").checked,
         use_nsfw_lora: $("chk-nsfw-lora").checked,
         nsfw_lora_weight: 1.0,
+        custom_lora_ids: customLoraIds,
+        lora_scales: { ...state.activeImgLoras },
         use_ffmpeg_bt709: $("chk-bt709").checked,
         mask_feather_px: Number($("mask-feather").value || 8),
         cpu_bt709_only: cpuBt709Only,
@@ -2479,8 +2747,44 @@
     });
 
     // Pestaña 1: Imagen
+    if ($("select-image-model")) {
+      $("select-image-model").addEventListener("change", () => {
+        const mid = $("select-image-model").value;
+        state.selectedImageModel = mid;
+        if (mid === "sdxl-turbo-fp16") {
+          $("img-steps").value = 2;
+          $("img-cfg").value = 0.0;
+        } else {
+          $("img-steps").value = $("chk-lightning").checked ? 4 : 20;
+          $("img-cfg").value = 4.0;
+        }
+        renderImageLoraRack();
+        if (state.lastHardware) updateEngineBars(state.lastHardware.loaded_slots || []);
+      });
+    }
+    document.querySelectorAll("#img-lora-group-pills .lora-grp-chip").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        document.querySelectorAll("#img-lora-group-pills .lora-grp-chip").forEach((c) => c.classList.remove("active"));
+        chip.classList.add("active");
+        state.imgLoraGroupFilter = chip.dataset.lgrp || "all";
+        renderImageLoraRack();
+      });
+    });
+    if ($("btn-clear-img-loras")) {
+      $("btn-clear-img-loras").addEventListener("click", () => {
+        state.activeImgLoras = {};
+        renderImageLoraRack();
+      });
+    }
+    if ($("btn-clear-vid-extra-loras")) {
+      $("btn-clear-vid-extra-loras").addEventListener("click", () => {
+        state.activeVidExtraLoras = {};
+        const mid = ($("select-video-model") && $("select-video-model").value) || "";
+        if (mid) renderVideoExtraLoraRack(mid);
+      });
+    }
     $("btn-prepare-qwen").addEventListener("click", () =>
-      loadModelIntoMemory("qwen-image-edit-2511-pack", true)
+      loadModelIntoMemory(($("select-image-model") && $("select-image-model").value) || "qwen-image-edit-2511-pack", true)
     );
     $("btn-unload-image").addEventListener("click", () => unloadFromMemory("image"));
     $("btn-quick-dl-nsfw").addEventListener("click", () => downloadModel("qwen-lora-nsfw"));
@@ -2898,6 +3202,7 @@
 
         const chosenVidLora = $("vid-lora-select") ? $("vid-lora-select").value || null : null;
         const chosenVidLoraScale = $("vid-lora-scale") ? Number($("vid-lora-scale").value || 1.0) : 1.0;
+        const extraVidLoraIds = effectiveMode === "ai" ? Object.keys(state.activeVidExtraLoras) : [];
 
         const res = await api("/api/video/generate", {
           method: "POST",
@@ -2907,6 +3212,8 @@
             model_id: chosenVidModel || null,
             video_lora_id: effectiveMode === "ai" ? chosenVidLora : null,
             video_lora_scale: chosenVidLoraScale,
+            extra_video_lora_ids: extraVidLoraIds,
+            extra_video_lora_scales: { ...state.activeVidExtraLoras },
             prompt: $("vid-prompt").value,
             negative_prompt: $("vid-neg-prompt") ? $("vid-neg-prompt").value : "",
             image_rel: effectiveSubmode === "t2v" ? null : startRel,
@@ -3498,6 +3805,8 @@
               dialogue_lines: dlines,
               ambience_preset: $("hf-dir-ambience").value,
               apply_lipsync: $("hf-dir-lipsync").checked,
+              image_lora_ids: $("hf-dir-img-lora") && $("hf-dir-img-lora").value ? [$("hf-dir-img-lora").value] : [],
+              video_lora_ids: $("hf-dir-vid-lora") && $("hf-dir-vid-lora").value ? [$("hf-dir-vid-lora").value] : [],
             }),
           });
           watchJob(r.job);
@@ -3523,6 +3832,7 @@
               lighting_id: $("hf-cin-lighting").value,
               aspect_ratio: $("hf-cin-aspect").value,
               character_ids: cid ? [cid] : [],
+              image_lora_ids: $("hf-cin-img-lora") && $("hf-cin-img-lora").value ? [$("hf-cin-img-lora").value] : [],
               seed: Number($("hf-cin-seed").value || 0),
             }),
           });
@@ -3547,6 +3857,7 @@
               engine_mode: $("hf-mot-engine").value,
               aspect_ratio: $("hf-mot-aspect").value,
               duration_seconds: Number($("hf-mot-dur").value || 4.5),
+              video_lora_ids: $("hf-mot-vid-lora") && $("hf-mot-vid-lora").value ? [$("hf-mot-vid-lora").value] : [],
             }),
           });
           watchJob(r.job);

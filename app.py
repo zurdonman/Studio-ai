@@ -152,6 +152,7 @@ class MaskUploadReq(BaseModel):
 class ImageGenReq(BaseModel):
     prompt: str = ""
     negative_prompt: str = ""
+    model_id: Optional[str] = None
     base_image_rel: Optional[str] = None
     reference_rels: List[str] = Field(default_factory=list)
     mask_image_rel: Optional[str] = None
@@ -164,6 +165,7 @@ class ImageGenReq(BaseModel):
     use_nsfw_lora: bool = False
     nsfw_lora_weight: float = 1.0
     custom_lora_ids: List[str] = Field(default_factory=list)
+    lora_scales: Dict[str, float] = Field(default_factory=dict)
     use_ffmpeg_bt709: bool = True
     mask_feather_px: int = 8
     cpu_bt709_only: bool = False
@@ -175,6 +177,8 @@ class VideoGenReq(BaseModel):
     model_id: Optional[str] = None
     video_lora_id: Optional[str] = None
     video_lora_scale: float = 1.0
+    extra_video_lora_ids: List[str] = Field(default_factory=list)
+    extra_video_lora_scales: Dict[str, float] = Field(default_factory=dict)
     prompt: str = ""
     negative_prompt: str = ""
     image_rel: Optional[str] = None
@@ -759,6 +763,7 @@ def api_generate_image(req: ImageGenReq) -> Dict[str, Any]:
         title=f"Imagen Qwen: {req.prompt.strip()[:42]}",
         fn=lambda j: generate_or_edit_image(
             prompt=req.prompt,
+            model_id=req.model_id,
             base_image_path=base_p,
             reference_paths=refs_p,
             mask_image_path=mask_p,
@@ -772,6 +777,7 @@ def api_generate_image(req: ImageGenReq) -> Dict[str, Any]:
             use_nsfw_lora=req.use_nsfw_lora,
             nsfw_lora_weight=req.nsfw_lora_weight,
             custom_lora_ids=req.custom_lora_ids,
+            lora_scales=req.lora_scales,
             use_ffmpeg_bt709=req.use_ffmpeg_bt709,
             mask_feather_px=req.mask_feather_px,
             job=j,
@@ -837,6 +843,8 @@ def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
             model_id=req.model_id,
             video_lora_id=req.video_lora_id,
             video_lora_scale=req.video_lora_scale,
+            extra_video_lora_ids=req.extra_video_lora_ids,
+            extra_video_lora_scales=req.extra_video_lora_scales,
             prompt=req.prompt,
             negative_prompt=req.negative_prompt,
             image_path=img_p,
@@ -1179,6 +1187,7 @@ class CinemaShotReq(BaseModel):
     lighting_id: str = "natural_cinema"
     aspect_ratio: str = "16:9"
     character_ids: List[str] = Field(default_factory=list)
+    image_lora_ids: List[str] = Field(default_factory=list)
     base_image_rel: Optional[str] = None
     seed: int = 0
 
@@ -1189,6 +1198,7 @@ class HiggsfieldMotionReq(BaseModel):
     prompt: str = ""
     motion_id: str = "dolly_in_dramatic"
     engine_mode: str = "auto"  # "auto" | "ai_14b" | "ai_fast" | "ffmpeg_instant"
+    video_lora_ids: List[str] = Field(default_factory=list)
     aspect_ratio: str = "16:9"
     duration_seconds: float = 4.5
     audio_rel: Optional[str] = None
@@ -1227,7 +1237,28 @@ class HiggsfieldSceneDirectorReq(BaseModel):
     dialogue_lines: List[SceneDialogueLineReq] = Field(default_factory=list)
     ambience_preset: str = "none"
     apply_lipsync: bool = True
+    image_lora_ids: List[str] = Field(default_factory=list)
+    video_lora_ids: List[str] = Field(default_factory=list)
     seed: int = 42
+
+
+@app.get("/api/loras")
+def api_list_loras(model_id: Optional[str] = None) -> Dict[str, Any]:
+    loaded_ids = memory_manager.loaded_model_ids()
+    all_defs = catalog_manager.list_catalog(loaded_ids=loaded_ids)
+    loras = [d for d in all_defs if d.get("category") == "lora"]
+    if model_id:
+        filtered = []
+        for d in loras:
+            compat = d.get("compatible_models") or []
+            if not compat or model_id in compat:
+                filtered.append(d)
+        loras = filtered
+    return {
+        "ok": True,
+        "image_loras": [d for d in loras if d.get("lora_target", "image") == "image"],
+        "video_loras": [d for d in loras if d.get("lora_target") == "video"],
+    }
 
 
 @app.get("/api/higgsfield/catalog")
@@ -1306,6 +1337,7 @@ def api_higgsfield_cinema_shot(req: CinemaShotReq) -> Dict[str, Any]:
             guidance_scale=1.0,
             seed=req.seed,
             use_lightning_lora=True,
+            custom_lora_ids=req.image_lora_ids,
             job=j,
         ),
     )
@@ -1351,6 +1383,7 @@ def api_higgsfield_motion_clip(req: HiggsfieldMotionReq) -> Dict[str, Any]:
                 video_submode=submode,
                 model_id=mid,
                 video_lora_id=lid or None,
+                extra_video_lora_ids=req.video_lora_ids,
                 prompt=full_prompt,
                 image_path=img_p,
                 end_image_path=end_p,
@@ -1473,6 +1506,8 @@ def api_higgsfield_scene_director(req: HiggsfieldSceneDirectorReq) -> Dict[str, 
             dialogue_lines=d_lines,
             ambience_preset=req.ambience_preset,
             apply_lipsync=req.apply_lipsync,
+            image_lora_ids=req.image_lora_ids,
+            video_lora_ids=req.video_lora_ids,
             seed=req.seed,
         ),
     )

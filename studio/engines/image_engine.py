@@ -59,27 +59,48 @@ def _instantiate_image_pipeline(engine: str, base_dir: Path) -> Any:
     return diffusers.DiffusionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
 
 
+def _is_image_lora_compatible(ldef: Dict[str, Any], model_id: str, engine: Optional[str] = None) -> bool:
+    if ldef.get("category") != "lora" or ldef.get("lora_target", "image") != "image":
+        return False
+    compat = ldef.get("compatible_models")
+    if compat:
+        return model_id in compat
+    if engine is None:
+        mdef = catalog_manager.get_definition(model_id) or {}
+        engine = str(mdef.get("engine") or "")
+    parent = str(ldef.get("parent_model") or "")
+    l_eng = str(ldef.get("engine") or "")
+    if engine == "sdxl_turbo":
+        return "sdxl" in parent or "sdxl" in l_eng
+    if engine in ("qwen_image_edit", "qwen_image_t2i"):
+        return "sdxl" not in l_eng and ("qwen" in parent or "qwen" in l_eng or not parent)
+    return True
+
+
 def load_image_model_into_memory(
     model_id: str = "qwen-image-edit-2511-pack",
     extra_lora_ids: Optional[List[str]] = None,
     auto_download: bool = False,
     job: Optional[JobRecord] = None,
 ) -> Dict[str, Any]:
-    """Carga un modelo de imagen del catálogo (+ LoRAs opcionales) con progreso continuo 0-100%."""
+    """Carga un modelo de imagen del catálogo (+ LoRAs opcionales compatibles) con progreso continuo 0-100%."""
     defn = catalog_manager.get_definition(model_id)
     if not defn:
         raise ValueError(f"Modelo de imagen no encontrado: {model_id}")
+    target_engine = defn.get("engine", "qwen_image_edit")
 
-    # Comprobar qué LoRAs de imagen están hoy descargados en disco
+    # Comprobar qué LoRAs de imagen compatibles con este modelo están hoy descargados en disco
     downloaded_loras = {
         item["id"]
         for item in catalog_manager.get_all_definitions()
-        if item["category"] == "lora"
-        and item.get("lora_target", "image") == "image"
+        if _is_image_lora_compatible(item, model_id, target_engine)
         and catalog_manager.is_downloaded(item["id"])
     }
     if extra_lora_ids:
-        downloaded_loras.update(lid for lid in extra_lora_ids if catalog_manager.is_downloaded(lid))
+        for lid in extra_lora_ids:
+            ld = catalog_manager.get_definition(lid)
+            if ld and _is_image_lora_compatible(ld, model_id, target_engine) and catalog_manager.is_downloaded(lid):
+                downloaded_loras.add(lid)
 
     cur_img = memory_manager.get_slot("image")
     if cur_img and cur_img.get("model_id") == model_id:
@@ -223,11 +244,13 @@ def load_image_model_into_memory(
             )
             loaded_adapters["lightning"] = model_id
 
-        # Cargar LoRAs adicionales compatibles con Qwen
-        if engine in ("qwen_image_edit", "qwen_image_t2i"):
+        # Cargar LoRAs adicionales compatibles con la arquitectura de imagen activa (Qwen Edit, Qwen T2I o SDXL Turbo)
+        if engine in ("qwen_image_edit", "qwen_image_t2i", "sdxl_turbo"):
             for lid in sorted(downloaded_loras):
                 ldef = catalog_manager.get_definition(lid)
                 if not ldef or not catalog_manager.is_downloaded(lid):
+                    continue
+                if not _is_image_lora_compatible(ldef, model_id, engine):
                     continue
                 art = ldef["artifacts"][0]
                 l_sub = catalog_manager.model_dir(lid) / art["subdir"]
@@ -236,7 +259,7 @@ def load_image_model_into_memory(
                 try:
                     if job:
                         job.log(
-                            f"Cargando LoRA opcional «{ldef['name']}»...",
+                            f"Cargando LoRA compatible «{ldef['name']}»...",
                             progress=_map_load_pct(0.93),
                             step=f"Cargando {adapter_name}...",
                         )
@@ -281,6 +304,7 @@ def load_image_model_into_memory(
 
 def generate_or_edit_image(
     prompt: str,
+    model_id: Optional[str] = None,
     base_image_path: Optional[Path] = None,
     reference_paths: Optional[List[Path]] = None,
     mask_image_path: Optional[Path] = None,
@@ -294,16 +318,22 @@ def generate_or_edit_image(
     use_nsfw_lora: bool = False,
     nsfw_lora_weight: float = 1.0,
     custom_lora_ids: Optional[List[str]] = None,
+    lora_scales: Optional[Dict[str, float]] = None,
+    auto_download_loras: bool = True,
     use_ffmpeg_bt709: bool = True,
     mask_feather_px: int = 8,
     job: Optional[JobRecord] = None,
 ) -> Dict[str, Any]:
-    """Ejecuta edición simple, edición multi-referencia, inpainting por máscara o creación base."""
+    """Ejecuta edición simple, edición multi-referencia, inpainting por máscara o creación base con apilado Multi-LoRA."""
     prompt = (prompt or "").strip()
     if not prompt:
         raise ValueError("Escribe un prompt describiendo qué quieres generar o editar.")
 
     slot = memory_manager.get_slot("image")
+    if model_id and (not slot or slot.get("model_id") != model_id):
+        if catalog_manager.is_downloaded(model_id):
+            load_image_model_into_memory(model_id=model_id, extra_lora_ids=custom_lora_ids, auto_download=False, job=job)
+            slot = memory_manager.get_slot("image")
     if not slot:
         raise RuntimeError(
             "No hay ningún modelo de imagen cargado en RAM/VRAM. "
@@ -314,7 +344,9 @@ def generate_or_edit_image(
 
     pipe = slot["handle"]["pipe"]
     engine = slot["handle"].get("engine", "qwen_image_edit")
+    loaded_model_id = str(slot.get("model_id") or "qwen-image-edit-2511-pack")
     available_adapters: Dict[str, str] = slot["handle"].get("adapters", {})
+    scales_map: Dict[str, float] = {str(k): float(v) for k, v in (lora_scales or {}).items()}
 
     t0 = time.time()
     flush_ram_and_vram()
@@ -324,9 +356,11 @@ def generate_or_edit_image(
     steps = max(1, min(50, int(steps)))
     actual_seed = int(seed) if int(seed) > 0 else random.randint(1, 2_147_483_647)
 
-    # Configurar adaptadores LoRA solicitados para esta ejecución
+    # Configurar adaptadores LoRA solicitados (y cargar en caliente si se acaban de descargar)
     active_names: List[str] = []
     active_weights: List[float] = []
+    injected_triggers: List[str] = []
+
     if use_lightning_lora and "lightning" in available_adapters:
         active_names.append("lightning")
         active_weights.append(1.0)
@@ -338,11 +372,64 @@ def generate_or_edit_image(
             job.log("Aviso: LoRA NSFW marcado pero no está descargado/cargado; continuando sin él.", level="warning")
 
     for cid in custom_lora_ids or []:
+        cid = str(cid or "").strip()
+        if not cid:
+            continue
         cdef = catalog_manager.get_definition(cid)
-        aname = (cdef.get("adapter_name") if cdef else None) or cid
+        if not cdef:
+            continue
+        if not _is_image_lora_compatible(cdef, loaded_model_id, engine):
+            if job:
+                job.log(
+                    f"Aviso: el LoRA «{cdef['name']}» no es compatible con «{loaded_model_id}»; se omite.",
+                    level="warning",
+                )
+            continue
+        if not catalog_manager.is_downloaded(cid):
+            if auto_download_loras and job is not None:
+                job.log(
+                    f"Descargando LoRA creativo «{cdef['name']}» ({cdef.get('estimated_gb', 0.3)} GB)...",
+                    progress=6.0,
+                    step=f"Descargando {cdef['name'][:32]}...",
+                )
+                catalog_manager.download_model(cid, job, progress_range=(5.0, 9.0))
+            else:
+                if job:
+                    job.log(f"Aviso: LoRA «{cid}» no descargado aún; descárgalo primero.", level="warning")
+                continue
+
+        aname = cdef.get("adapter_name") or cid
+        if aname not in available_adapters:
+            try:
+                art = cdef["artifacts"][0]
+                l_sub = catalog_manager.model_dir(cid) / art["subdir"]
+                l_fn = art.get("filename")
+                if hasattr(pipe, "remove_all_hooks"):
+                    try:
+                        pipe.remove_all_hooks()
+                    except Exception:
+                        pass
+                _safe_load_lora(pipe, l_sub, l_fn, aname)
+                if hasattr(pipe, "enable_model_cpu_offload"):
+                    pipe.enable_model_cpu_offload()
+                available_adapters[aname] = cid
+                if cid not in slot.get("adapters", []):
+                    slot.setdefault("adapters", []).append(cid)
+            except Exception as exc:
+                if job:
+                    job.log(f"Aviso al acoplar LoRA {cid} en caliente: {exc}", level="warning")
+                continue
+
         if aname in available_adapters and aname not in active_names:
+            w_val = float(scales_map.get(cid, cdef.get("default_lora_scale", 0.85)))
             active_names.append(aname)
-            active_weights.append(1.0)
+            active_weights.append(max(0.05, min(2.0, w_val)))
+            trig = str(cdef.get("trigger_phrase") or "").strip()
+            if trig and trig.lower() not in prompt.lower():
+                injected_triggers.append(trig)
+
+    if injected_triggers:
+        prompt = f"{', '.join(injected_triggers)}, {prompt}"
 
     if hasattr(pipe, "set_adapters") and available_adapters:
         if active_names:

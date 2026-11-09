@@ -732,7 +732,11 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                     "custom_lora_ids": {
                         "type": "array",
                         "items": {"type": "string", "enum": image_lora_ids if image_lora_ids else [""]},
-                        "description": "LoRAs de imagen opcionales del catálogo.",
+                        "description": "Lista de LoRAs apilables de imagen (coherencia de personaje/ángulos, relight de entorno, piel realista, flatlog cine, anime, etc.).",
+                    },
+                    "lora_scales": {
+                        "type": "object",
+                        "description": "Opcional: pesos por LoRA (ej. `{'qwen-lora-skin-realism': 0.85, 'qwen-lora-anylight-env': 0.8}`).",
                     },
                     "seed": {"type": "integer", "default": 0, "description": "0 = semilla aleatoria."},
                     "wait": {"type": "boolean", "default": True},
@@ -775,9 +779,22 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                         "enum": video_lora_ids,
                         "default": "",
                         "description": (
-                            "LoRA acelerador opcional (cadena vacía '' = sin LoRA). En `flf2v` usa solo LoRAs bidireccionales "
+                            "LoRA principal / acelerador opcional (cadena vacía '' = sin LoRA). En `flf2v` usa solo LoRAs bidireccionales "
                             "como `lora-wan21-14b-fusionx-phantom` (VACE 14B), `lora-wan21-14b-fusionx-i2v` (FLF2V 14B) o `lora-wan21-1.3b-bidirect2` (1.3B)."
                         ),
+                    },
+                    "extra_video_lora_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Opcional: LoRAs creativos apilables de coherencia de personaje, iluminación/entorno, detalle o cámara "
+                            "(ej. `['lora-wan21-14b-unianimate-char', 'lora-wan21-14b-moviigen-cinema', 'lora-wan21-14b-detailz']`, "
+                            "`['lora-ltx13b-detailer-ic']`, `['lora-ltx2-cam-dolly-in', 'lora-ltx2-detailer-ic']`)."
+                        ),
+                    },
+                    "extra_video_lora_scales": {
+                        "type": "object",
+                        "description": "Opcional: escala de cada LoRA extra por su ID (ej. `{'lora-wan21-14b-detailz': 0.55}`).",
                     },
                     "prompt": {
                         "type": "string",
@@ -1251,6 +1268,16 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                         "default": "none",
                     },
                     "apply_lipsync": {"type": "boolean", "default": True},
+                    "image_lora_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Opcional: LoRAs de imagen de coherencia/calidad/iluminación para el plano Cinema Studio.",
+                    },
+                    "video_lora_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Opcional: LoRAs de vídeo creativos apilables para la animación Higgsfield.",
+                    },
                     "seed": {"type": "integer", "default": 42},
                     "wait": {"type": "boolean", "default": True},
                 },
@@ -1834,6 +1861,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         cfg = 4.0 if use_defaults else float(args.get("guidance_scale") or 4.0)
         seed = int(args.get("seed") or 0)
         custom_loras = list(args.get("custom_lora_ids") or [])
+        raw_lora_scales = args.get("lora_scales") if isinstance(args.get("lora_scales"), dict) else {}
+        lora_scales_map = {str(k): float(v) for k, v in raw_lora_scales.items()}
         wait_flag = bool(args.get("wait", True))
 
         req_img_model = str(args.get("model_id") or "qwen-image-edit-2511-pack").strip()
@@ -1847,16 +1876,9 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             req_img_model = "qwen-image-edit-2511-pack"
 
         def _run_mcp_image(j: Any) -> Dict[str, Any]:
-            cur_slot = memory_manager.get_slot("image")
-            if not cur_slot or cur_slot.get("model_id") != req_img_model:
-                load_image_model_into_memory(
-                    model_id=req_img_model,
-                    extra_lora_ids=custom_loras,
-                    auto_download=True,
-                    job=j,
-                )
             return generate_or_edit_image(
                 prompt=prompt,
+                model_id=req_img_model,
                 base_image_path=base_p,
                 reference_paths=refs_p,
                 mask_image_path=mask_p,
@@ -1867,6 +1889,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 seed=seed,
                 use_lightning_lora=use_l_lora,
                 custom_lora_ids=custom_loras,
+                lora_scales=lora_scales_map,
+                auto_download_loras=True,
                 use_ffmpeg_bt709=True,
                 job=j,
             )
@@ -2022,7 +2046,11 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if use_defaults:
             fps = int(spec.get("default_fps") or m_defn.get("default_fps") or 16)
             duration_sec = float(args.get("duration_sec") or spec.get("default_duration_sec") or 5.0)
-            if lora_defn:
+            lora_has_distill_steps = bool(
+                lora_defn
+                and (lora_defn.get("recommended_steps") is not None or lora_defn.get("flf2v_recommended_steps") is not None)
+            )
+            if lora_defn and lora_has_distill_steps:
                 steps = int(
                     (lora_defn.get("flf2v_recommended_steps") if sub == "flf2v" else None)
                     or lora_defn.get("recommended_steps")
@@ -2041,7 +2069,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 steps = int(spec.get("default_steps") or m_defn.get("default_steps") or 30)
                 cfg = float(spec.get("default_cfg") or m_defn.get("default_cfg") or 5.0)
-                lora_scale = 1.0
+                lora_scale = float(lora_defn.get("default_lora_scale", 1.0)) if lora_defn else 1.0
         else:
             fps = int(args.get("fps") or spec.get("default_fps") or 16)
             duration_sec = float(args.get("duration_sec") or 5.0)
@@ -2056,6 +2084,9 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         seed = int(args.get("seed") or 0)
         motion_style = str(args.get("motion_style") or "zoom_in")
         neg_prompt = str(args.get("negative_prompt") or "")
+        extra_v_loras = [str(x).strip() for x in (args.get("extra_video_lora_ids") or []) if str(x).strip()]
+        raw_ev_scales = args.get("extra_video_lora_scales") if isinstance(args.get("extra_video_lora_scales"), dict) else {}
+        extra_v_scales = {str(k): float(v) for k, v in raw_ev_scales.items()}
 
         job = job_manager.submit(
             kind="video",
@@ -2066,6 +2097,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 model_id=model_id,
                 video_lora_id=lora_id,
                 video_lora_scale=lora_scale,
+                extra_video_lora_ids=extra_v_loras,
+                extra_video_lora_scales=extra_v_scales,
                 prompt=prompt,
                 negative_prompt=neg_prompt,
                 image_path=img_p,
@@ -2608,6 +2641,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     guidance_scale=1.0,
                     seed=sd,
                     use_lightning_lora=True,
+                    custom_lora_ids=list(args.get("image_lora_ids") or []),
                     job=j,
                 ),
             )
@@ -2640,6 +2674,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                         video_submode="i2v",
                         model_id=mid,
                         video_lora_id=lid or None,
+                        extra_video_lora_ids=list(args.get("video_lora_ids") or []),
                         prompt=f"{args.get('prompt', '')}, {m_spec['video_prompt']}".strip(", "),
                         image_path=img_p,
                         width=vw,
@@ -2697,6 +2732,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 dialogue_lines=list(args.get("dialogue_lines") or []),
                 ambience_preset=str(args.get("ambience_preset") or "none"),
                 apply_lipsync=bool(args.get("apply_lipsync", True)),
+                image_lora_ids=list(args.get("image_lora_ids") or []),
+                video_lora_ids=list(args.get("video_lora_ids") or []),
                 seed=int(args.get("seed") if args.get("seed") is not None else 42),
             ),
         )

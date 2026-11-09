@@ -2226,6 +2226,128 @@ def test_higgsfield_mode_local_cinema_motion_cast_clipper_and_mcp(temp_studio_en
     assert r_del["ok"] is True
 
 
+def test_lora_catalog_multi_model_compatibility_and_stacking(temp_studio_env) -> None:
+    """Verifica los 35 LoRAs de HF (personaje, entorno, calidad, edición, cámara, estilo y velocidad) y el apilamiento Multi-LoRA."""
+    from studio.catalog import catalog_manager
+    from studio.engines.image_engine import _is_image_lora_compatible
+    from studio.engines.video_engine import _sync_video_lora_on_handle
+
+    client, _ = temp_studio_env
+    all_defs = catalog_manager.get_all_definitions()
+    loras = [d for d in all_defs if d.get("category") == "lora"]
+    assert len(loras) >= 35
+
+    valid_groups = {"character", "environment", "quality", "camera", "style", "speed"}
+    adapter_names = set()
+    for l_defn in loras:
+        assert l_defn.get("lora_target") in ("image", "video"), l_defn["id"]
+        assert l_defn.get("lora_group") in valid_groups, l_defn["id"]
+        compat = l_defn.get("compatible_models") or []
+        assert len(compat) >= 1, f"{l_defn['id']} sin compatible_models"
+        for mid in compat:
+            assert catalog_manager.get_definition(mid) is not None, f"Modelo desconocido {mid} en {l_defn['id']}"
+        arts = l_defn.get("artifacts") or []
+        assert len(arts) >= 1 and arts[0].get("repo_id") and (arts[0].get("filename") or arts[0].get("verify_file")), l_defn["id"]
+        if not l_defn.get("is_custom"):
+            assert arts[0].get("filename"), f"LoRA integrado sin filename exacto: {l_defn['id']}"
+        adp = l_defn.get("adapter_name") or l_defn["id"]
+        assert adp not in adapter_names, f"adapter_name duplicado: {adp}"
+        adapter_names.add(adp)
+
+    # Cobertura en los 3 modelos de imagen y todas las familias de vídeo principales
+    for img_mid in ("qwen-image-edit-2511-pack", "qwen-image-2512-pack", "sdxl-turbo-fp16"):
+        compat_img = [
+            d for d in loras if d.get("lora_target") == "image" and _is_image_lora_compatible(d, img_mid)
+        ]
+        assert len(compat_img) >= 2, f"Faltan LoRAs compatibles para {img_mid}"
+
+    for vid_mid in (
+        "wan21-vace-14b-fp8",
+        "wan21-flf2v-14b-fp8",
+        "wan21-fun-inp-14b-fp8",
+        "wan21-vace-1.3b",
+        "skyreels-v2-i2v-1.3b",
+        "wan22-ti2v-5b",
+        "wan22-i2v-a14b",
+        "ltx-video-13b-distilled",
+        "ltx-2-19b-av",
+    ):
+        compat_vid = [
+            d for d in loras if d.get("lora_target") == "video" and vid_mid in (d.get("compatible_models") or [])
+        ]
+        assert len(compat_vid) >= 1, f"Faltan LoRAs compatibles para {vid_mid}"
+
+    # Endpoint REST /api/loras filtrado por modelo y HTML del Rack Multi-LoRA
+    r_all = client.get("/api/loras").json()
+    assert r_all["ok"] is True
+    assert len(r_all["image_loras"]) >= 16
+    assert len(r_all["video_loras"]) >= 19
+
+    r_sdxl = client.get("/api/loras?model_id=sdxl-turbo-fp16").json()
+    sdxl_ids = {x["id"] for x in r_sdxl["image_loras"]}
+    assert "sdxl-lora-high-detail" in sdxl_ids
+    assert "qwen-lora-skin-realism" not in sdxl_ids
+
+    html = client.get("/").text
+    assert 'id="img-lora-rack-box"' in html
+    assert 'id="vid-extra-lora-box"' in html
+    assert 'id="select-image-model"' in html
+
+    # Prueba unitaria del apilamiento Multi-LoRA de vídeo en caliente sobre un pipeline simulado
+    for test_lid in ("lora-wan21-14b-fusionx-phantom", "lora-wan21-14b-unianimate-char", "lora-wan21-14b-detailz"):
+        ldef_t = catalog_manager.get_definition(test_lid)
+        art_t = ldef_t["artifacts"][0]
+        fake_lora_p = catalog_manager.model_dir(test_lid) / art_t["subdir"] / art_t["filename"]
+        fake_lora_p.parent.mkdir(parents=True, exist_ok=True)
+        fake_lora_p.write_bytes(b"fake_safetensors_weights")
+        catalog_manager.marker_file(test_lid).write_text("{}", encoding="utf-8")
+
+    class DummyPipe:
+        def __init__(self):
+            self.loaded = []
+            self.active = None
+            self.unloaded = 0
+
+        def load_lora_weights(self, folder, weight_name=None, adapter_name=None):
+            self.loaded.append((str(folder), weight_name, adapter_name))
+
+        def set_adapters(self, names, adapter_weights=None):
+            self.active = (list(names), list(adapter_weights or []))
+
+        def unload_lora_weights(self):
+            self.unloaded += 1
+            self.active = None
+
+    dummy_pipe = DummyPipe()
+    handle = {
+        "model_id": "wan21-vace-14b-fp8",
+        "pipe": dummy_pipe,
+        "active_lora_id": None,
+        "active_lora_ids": [],
+    }
+    primary_ret = _sync_video_lora_on_handle(
+        handle=handle,
+        pipe=dummy_pipe,
+        video_lora_id="lora-wan21-14b-fusionx-phantom",
+        video_lora_scale=0.95,
+        extra_video_lora_ids=["lora-wan21-14b-unianimate-char", "lora-wan21-14b-detailz"],
+        extra_video_lora_scales={"lora-wan21-14b-detailz": 0.50},
+        job=None,
+    )
+    assert primary_ret is not None and primary_ret["id"] == "lora-wan21-14b-fusionx-phantom"
+    assert len(dummy_pipe.loaded) == 3
+    assert dummy_pipe.active == (
+        ["vid_speed_lora", "wan21_unianimate_char", "wan21_detailz"],
+        [0.95, 0.65, 0.50],
+    )
+    assert list(handle["active_lora_signature"]) == [
+        "lora-wan21-14b-fusionx-phantom",
+        "lora-wan21-14b-unianimate-char",
+        "lora-wan21-14b-detailz",
+    ]
+
+
+
 
 
 

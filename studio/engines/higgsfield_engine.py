@@ -644,6 +644,8 @@ def run_higgsfield_scene_director(
     dialogue_lines: Optional[List[Dict[str, Any]]] = None,
     ambience_preset: str = "none",
     apply_lipsync: bool = True,
+    image_lora_ids: Optional[List[str]] = None,
+    video_lora_ids: Optional[List[str]] = None,
     seed: int = 42,
 ) -> Dict[str, Any]:
     """Ejecuta de principio a fin una escena cinematográfica estilo Higgsfield 100 % en local / Colab:
@@ -708,6 +710,7 @@ def run_higgsfield_scene_director(
                 guidance_scale=1.0,
                 seed=seed,
                 use_lightning_lora=True,
+                custom_lora_ids=image_lora_ids,
                 job=job,
             )
             keyframe_rel = f"outputs/images/{img_meta['filename']}"
@@ -790,6 +793,7 @@ def run_higgsfield_scene_director(
             video_submode="i2v",
             model_id=v_mid,
             video_lora_id=v_lora or None,
+            extra_video_lora_ids=video_lora_ids,
             prompt=motion_prompt,
             image_path=keyframe_path,
             width=vid_w,

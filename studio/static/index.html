@@ -157,14 +157,19 @@
         <div class="engine-bar">
           <div class="engine-bar-info">
             <span class="status-dot" id="img-engine-dot"></span>
-            <div>
-              <strong>Motor predeterminado:</strong> Qwen-Image-Edit 2511 (4-bit) + LoRA Lightning (4 pasos)
+            <div class="row-gap" style="flex-wrap:wrap;">
+              <strong>Modelo de Imagen:</strong>
+              <select id="select-image-model" class="inline-select">
+                <option value="qwen-image-edit-2511-pack" selected>★ Qwen-Image-Edit 2511 (4-bit · Edición + Refs + T2I)</option>
+                <option value="qwen-image-2512-pack">Qwen-Image 2512 (4-bit · Texto→Imagen Puro)</option>
+                <option value="sdxl-turbo-fp16">SDXL Turbo FP16 (Ultraligero · 1–4 pasos)</option>
+              </select>
               <span class="muted-inline" id="img-engine-state">Comprobando estado...</span>
             </div>
           </div>
           <div class="engine-bar-actions">
             <button class="btn btn-primary btn-sm" id="btn-prepare-qwen">
-              ⚡ Preparar Qwen + Lightning (1 clic)
+              ⚡ Preparar Modelo Imagen (1 clic)
             </button>
             <button class="btn btn-ghost btn-sm" id="btn-unload-image">
               🧹 Sacar de RAM/VRAM
@@ -322,6 +327,27 @@
                     <input type="checkbox" id="chk-bt709" checked />
                     <span>Procesado FFmpeg BT.709 (entrada y salida)</span>
                   </label>
+                </div>
+
+                <!-- RACK MULTI-LORA APILABLE DE IMAGEN (COHERENCIA PERSONAJE / ENTORNO / CALIDAD / EDICIÓN / ESTILO) -->
+                <div class="lora-rack-box" id="img-lora-rack-box">
+                  <div class="lora-rack-head">
+                    <div class="row-gap" style="flex-wrap:wrap;">
+                      <strong>🧩 LoRAs Apilables (Personaje · Entorno · Calidad · Edición)</strong>
+                      <span class="lora-active-pill" id="img-lora-active-count">0 activos</span>
+                    </div>
+                    <button type="button" class="btn btn-ghost btn-xs" id="btn-clear-img-loras" title="Desmarcar todos los LoRAs creativos">Limpiar</button>
+                  </div>
+                  <div class="lora-group-pills" id="img-lora-group-pills">
+                    <button type="button" class="lora-grp-chip active" data-lgrp="all">Todos</button>
+                    <button type="button" class="lora-grp-chip" data-lgrp="character">👤 Personaje / Ángulos</button>
+                    <button type="button" class="lora-grp-chip" data-lgrp="environment">🌅 Entorno / Luz</button>
+                    <button type="button" class="lora-grp-chip" data-lgrp="quality">✨ Calidad / Piel</button>
+                    <button type="button" class="lora-grp-chip" data-lgrp="style">🎨 Estilo</button>
+                  </div>
+                  <div class="lora-rack-list" id="img-lora-rack-list">
+                    <span class="muted">Cargando LoRAs compatibles con el modelo actual...</span>
+                  </div>
                 </div>
               </div>
 
@@ -589,6 +615,20 @@
                     <button type="button" class="lora-q-pill" data-lsteps="8" data-lscale="0.75" data-lcfg="1.5" title="Activa guía CFG 1.5 + mezcla con modelo base para seguir acciones dinámicas y Frame a Frame con máxima fidelidad (~3.2 min en L4)">
                       🎯 Máxima Fidelidad Acción/Pose (8p · CFG 1.5)
                     </button>
+                  </div>
+                </div>
+
+                <!-- RACK MULTI-LORA CREATIVO DE VÍDEO (APILABLE JUNTO AL ACELERADOR DE PASOS) -->
+                <div class="lora-rack-box" id="vid-extra-lora-box" style="margin-top:8px;">
+                  <div class="lora-rack-head">
+                    <div class="row-gap" style="flex-wrap:wrap;">
+                      <strong>🧩 + LoRAs de Coherencia, Entorno, Calidad y Cámara (Apilables)</strong>
+                      <span class="lora-active-pill" id="vid-extra-lora-count">0 activos</span>
+                    </div>
+                    <button type="button" class="btn btn-ghost btn-xs" id="btn-clear-vid-extra-loras">Limpiar</button>
+                  </div>
+                  <div class="lora-rack-list" id="vid-extra-lora-list">
+                    <span class="muted">Selecciona un modelo de vídeo para ver sus LoRAs creativos compatibles...</span>
                   </div>
                 </div>
 
@@ -899,6 +939,7 @@
           </div>
           <div class="filter-pills">
             <button class="filter-chip active" data-cat="all">Todos</button>
+            <button class="filter-chip" data-cat="lora">🧩 Todos los LoRAs</button>
             <button class="filter-chip" data-cat="video">🎬 Vídeo</button>
             <button class="filter-chip" data-cat="image">🖼️ Imagen + LoRAs</button>
             <button class="filter-chip" data-cat="lipsync">👄 LipSync HD</button>
@@ -1110,6 +1151,17 @@
                 </div>
               </div>
 
+              <div class="form-row-2" style="margin-top:8px;">
+                <div>
+                  <label class="field-label" for="hf-dir-img-lora">🧩 LoRA Fotografía / Piel / Luz (opcional)</label>
+                  <select id="hf-dir-img-lora"><option value="">— Ninguno extra (solo Lightning 4p) —</option></select>
+                </div>
+                <div>
+                  <label class="field-label" for="hf-dir-vid-lora">🧩 LoRA Vídeo Coherencia / Cine (opcional)</label>
+                  <select id="hf-dir-vid-lora"><option value="">— Ninguno extra (solo Turbo) —</option></select>
+                </div>
+              </div>
+
               <div class="subcard" style="margin-top:10px;">
                 <div class="row-between">
                   <strong>🗣️ Diálogo Opcional (Locución + LipSync HD Automático)</strong>
@@ -1200,6 +1252,11 @@
                 </div>
               </div>
 
+              <div style="margin-top:8px;">
+                <label class="field-label" for="hf-cin-img-lora">🧩 LoRA Óptico / Piel / Relight (opcional)</label>
+                <select id="hf-cin-img-lora"><option value="">— Ninguno extra (solo Lightning 4p) —</option></select>
+              </div>
+
               <button class="btn btn-primary btn-lg full-w" id="btn-hf-shoot-cinema" style="margin-top:12px;">
                 📸 Disparar Fotograma Cinema Studio
               </button>
@@ -1252,6 +1309,11 @@
                   <label class="field-label" for="hf-mot-dur">Duración (s)</label>
                   <input type="number" id="hf-mot-dur" value="4.5" min="1.5" max="12" step="0.5" />
                 </div>
+              </div>
+
+              <div style="margin-top:8px;">
+                <label class="field-label" for="hf-mot-vid-lora">🧩 LoRA Vídeo Coherencia / Cine / Detalle (opcional)</label>
+                <select id="hf-mot-vid-lora"><option value="">— Ninguno extra —</option></select>
               </div>
 
               <button class="btn btn-primary btn-lg full-w" id="btn-hf-run-motion" style="margin-top:12px;">

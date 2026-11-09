@@ -638,101 +638,14 @@ def _maybe_set_wan_flow_shift(pipe: Any, flow_shift: Optional[float]) -> None:
         pass
 
 
-def _sync_video_lora_on_handle(
-    handle: Dict[str, Any],
+def _load_single_video_lora_onto_pipe(
     pipe: Any,
-    video_lora_id: Optional[str],
-    video_lora_scale: float = 1.0,
-    job: Optional[JobRecord] = None,
-    pct_base: float = 8.0,
-) -> Optional[Dict[str, Any]]:
-    """
-    Activa, ajusta escala o desactiva en caliente un LoRA acelerador en el pipeline de vídeo,
-    quitando temporalmente los hooks de CPU Offload para evitar conflictos de dispositivo en PEFT.
-    """
-    clean_id = (video_lora_id or "").strip() or None
-    cur_id = handle.get("active_lora_id")
-    cur_scale = handle.get("active_lora_scale")
-    vram_total = float(query_gpu_info().get("vram_total_gb", 22.0))
-    min_vram = float(handle.get("min_vram_gb", 14.0))
-
-    if not clean_id:
-        if cur_id and hasattr(pipe, "unload_lora_weights"):
-            if job:
-                job.log("Desactivando LoRA acelerador para volver al modo estándar...", progress=pct_base)
-            if hasattr(pipe, "remove_all_hooks"):
-                try:
-                    pipe.remove_all_hooks()
-                except Exception:
-                    pass
-            pipe.unload_lora_weights()
-            _maybe_set_wan_flow_shift(pipe, handle.get("base_flow_shift"))
-            _apply_best_offload(pipe, vram_total, min_vram)
-            handle["active_lora_id"] = None
-            handle["active_lora_scale"] = None
-        return None
-
-    lora_defn = catalog_manager.get_definition(clean_id)
-    if not lora_defn:
-        raise ValueError(f"LoRA desconocido: {clean_id}")
-
-    compat_models = lora_defn.get("compatible_models")
-    loaded_model_id = (handle.get("defn") or {}).get("id")
-    if compat_models and loaded_model_id and loaded_model_id not in compat_models:
-        raise ValueError(
-            f"El LoRA «{lora_defn['name']}» está diseñado para {', '.join(compat_models)} "
-            f"y no es compatible con «{loaded_model_id}»."
-        )
-
-    if not catalog_manager.is_downloaded(clean_id):
-        if job is not None:
-            job.log(
-                f"Descargando acelerador ligero «{lora_defn['name']}» ({lora_defn.get('estimated_gb', 0.3)} GB)...",
-                progress=max(1.0, pct_base - 4.0),
-                step="Descargando LoRA Turbo...",
-            )
-            catalog_manager.download_model(
-                clean_id,
-                job,
-                progress_range=(max(1.0, pct_base - 4.0), pct_base),
-            )
-        else:
-            raise RuntimeError(f"El LoRA «{lora_defn['name']}» aún no está descargado.")
-
-    eff_scale = float(video_lora_scale) if video_lora_scale is not None else float(lora_defn.get("default_lora_scale", 1.0))
-
-    if cur_id == clean_id:
-        if cur_scale != eff_scale and hasattr(pipe, "set_adapters"):
-            pipe.set_adapters(["vid_speed_lora"], adapter_weights=[eff_scale])
-            handle["active_lora_scale"] = eff_scale
-        return lora_defn
-
-    lora_file = _resolve_lora_safetensors_file(clean_id)
-    if job:
-        job.log(
-            f"Activando LoRA acelerador «{lora_defn['name']}» (escala {eff_scale:.2f})...",
-            progress=pct_base,
-            step="Aplicando LoRA Turbo...",
-        )
-
-    if hasattr(pipe, "remove_all_hooks"):
-        try:
-            pipe.remove_all_hooks()
-        except Exception:
-            pass
-
-    if cur_id and hasattr(pipe, "unload_lora_weights"):
-        pipe.unload_lora_weights()
-
-    transformer_mod = getattr(pipe, "transformer", None)
-    is_fp8_lc = _is_module_layerwise_fp8(transformer_mod)
-    torch_mod: Any = None
-    if is_fp8_lc:
-        import torch as _torch_mod  # type: ignore
-
-        torch_mod = _torch_mod
-
-    engine = handle.get("engine", "")
+    engine: str,
+    lora_file: Path,
+    adapter_name: str,
+    is_fp8_lc: bool,
+    torch_mod: Any,
+) -> None:
     if engine in (
         "wan_ti2v",
         "wan_t2v",
@@ -751,17 +664,141 @@ def _sync_video_lora_on_handle(
                 k: (v.to(torch_mod.bfloat16) if hasattr(v, "dtype") and v.is_floating_point() else v)
                 for k, v in clean_sd.items()
             }
-            pipe.load_lora_weights(clean_sd, adapter_name="vid_speed_lora", low_cpu_mem_usage=True)
+            pipe.load_lora_weights(clean_sd, adapter_name=adapter_name, low_cpu_mem_usage=True)
         else:
-            pipe.load_lora_weights(clean_sd, adapter_name="vid_speed_lora")
+            pipe.load_lora_weights(clean_sd, adapter_name=adapter_name)
     else:
         lora_kw: Dict[str, Any] = {
             "weight_name": lora_file.name,
-            "adapter_name": "vid_speed_lora",
+            "adapter_name": adapter_name,
         }
         if is_fp8_lc:
             lora_kw["low_cpu_mem_usage"] = True
         pipe.load_lora_weights(str(lora_file.parent), **lora_kw)
+
+
+def _sync_video_lora_on_handle(
+    handle: Dict[str, Any],
+    pipe: Any,
+    video_lora_id: Optional[str],
+    video_lora_scale: float = 1.0,
+    extra_video_lora_ids: Optional[List[str]] = None,
+    extra_video_lora_scales: Optional[Dict[str, float]] = None,
+    job: Optional[JobRecord] = None,
+    pct_base: float = 8.0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Activa, apila (Multi-LoRA: Velocidad + Personaje/Entorno/Calidad/Cámara), ajusta escalas o desactiva
+    en caliente adaptadores LoRA en cualquier pipeline de vídeo de Studio IA.
+    """
+    requested_pairs: List[Tuple[str, Optional[float]]] = []
+    clean_primary = (video_lora_id or "").strip()
+    if clean_primary:
+        requested_pairs.append((clean_primary, video_lora_scale))
+
+    scales_dict = {str(k): float(v) for k, v in (extra_video_lora_scales or {}).items()}
+    seen_ids = {clean_primary} if clean_primary else set()
+    for xid in extra_video_lora_ids or []:
+        cx = str(xid or "").strip()
+        if cx and cx not in seen_ids:
+            seen_ids.add(cx)
+            requested_pairs.append((cx, scales_dict.get(cx)))
+
+    cur_sig = handle.get("active_lora_signature")
+    vram_total = float(query_gpu_info().get("vram_total_gb", 22.0))
+    min_vram = float(handle.get("min_vram_gb", 14.0))
+
+    if not requested_pairs:
+        if (handle.get("active_lora_id") or cur_sig) and hasattr(pipe, "unload_lora_weights"):
+            if job:
+                job.log("Desactivando LoRAs de vídeo para volver al modelo limpio...", progress=pct_base)
+            if hasattr(pipe, "remove_all_hooks"):
+                try:
+                    pipe.remove_all_hooks()
+                except Exception:
+                    pass
+            pipe.unload_lora_weights()
+            _maybe_set_wan_flow_shift(pipe, handle.get("base_flow_shift"))
+            _apply_best_offload(pipe, vram_total, min_vram)
+            handle["active_lora_id"] = None
+            handle["active_lora_scale"] = None
+            handle["active_lora_signature"] = None
+            handle["active_lora_defns"] = []
+        return None
+
+    loaded_model_id = (handle.get("defn") or {}).get("id")
+    resolved_specs: List[Tuple[str, str, float, Dict[str, Any]]] = []  # (lora_id, adapter_name, scale, defn)
+
+    for idx_l, (lid, custom_sc) in enumerate(requested_pairs):
+        ldef = catalog_manager.get_definition(lid)
+        if not ldef:
+            raise ValueError(f"LoRA desconocido: {lid}")
+        compat_models = ldef.get("compatible_models")
+        if compat_models and loaded_model_id and loaded_model_id not in compat_models:
+            raise ValueError(
+                f"El LoRA «{ldef['name']}» está diseñado para {', '.join(compat_models)} "
+                f"y no es compatible con «{loaded_model_id}»."
+            )
+        if not catalog_manager.is_downloaded(lid):
+            if job is not None:
+                job.log(
+                    f"Descargando LoRA «{ldef['name']}» ({ldef.get('estimated_gb', 0.3)} GB)...",
+                    progress=max(1.0, pct_base - 4.0),
+                    step=f"Descargando {ldef['name'][:30]}...",
+                )
+                catalog_manager.download_model(
+                    lid,
+                    job,
+                    progress_range=(max(1.0, pct_base - 4.0), pct_base),
+                )
+            else:
+                raise RuntimeError(f"El LoRA «{ldef['name']}» aún no está descargado.")
+
+        eff_sc = float(custom_sc) if custom_sc is not None else float(ldef.get("default_lora_scale", 1.0))
+        ad_name = "vid_speed_lora" if idx_l == 0 and lid == clean_primary else (ldef.get("adapter_name") or f"vid_lora_{idx_l}")
+        resolved_specs.append((lid, ad_name, eff_sc, ldef))
+
+    new_ids_tuple = tuple(x[0] for x in resolved_specs)
+    adapter_names = [x[1] for x in resolved_specs]
+    adapter_weights = [x[2] for x in resolved_specs]
+    all_defns = [x[3] for x in resolved_specs]
+
+    if cur_sig == new_ids_tuple:
+        if hasattr(pipe, "set_adapters"):
+            pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
+        handle["active_lora_scale"] = adapter_weights[0]
+        handle["active_lora_defns"] = all_defns
+        return next((d for d in all_defns if d.get("max_steps") is not None), all_defns[0])
+
+    if job:
+        summary_str = " + ".join(f"«{d['name'][:34]}» ({w:.2f})" for _, _, w, d in resolved_specs)
+        job.log(
+            f"Acoplando LoRA(s) en vídeo: {summary_str}...",
+            progress=pct_base,
+            step="Acoplando LoRAs en GPU...",
+        )
+
+    if hasattr(pipe, "remove_all_hooks"):
+        try:
+            pipe.remove_all_hooks()
+        except Exception:
+            pass
+
+    if (handle.get("active_lora_id") or cur_sig) and hasattr(pipe, "unload_lora_weights"):
+        pipe.unload_lora_weights()
+
+    transformer_mod = getattr(pipe, "transformer", None)
+    is_fp8_lc = _is_module_layerwise_fp8(transformer_mod)
+    torch_mod: Any = None
+    if is_fp8_lc:
+        import torch as _torch_mod  # type: ignore
+
+        torch_mod = _torch_mod
+
+    engine = handle.get("engine", "")
+    for lid, ad_name, _, _ in resolved_specs:
+        l_file = _resolve_lora_safetensors_file(lid)
+        _load_single_video_lora_onto_pipe(pipe, engine, l_file, ad_name, is_fp8_lc, torch_mod)
 
     if is_fp8_lc and transformer_mod is not None and torch_mod is not None:
         try:
@@ -777,17 +814,20 @@ def _sync_video_lora_on_handle(
                         p.data = p.data.to(torch_mod.bfloat16)
 
     if hasattr(pipe, "set_adapters"):
-        pipe.set_adapters(["vid_speed_lora"], adapter_weights=[eff_scale])
+        pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
 
-    if lora_defn.get("recommended_flow_shift") is not None:
-        _maybe_set_wan_flow_shift(pipe, float(lora_defn["recommended_flow_shift"]))
+    shift_defn = next((d for d in all_defns if d.get("recommended_flow_shift") is not None), None)
+    if shift_defn is not None:
+        _maybe_set_wan_flow_shift(pipe, float(shift_defn["recommended_flow_shift"]))
     elif handle.get("base_flow_shift") is not None:
         _maybe_set_wan_flow_shift(pipe, float(handle["base_flow_shift"]))
 
     _apply_best_offload(pipe, vram_total, min_vram)
-    handle["active_lora_id"] = clean_id
-    handle["active_lora_scale"] = eff_scale
-    return lora_defn
+    handle["active_lora_id"] = resolved_specs[0][0]
+    handle["active_lora_scale"] = adapter_weights[0]
+    handle["active_lora_signature"] = new_ids_tuple
+    handle["active_lora_defns"] = all_defns
+    return next((d for d in all_defns if d.get("max_steps") is not None), all_defns[0])
 
 
 def compute_official_video_params(
@@ -1489,6 +1529,8 @@ def generate_video_clip(
     model_id: Optional[str] = None,
     video_lora_id: Optional[str] = None,
     video_lora_scale: float = 1.0,
+    extra_video_lora_ids: Optional[List[str]] = None,
+    extra_video_lora_scales: Optional[Dict[str, float]] = None,
     prompt: str = "",
     negative_prompt: str = "",
     image_path: Optional[Path] = None,
@@ -1497,6 +1539,7 @@ def generate_video_clip(
     width: int = 1280,
     height: int = 704,
     duration_sec: float = 5.0,
+    duration_seconds: Optional[float] = None,
     fps: int = 24,
     steps: int = 45,
     guidance_scale: Optional[float] = None,
@@ -1505,13 +1548,13 @@ def generate_video_clip(
     job: Optional[JobRecord] = None,
 ) -> Dict[str, Any]:
     """
-    Genera un clip de vídeo respetando los parámetros oficiales de cada arquitectura:
+    Genera un clip de vídeo respetando los parámetros oficiales de cada arquitectura y apilado Multi-LoRA:
       - Texto a Vídeo (t2v)
       - Imagen a Vídeo simple (i2v)
       - Frame a Frame: Inicio → Fin (flf2v)
-    Si `model_id` se indica y no coincide con el modelo en VRAM, valida primero compatibilidad de modo
-    y lo descarga/carga automáticamente antes de inferir.
     """
+    if duration_seconds is not None:
+        duration_sec = float(duration_seconds)
     t0 = time.time()
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1691,12 +1734,20 @@ def generate_video_clip(
         pipe=pipe,
         video_lora_id=eff_lora_id,
         video_lora_scale=video_lora_scale,
+        extra_video_lora_ids=extra_video_lora_ids,
+        extra_video_lora_scales=extra_video_lora_scales,
         job=job,
         pct_base=max(4.0, infer_pct_start - 2.0),
     )
 
-    # Protección anti-congelación en LoRAs destilados (ej. evitar lanzar 26 o 45 pasos sobre un LoRA de 4–8 pasos @ CFG 1.0)
-    if active_lora_defn is not None:
+    # Auto-inyectar frases disparadoras (trigger_phrase) de LoRAs creativos/estilo activos
+    for act_d in handle.get("active_lora_defns") or []:
+        trig = str(act_d.get("trigger_phrase") or "").strip()
+        if trig and trig.lower() not in (prompt or "").lower():
+            prompt = f"{trig}, {prompt}".strip(", ")
+
+    # Protección anti-congelación SOLO si hay un LoRA destilado de pocos pasos (tiene `max_steps` declarado)
+    if active_lora_defn is not None and active_lora_defn.get("max_steps") is not None:
         base_max_lora_steps = int(active_lora_defn.get("max_steps") or 10)
         eff_scale_now = float(video_lora_scale if video_lora_scale is not None else active_lora_defn.get("default_lora_scale", 1.0))
         safe_ceiling = max(base_max_lora_steps, 12 if eff_scale_now <= 0.80 else base_max_lora_steps)

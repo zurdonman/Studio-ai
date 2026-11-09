@@ -213,6 +213,10 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "id": "qwen-lora-nsfw",
         "name": "LoRA Extra: Qwen-Image-Edit Plus (Sin censura / Realismo)",
         "category": "lora",
+        "lora_target": "image",
+        "lora_group": "quality",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 1.0,
         "is_default": False,
         "parent_model": "qwen-image-edit-2511-pack",
         "adapter_name": "mcnl-nsfw-v1",
@@ -240,6 +244,10 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "id": "qwen-lora-lightning-8steps",
         "name": "LoRA Extra: Qwen-Image-Edit Detalle Fino (8 pasos)",
         "category": "lora",
+        "lora_target": "image",
+        "lora_group": "speed",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 1.0,
         "is_default": False,
         "parent_model": "qwen-image-edit-2511-pack",
         "adapter_name": "lightning-8steps",
@@ -263,12 +271,460 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             }
         ],
     },
+    # ==================== LoRAs DE IMAGEN: COHERENCIA DE PERSONAJES, ENTORNO Y CALIDAD ====================
+    {
+        "id": "qwen-lora-multi-angles-3d",
+        "name": "👤🎥 LoRA Multi-Ángulo 3D (96 Poses de Cámara · Coherencia Total de Personaje y Entorno)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "character",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.90,
+        "trigger_phrase": "Front-right quarter view, consistent character and environment",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "fal_multi_angles_3d",
+        "badge": "★ Coherencia 3D · 96 Ángulos · 295 MB",
+        "description": (
+            "Entrenado con +3.000 escenas 3D Gaussian Splatting (fal.ai). Permite rotar la cámara (perfil, contrapicado, primer plano, plano general) "
+            "alrededor del MISMO personaje y entorno sin perder identidad facial ni vestimenta. Ideal para generar fotogramas Inicio → Fin coherentes."
+        ),
+        "estimated_gb": 0.30,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA",
+                "subdir": "lora_multi_angles",
+                "filename": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+                "verify_file": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-next-scene",
+        "name": "🎬🏛️ LoRA Next-Scene Continuidad de Guion (Siguiente Plano Coherente de Escena y Actor)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "environment",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.85,
+        "trigger_phrase": "Next scene:",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "next_scene_continuity",
+        "badge": "★ Continuidad Storyboard · 295 MB",
+        "description": (
+            "Especialista en continuidad cinematográfica: a partir de un fotograma base genera el siguiente instante narrativo "
+            "conservando exactamente el mismo escenario, iluminación, objetos de la habitación y rostro/ropa del personaje."
+        ),
+        "estimated_gb": 0.30,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "lovis93/next-scene-qwen-image-lora-2509",
+                "subdir": "lora_next_scene",
+                "filename": "next-scene_lora-v2-3000.safetensors",
+                "verify_file": "next-scene_lora-v2-3000.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-anylight-env",
+        "name": "🏛️💡 LoRA AnyLight Coherencia de Luz entre Planos (Igualar Iluminación de Entorno)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "environment",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.85,
+        "trigger_phrase": "Apply consistent ambient lighting across the scene",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "qie_anylight",
+        "badge": "Coherencia Lumínica · Multi-Ref · 560 MB",
+        "description": (
+            "Transfiere la atmósfera lumínica y temperatura de color de una imagen de referencia (Imagen 2) sobre tu personaje o plano (Imagen 1) "
+            "para que todas las tomas de una secuencia compartan exactamente la misma luz de entorno."
+        ),
+        "estimated_gb": 0.56,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.6,
+        "l4_seconds_hint": "+0.5 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "lilylilith/QIE-2511-MP-AnyLight",
+                "subdir": "lora_anylight",
+                "filename": "QIE-2511-AnyLight_.safetensors",
+                "verify_file": "QIE-2511-AnyLight_.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-relight-scene",
+        "name": "🌅 LoRA Re-Iluminación de Entorno (Cambiar Hora del Día / Luces sin Alterar Personaje)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "environment",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.85,
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "qwen_relight",
+        "badge": "Re-Light Escenario · 290 MB",
+        "description": (
+            "Cambia la dirección e intensidad de la luz del escenario (velas cálidas, neón nocturno, hora dorada, contraluz) "
+            "manteniendo intactos los rasgos faciales, pose y proporciones del sujeto."
+        ),
+        "estimated_gb": 0.29,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "dx8152/Qwen-Image-Edit-2509-Relight",
+                "subdir": "lora_relight",
+                "filename": "Qwen-Edit-Relight.safetensors",
+                "verify_file": "Qwen-Edit-Relight.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-studio-delight",
+        "name": "👤✨ LoRA Studio DeLight (Limpiar Sombras para Ficha Ancla de Personaje)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "character",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.90,
+        "trigger_phrase": "Neutral uniform lighting. Preserve identity and composition.",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "studio_delight",
+        "badge": "Casting Limpio · Identidad Pura · 236 MB",
+        "description": (
+            "Elimina sombras duras, contraluces y tintes de color de cualquier foto para obtener un retrato limpio y neutro "
+            "del personaje, óptimo para guardar como foto ancla en el Casting Vault."
+        ),
+        "estimated_gb": 0.24,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "prithivMLmods/QIE-2511-Studio-DeLight",
+                "subdir": "lora_delight",
+                "filename": "QIE-2511-Studio-DeLight-5000.safetensors",
+                "verify_file": "QIE-2511-Studio-DeLight-5000.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-skin-realism",
+        "name": "💎 LoRA Textura de Piel Humana Natural (Poros Reales · Anti-Plástico IA)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "quality",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.75,
+        "trigger_phrase": "make the subjects skin details more prominent and natural",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "qwen_skin_real",
+        "badge": "★ Calidad Retrato · Piel Orgánica · 295 MB",
+        "description": (
+            "Añade micro-textura real de piel humana, poros naturales y acabado fotográfico sin redibujar ni cambiar "
+            "la identidad de la persona. Excelente antes de aplicar LipSync HD."
+        ),
+        "estimated_gb": 0.30,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "tlennon-ie/qwen-edit-skin",
+                "subdir": "lora_skin",
+                "filename": "qwen-edit-skin.safetensors",
+                "verify_file": "qwen-edit-skin.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-ultra-portrait",
+        "name": "💎 LoRA Retrato Ultra-Realista de Cine (Nitidez Ojos, Cabello y Tejidos)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "quality",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.80,
+        "trigger_phrase": "Ultra-realistic portrait.",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "qwen_ultra_portrait",
+        "badge": "Calidad Óptica Retrato · 236 MB",
+        "description": (
+            "Refuerza el enfoque en iris, pestañas, hebras de pelo y textura de ropa en primeros planos y planos medios "
+            "cinematográficos con Qwen-Image-Edit 2511."
+        ),
+        "estimated_gb": 0.24,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "prithivMLmods/Qwen-Image-Edit-2511-Ultra-Realistic-Portrait",
+                "subdir": "lora_ultra_portrait",
+                "filename": "URP_20.safetensors",
+                "verify_file": "URP_20.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-upscale-unblur",
+        "name": "🔍 LoRA Restaurador HD Unblur + Upscale (Recuperar Fotos Borrosas o Fotogramas)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "quality",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.85,
+        "trigger_phrase": "Unblur and upscale.",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "qwen_unblur_upscale",
+        "badge": "Restauración Fotográfica · 295 MB",
+        "description": (
+            "Elimina desenfoque de movimiento, artefactos de compresión y falta de definición en fotografías antiguas "
+            "o en el último fotograma extraído de un vídeo para seguir encadenando clips nítidos."
+        ),
+        "estimated_gb": 0.30,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "prithivMLmods/Qwen-Image-Edit-2511-Unblur-Upscale",
+                "subdir": "lora_unblur",
+                "filename": "Qwen-Image-Edit-Unblur-Upscale_15.safetensors",
+                "verify_file": "Qwen-Image-Edit-Unblur-Upscale_15.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-flatlog-cinema",
+        "name": "🎞️ LoRA Perfil ARRI Flat-Log Cine (Alto Rango Dinámico para Etalonaje y Vídeo)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "quality",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.75,
+        "trigger_phrase": "Transform into a cinematic flat log.",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "qwen_flatlog",
+        "badge": "HDR Cine Log · 236 MB",
+        "description": (
+            "Suaviza contrastes quemados y recupera información en sombras profundas con curva de cámara de cine profesional, "
+            "evitando parpadeos de exposición al animar después con Wan 14B o LTX."
+        ),
+        "estimated_gb": 0.24,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "prithivMLmods/QIE-2511-Cinematic-FlatLog-Control",
+                "subdir": "lora_flatlog",
+                "filename": "QIE-2511-Cinematic-FlatLog-Control-3200.safetensors",
+                "verify_file": "QIE-2511-Cinematic-FlatLog-Control-3200.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-anything2real",
+        "name": "🎨➡️📷 LoRA Anything2Real (Convertir Boceto, Anime o 3D en Persona y Entorno Reales)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "style",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.90,
+        "trigger_phrase": "Change the picture to realistic photograph.",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "qwen_anything2real",
+        "badge": "★ +114k Descargas · 3D/Anime→Real · 580 MB",
+        "description": (
+            "Convierte cualquier boceto, ilustración, personaje anime o bloqueo 3D sencillo en una fotografía hiperrealista "
+            "clavando exactamente la postura, encuadre y distribución del entorno."
+        ),
+        "estimated_gb": 0.58,
+        "min_vram_gb": 0.3,
+        "recommended_vram_gb": 0.6,
+        "l4_seconds_hint": "+0.5 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "lrzjason/Anything2Real",
+                "subdir": "lora_anything2real",
+                "filename": "anything2real_2601.safetensors",
+                "verify_file": "anything2real_2601.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-lora-anime-v2",
+        "name": "🎨 LoRA Animación Japonesa Coherente V2 (Personaje + Fondo Anime Consistente)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "style",
+        "compatible_models": ["qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.90,
+        "trigger_phrase": "Transform into anime while preserving composition and details.",
+        "is_default": False,
+        "parent_model": "qwen-image-edit-2511-pack",
+        "adapter_name": "qwen_anime_v2",
+        "badge": "Animación Coherente · 236 MB",
+        "description": (
+            "Transforma fotografías o personajes reales en fotogramas de animación japonesa limpia conservando vestuario, "
+            "expresión y arquitectura del escenario para crear series animadas coherentes."
+        ),
+        "estimated_gb": 0.24,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "prithivMLmods/Qwen-Image-Edit-2511-Anime",
+                "subdir": "lora_anime_v2",
+                "filename": "Qwen-Image-Edit-2511-Anime-2000.safetensors",
+                "verify_file": "Qwen-Image-Edit-2511-Anime-2000.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "qwen-t2i-lora-snapshot-real",
+        "name": "📱 LoRA Fotografía Espontánea Realista (Para Qwen-Image 2512 T2I y Edit 2511)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "quality",
+        "compatible_models": ["qwen-image-2512-pack", "qwen-image-edit-2511-pack"],
+        "default_lora_scale": 0.70,
+        "trigger_phrase": "amateur photo, natural human skin texture",
+        "is_default": False,
+        "parent_model": "qwen-image-2512-pack",
+        "adapter_name": "qwen_snapshot_real",
+        "badge": "Qwen 2512 + 2511 · Realismo Natural · 295 MB",
+        "description": (
+            "Elimina el acabado artificial/plástico al crear escenas desde texto con Qwen-Image 2512 o editar con 2511, "
+            "aportando óptica natural de cámara cotidiana, piel auténtica e iluminación creíble."
+        ),
+        "estimated_gb": 0.29,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.5,
+        "l4_seconds_hint": "+0.4 s",
+        "engine": "qwen_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "ribilu74/qwensnapshot",
+                "subdir": "lora_snapshot",
+                "filename": "Qwen-Smartphone.safetensors",
+                "verify_file": "Qwen-Smartphone.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "sdxl-lora-high-detail",
+        "name": "💎 LoRA Micro-Detalle HD v5 para SDXL Turbo (Texturas Nítidas en T4/L4)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "quality",
+        "compatible_models": ["sdxl-turbo-fp16"],
+        "default_lora_scale": 0.75,
+        "is_default": False,
+        "parent_model": "sdxl-turbo-fp16",
+        "adapter_name": "sdxl_high_detail",
+        "badge": "SDXL Turbo · Calidad HD · 228 MB",
+        "description": (
+            "Potenciador de detalle fino para SDXL Turbo FP16: enriquece rostros, materiales y fondos arquitectónicos "
+            "manteniendo la generación ultrarrápida en GPUs T4 y L4."
+        ),
+        "estimated_gb": 0.23,
+        "min_vram_gb": 0.2,
+        "recommended_vram_gb": 0.4,
+        "l4_seconds_hint": "+0.2 s",
+        "engine": "sdxl_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "JCTN/JCTN_LORAxl",
+                "subdir": "lora_sdxl_detail",
+                "filename": "SDXLHighDetail_v5.safetensors",
+                "verify_file": "SDXLHighDetail_v5.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "sdxl-lora-cinematic-light",
+        "name": "🏛️🎬 LoRA Iluminación Cinematográfica para SDXL Turbo (Atmósfera y Entorno · 44 MB)",
+        "category": "lora",
+        "lora_target": "image",
+        "lora_group": "environment",
+        "compatible_models": ["sdxl-turbo-fp16"],
+        "default_lora_scale": 1.2,
+        "trigger_phrase": "cinematic lighting",
+        "is_default": False,
+        "parent_model": "sdxl-turbo-fp16",
+        "adapter_name": "sdxl_cinematic_light",
+        "badge": "SDXL Turbo · Luz de Cine · 44 MB",
+        "description": (
+            "Slider ultraligero (44 MB) de iluminación dramática y coherencia ambiental volumétrica para bocetar storyboards "
+            "cinematográficos coherentes con SDXL Turbo."
+        ),
+        "estimated_gb": 0.05,
+        "min_vram_gb": 0.1,
+        "recommended_vram_gb": 0.3,
+        "l4_seconds_hint": "+0.1 s",
+        "engine": "sdxl_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "ntc-ai/SDXL-LoRA-slider.cinematic-lighting",
+                "subdir": "lora_sdxl_light",
+                "filename": "cinematic lighting.safetensors",
+                "verify_file": "cinematic lighting.safetensors",
+            }
+        ],
+    },
     # ==================== LoRAs ACELERADORES DE VÍDEO ====================
     {
         "id": "lora-wan22-ti2v-5b-turbo",
         "name": "⚡ LoRA Turbo 4–6 Pasos para Wan 2.2 TI2V-5B (Self-Forcing · Solo Imagen/Texto→Vídeo)",
         "category": "lora",
         "lora_target": "video",
+        "lora_group": "speed",
         "compatible_models": ["wan22-ti2v-5b"],
         "incompatible_submodes": ["flf2v"],
         "causal_attention": True,
@@ -305,6 +761,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "name": "🚀 LoRA FastWan 6 Pasos para Wan 2.2 TI2V-5B (Hao AI Lab DMD · Fidelidad Foto)",
         "category": "lora",
         "lora_target": "video",
+        "lora_group": "speed",
         "compatible_models": ["wan22-ti2v-5b"],
         "incompatible_submodes": ["flf2v"],
         "causal_attention": False,
@@ -341,6 +798,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "name": "👻 LoRA FusionX Phantom 6 Pasos para Wan 2.1 VACE 14B (★ Oficial Producción Rápida Frame a Frame)",
         "category": "lora",
         "lora_target": "video",
+        "lora_group": "speed",
         "compatible_models": ["wan21-vace-14b-fp8"],
         "incompatible_submodes": [],
         "causal_attention": False,
@@ -381,6 +839,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "name": "🚀 LoRA FusionX I2V/FLF2V 6–8 Pasos para Wan 2.1 14B (FLF2V 720P / Fun-InP 14B / I2V 14B)",
         "category": "lora",
         "lora_target": "video",
+        "lora_group": "speed",
         "compatible_models": [
             "wan21-flf2v-14b-fp8",
             "wan21-fun-inp-14b-fp8",
@@ -426,6 +885,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "name": "⚡ LoRA LightX2V Bidireccional 6 Pasos para Wan 2.1 14B (FLF2V 720P / Fun-InP 14B / I2V 14B)",
         "category": "lora",
         "lora_target": "video",
+        "lora_group": "speed",
         "compatible_models": [
             "wan21-flf2v-14b-fp8",
             "wan21-fun-inp-14b-fp8",
@@ -471,6 +931,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "name": "⚡ LoRA LightX2V v2 Bidireccional 6 Pasos para Wan 2.1 VACE 14B (Frame a Frame / I2V / T2V)",
         "category": "lora",
         "lora_target": "video",
+        "lora_group": "speed",
         "compatible_models": ["wan21-vace-14b-fp8"],
         "incompatible_submodes": [],
         "causal_attention": False,
@@ -511,6 +972,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "name": "⚡ LoRA Bidireccional v2 (6–8 Pasos) para Modelos 1.3B (VACE / Fun-InP / SkyReels / T2V)",
         "category": "lora",
         "lora_target": "video",
+        "lora_group": "speed",
         "compatible_models": [
             "wan21-vace-1.3b",
             "wan21-fun-1.3b-inp",
@@ -555,6 +1017,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "name": "🚀 LoRA rCM NVLabs (6–8 Pasos) para Modelos 1.3B (VACE / Fun-InP / SkyReels / T2V)",
         "category": "lora",
         "lora_target": "video",
+        "lora_group": "speed",
         "compatible_models": [
             "wan21-vace-1.3b",
             "wan21-fun-1.3b-inp",
@@ -591,6 +1054,390 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "subdir": "lora_rcm",
                 "filename": "LoRAs/rCM/Wan_2_1_T2V_1_3B_480p_rCM_lora_average_rank_64_bf16.safetensors",
                 "verify_file": "LoRAs/rCM/Wan_2_1_T2V_1_3B_480p_rCM_lora_average_rank_64_bf16.safetensors",
+            }
+        ],
+    },
+    # ==================== LoRAs DE VÍDEO: COHERENCIA DE PERSONAJES, ENTORNO, CALIDAD Y CÁMARA ====================
+    {
+        "id": "lora-wan21-14b-unianimate-char",
+        "name": "👤🎬 LoRA UniAnimate 14B — Coherencia de Identidad y Anatomía en Movimiento (Wan 2.1 14B)",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "character",
+        "stackable_creative": True,
+        "compatible_models": [
+            "wan21-vace-14b-fp8",
+            "wan21-flf2v-14b-fp8",
+            "wan21-fun-inp-14b-fp8",
+            "wan21-i2v-14b-480p",
+            "wan21-flf2v-14b-720p",
+        ],
+        "default_lora_scale": 0.65,
+        "is_default": False,
+        "parent_model": "wan21-vace-14b-fp8",
+        "adapter_name": "wan21_unianimate_char",
+        "badge": "★ Coherencia Personaje 14B · Apilable",
+        "description": (
+            "Adaptador UniAnimate entrenado para preservar los rasgos faciales, proporciones corporales y ropa del personaje "
+            "durante giros, caminatas y gestos complejos en toda la familia Wan 2.1 14B. Apilable junto a FusionX / LightX2V."
+        ),
+        "estimated_gb": 1.23,
+        "min_vram_gb": 0.5,
+        "recommended_vram_gb": 1.2,
+        "l4_seconds_hint": "Apilable (+0 s extra)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Kijai/WanVideo_comfy",
+                "subdir": "lora_unianimate_14b",
+                "filename": "UniAnimate-Wan2.1-14B-Lora-12000-fp16.safetensors",
+                "verify_file": "UniAnimate-Wan2.1-14B-Lora-12000-fp16.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-wan21-14b-moviigen-cinema",
+        "name": "🏛️🎥 LoRA MoviiGen Cinema 14B — Coherencia Espacial de Entorno y Luz de Cine (Wan 2.1 14B)",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "environment",
+        "stackable_creative": True,
+        "compatible_models": [
+            "wan21-vace-14b-fp8",
+            "wan21-flf2v-14b-fp8",
+            "wan21-fun-inp-14b-fp8",
+            "wan21-i2v-14b-480p",
+            "wan21-flf2v-14b-720p",
+        ],
+        "default_lora_scale": 0.60,
+        "is_default": False,
+        "parent_model": "wan21-vace-14b-fp8",
+        "adapter_name": "wan21_moviigen_cinema",
+        "badge": "★ Coherencia Entorno Cine · 317 MB",
+        "description": (
+            "Entrenado para composición cinematográfica 1080p/720p estable: evita que paredes, mesas o fondos se deformen "
+            "cuando la cámara hace paneos o travellings en modelos Wan 2.1 14B. Apilable encima de tu LoRA rápido de 6 pasos."
+        ),
+        "estimated_gb": 0.32,
+        "min_vram_gb": 0.3,
+        "recommended_vram_gb": 0.8,
+        "l4_seconds_hint": "Apilable (+0 s extra)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Kijai/WanVideo_comfy",
+                "subdir": "lora_moviigen_14b",
+                "filename": "Wan21_T2V_14B_MoviiGen_lora_rank32_fp16.safetensors",
+                "verify_file": "Wan21_T2V_14B_MoviiGen_lora_rank32_fp16.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-wan21-14b-detailz",
+        "name": "💎 LoRA Detailz Wan 14B — Nitidez de Rostros, Ropa y Escenario (Anti-Suavizado)",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "quality",
+        "stackable_creative": True,
+        "compatible_models": [
+            "wan21-vace-14b-fp8",
+            "wan21-flf2v-14b-fp8",
+            "wan21-fun-inp-14b-fp8",
+            "wan21-i2v-14b-480p",
+            "wan21-flf2v-14b-720p",
+        ],
+        "default_lora_scale": 0.55,
+        "is_default": False,
+        "parent_model": "wan21-vace-14b-fp8",
+        "adapter_name": "wan21_detailz",
+        "badge": "★ Potenciador Nitidez 14B · 307 MB",
+        "description": (
+            "Recupera micro-detalle facial, poros, texturas de telas y nitidez del escenario que suelen perderse al usar "
+            "destilaciones rápidas de 6 pasos en Wan 2.1 14B."
+        ),
+        "estimated_gb": 0.31,
+        "min_vram_gb": 0.3,
+        "recommended_vram_gb": 0.8,
+        "l4_seconds_hint": "Apilable (+0 s extra)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Thelocallab/WAN-2.1-loras",
+                "subdir": "lora_detailz_wan",
+                "filename": "detailz-wan.safetensors",
+                "verify_file": "detailz-wan.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-wan21-14b-snapshot-real",
+        "name": "📱 LoRA Realismo Cámara Orgánica 14B (Movimiento y Piel de Vídeo Real · Anti-CGI)",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "quality",
+        "stackable_creative": True,
+        "compatible_models": [
+            "wan21-vace-14b-fp8",
+            "wan21-flf2v-14b-fp8",
+            "wan21-fun-inp-14b-fp8",
+            "wan21-i2v-14b-480p",
+            "wan21-flf2v-14b-720p",
+        ],
+        "default_lora_scale": 0.60,
+        "trigger_phrase": "natural handheld camera realism, authentic skin texture",
+        "is_default": False,
+        "parent_model": "wan21-vace-14b-fp8",
+        "adapter_name": "wan21_snapshot_real",
+        "badge": "Realismo Documental 14B · 307 MB",
+        "description": (
+            "Elimina el brillo sintético CGI en vídeos Wan 2.1 14B logrando aspecto de grabación real, tonos de piel naturales "
+            "y micro-gestos creíbles para escenas habladas."
+        ),
+        "estimated_gb": 0.31,
+        "min_vram_gb": 0.3,
+        "recommended_vram_gb": 0.8,
+        "l4_seconds_hint": "Apilable (+0 s extra)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Thelocallab/WAN-2.1-loras",
+                "subdir": "lora_wan_snapshot",
+                "filename": "WAN2.1_SmartphoneSnapshotPhotoReality_v1_by-AI_Characters.safetensors",
+                "verify_file": "WAN2.1_SmartphoneSnapshotPhotoReality_v1_by-AI_Characters.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-wan21-1.3b-classic-anim",
+        "name": "🎨 LoRA Animación Clásica Coherente 1.3B (Estilo Dibujo Clásico para VACE / T2V / SkyReels 1.3B)",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "style",
+        "stackable_creative": True,
+        "compatible_models": [
+            "wan21-vace-1.3b",
+            "wan21-fun-1.3b-inp",
+            "skyreels-v2-i2v-1.3b",
+            "wan21-t2v-1.3b",
+        ],
+        "default_lora_scale": 0.80,
+        "trigger_phrase": "steamboat willie style, golden era animation",
+        "is_default": False,
+        "parent_model": "wan21-vace-1.3b",
+        "adapter_name": "wan21_1_3b_classic_anim",
+        "badge": "Estilo Animación 1.3B · 45 MB",
+        "description": (
+            "LoRA ligero oficial de ejemplo Diffusers (CC0, 45 MB) para estilizar clips de la familia 1.3B con estética "
+            "coherente de animación clásica entintada. Apilable con el LoRA Bidireccional 1.3B."
+        ),
+        "estimated_gb": 0.05,
+        "min_vram_gb": 0.1,
+        "recommended_vram_gb": 0.3,
+        "l4_seconds_hint": "Apilable (+0 s extra)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "benjamin-paine/steamboat-willie-1.3b",
+                "subdir": "lora_classic_anim",
+                "filename": "steamboat-willie.bf16.safetensors",
+                "verify_file": "steamboat-willie.bf16.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-wan22-a14b-svi-continuity",
+        "name": "👤🏛️ LoRA Stable-Video-Infinity v2 PRO (Continuidad Larga de Personaje y Escena · Wan 2.2 A14B)",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "character",
+        "stackable_creative": True,
+        "compatible_models": ["wan22-i2v-a14b"],
+        "default_lora_scale": 0.85,
+        "is_default": False,
+        "parent_model": "wan22-i2v-a14b",
+        "adapter_name": "wan22_svi_pro",
+        "badge": "★ Continuidad Infinita Wan 2.2 · 1.23 GB",
+        "description": (
+            "Evita la deriva de color, la mutación de rostros y la degradación del escenario al encadenar múltiples clips "
+            "consecutivos (extend video) sobre Wan 2.2 I2V-A14B."
+        ),
+        "estimated_gb": 1.23,
+        "min_vram_gb": 0.6,
+        "recommended_vram_gb": 1.5,
+        "l4_seconds_hint": "Apilable en A100/H100",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Kijai/WanVideo_comfy",
+                "subdir": "lora_svi_pro",
+                "filename": "LoRAs/Stable-Video-Infinity/v2.0/SVI_v2_PRO_Wan2.2-I2V-A14B_HIGH_lora_rank_128_fp16.safetensors",
+                "verify_file": "LoRAs/Stable-Video-Infinity/v2.0/SVI_v2_PRO_Wan2.2-I2V-A14B_HIGH_lora_rank_128_fp16.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-wan22-a14b-lightx2v-4step",
+        "name": "⚡ LoRA LightX2V 4–6 Pasos para Wan 2.2 I2V-A14B (Aceleración 10× en A100/H100)",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "speed",
+        "compatible_models": ["wan22-i2v-a14b"],
+        "recommended_steps": 6,
+        "min_safe_steps": 4,
+        "max_steps": 8,
+        "recommended_cfg": 1.0,
+        "default_lora_scale": 0.90,
+        "is_default": False,
+        "parent_model": "wan22-i2v-a14b",
+        "adapter_name": "wan22_a14b_lightx2v",
+        "badge": "⚡ Turbo 4–6p Wan 2.2 A14B · 631 MB",
+        "description": (
+            "Destilación oficial LightX2V Rank 64 BF16 para acelerar Wan 2.2 I2V-A14B de 40 pasos a solo 4–6 pasos @ CFG 1.0."
+        ),
+        "estimated_gb": 0.63,
+        "min_vram_gb": 0.5,
+        "recommended_vram_gb": 1.2,
+        "l4_seconds_hint": "~55 s en A100 (6 pasos)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Kijai/WanVideo_comfy",
+                "subdir": "lora_wan22_a14b_lx2v",
+                "filename": "LoRAs/Wan22_Lightx2v/Wan_2_2_I2V_A14B_HIGH_lightx2v_4step_lora_v1030_rank_64_bf16.safetensors",
+                "verify_file": "LoRAs/Wan22_Lightx2v/Wan_2_2_I2V_A14B_HIGH_lightx2v_4step_lora_v1030_rank_64_bf16.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-ltx13b-detailer-ic",
+        "name": "💎 LoRA Oficial Lightricks IC-Detailer para LTX-Video 13B (Nitidez Facial y Entorno)",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "quality",
+        "stackable_creative": True,
+        "compatible_models": ["ltx-video-13b-distilled"],
+        "default_lora_scale": 0.75,
+        "is_default": False,
+        "parent_model": "ltx-video-13b-distilled",
+        "adapter_name": "ltx13b_ic_detailer",
+        "badge": "★ Oficial Lightricks 13B · Nitidez HD",
+        "description": (
+            "Adaptador oficial en formato Diffusers de Lightricks para LTX-Video 0.9.8 13B Distilled: refuerza la definición "
+            "de rostros, manos y detalles arquitectónicos manteniendo sus 8 pasos ultrarrápidos (~45 s en L4)."
+        ),
+        "estimated_gb": 1.36,
+        "min_vram_gb": 0.6,
+        "recommended_vram_gb": 1.4,
+        "l4_seconds_hint": "Mantiene 8 pasos (~48 s)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Lightricks/LTX-Video-ICLoRA-detailer-13b-0.9.8",
+                "subdir": "lora_ltx13b_detailer",
+                "filename": "ltxv-098-ic-lora-detailer-diffusers.safetensors",
+                "verify_file": "ltxv-098-ic-lora-detailer-diffusers.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-ltx2-detailer-ic",
+        "name": "💎 LoRA Oficial Lightricks IC-Detailer para LTX-2 19B Audio+Vídeo",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "quality",
+        "stackable_creative": True,
+        "compatible_models": ["ltx-2-19b-av"],
+        "default_lora_scale": 0.80,
+        "is_default": False,
+        "parent_model": "ltx-2-19b-av",
+        "adapter_name": "ltx2_ic_detailer",
+        "badge": "Oficial Lightricks LTX-2 · Detalle Cine",
+        "description": (
+            "Refinador oficial de alta definición para LTX-2 19B que estabiliza texturas finas de piel, cabello y entorno."
+        ),
+        "estimated_gb": 2.62,
+        "min_vram_gb": 0.8,
+        "recommended_vram_gb": 1.8,
+        "l4_seconds_hint": "Apilable en LTX-2",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Lightricks/LTX-2-19b-IC-LoRA-Detailer",
+                "subdir": "lora_ltx2_detailer",
+                "filename": "ltx-2-19b-ic-lora-detailer.safetensors",
+                "verify_file": "ltx-2-19b-ic-lora-detailer.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-ltx2-cam-static",
+        "name": "🏛️🎥 LoRA Oficial Cámara Estática en Trípode para LTX-2 19B (Entorno Fijo para Diálogos)",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "camera",
+        "stackable_creative": True,
+        "compatible_models": ["ltx-2-19b-av"],
+        "default_lora_scale": 0.90,
+        "is_default": False,
+        "parent_model": "ltx-2-19b-av",
+        "adapter_name": "ltx2_cam_static",
+        "badge": "Oficial LTX-2 · Trípode Fijo · 327 MB",
+        "description": (
+            "Bloquea la cámara en trípode fijo eliminando derivas del fondo mientras los personajes conversan y gesticulan "
+            "(ideal para escenas de diálogo y LipSync HD)."
+        ),
+        "estimated_gb": 0.33,
+        "min_vram_gb": 0.3,
+        "recommended_vram_gb": 0.8,
+        "l4_seconds_hint": "Apilable (+0 s extra)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Lightricks/LTX-2-19b-LoRA-Camera-Control-Static",
+                "subdir": "lora_ltx2_static",
+                "filename": "ltx-2-19b-lora-camera-control-static.safetensors",
+                "verify_file": "ltx-2-19b-lora-camera-control-static.safetensors",
+            }
+        ],
+    },
+    {
+        "id": "lora-ltx2-cam-dolly-in",
+        "name": "🎯 LoRA Oficial Cámara Dolly-In Cinematográfico para LTX-2 19B",
+        "category": "lora",
+        "lora_target": "video",
+        "lora_group": "camera",
+        "stackable_creative": True,
+        "compatible_models": ["ltx-2-19b-av"],
+        "default_lora_scale": 0.90,
+        "is_default": False,
+        "parent_model": "ltx-2-19b-av",
+        "adapter_name": "ltx2_cam_dolly_in",
+        "badge": "Oficial LTX-2 · Dolly-In · 327 MB",
+        "description": (
+            "Control físico de cámara Dolly-In entrenado por Lightricks para acercamiento rectilíneo con paralaje 3D coherente."
+        ),
+        "estimated_gb": 0.33,
+        "min_vram_gb": 0.3,
+        "recommended_vram_gb": 0.8,
+        "l4_seconds_hint": "Apilable (+0 s extra)",
+        "engine": "video_lora",
+        "artifacts": [
+            {
+                "role": "lora",
+                "repo_id": "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-In",
+                "subdir": "lora_ltx2_dolly_in",
+                "filename": "ltx-2-19b-lora-camera-control-dolly-in.safetensors",
+                "verify_file": "ltx-2-19b-lora-camera-control-dolly-in.safetensors",
             }
         ],
     },
@@ -2403,16 +3250,42 @@ class CatalogManager:
         )
 
         is_vid_l = category == "lora" and eng == "video_lora"
+        custom_compat: Optional[List[str]] = None
+        if category == "lora":
+            if is_vid_l:
+                if "ltx-2" in low_repo or "ltx2" in low_repo:
+                    custom_compat = ["ltx-2-19b-av"]
+                elif "ltx" in low_repo:
+                    custom_compat = ["ltx-video-13b-distilled", "ltx-video-2b"]
+                elif "14b" in low_repo:
+                    custom_compat = [
+                        "wan21-vace-14b-fp8",
+                        "wan21-flf2v-14b-fp8",
+                        "wan21-fun-inp-14b-fp8",
+                        "wan21-i2v-14b-480p",
+                        "wan21-flf2v-14b-720p",
+                        "wan22-i2v-a14b",
+                    ]
+                else:
+                    custom_compat = ["wan22-ti2v-5b", "wan21-vace-1.3b", "wan21-t2v-1.3b", "ltx-video-2b"]
+            elif "sdxl" in low_repo:
+                custom_compat = ["sdxl-turbo-fp16"]
+            else:
+                custom_compat = ["qwen-image-edit-2511-pack", "qwen-image-2512-pack"]
+
         entry: Dict[str, Any] = {
             "id": slug,
             "name": name.strip() or repo_id,
             "category": category,
             "lora_target": "video" if is_vid_l else ("image" if category == "lora" else None),
-            "compatible_models": ["wan22-ti2v-5b", "wan21-vace-1.3b", "wan21-t2v-1.3b", "ltx-video-2b"] if is_vid_l else None,
+            "lora_group": "quality" if category == "lora" else None,
+            "stackable_creative": True if is_vid_l else None,
+            "default_lora_scale": 0.85 if category == "lora" else None,
+            "compatible_models": custom_compat,
             "is_default": False,
             "is_custom": True,
             "parent_model": "wan22-ti2v-5b" if is_vid_l else ("qwen-image-edit-2511-pack" if category == "lora" else None),
-            "adapter_name": adapter_name or slug[:20],
+            "adapter_name": adapter_name or slug[:24],
             "badge": "Importado de HF",
             "video_modes": ["i2v", "t2v"] if category == "video" else None,
             "description": f"Repositorio Hugging Face: {repo_id}" + (f" ({clean_fn})" if clean_fn else ""),
