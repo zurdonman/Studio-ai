@@ -3407,6 +3407,7 @@
       $("btn-open-mcp-modal").addEventListener("click", async () => {
         try {
           const info = await api("/api/mcp/info");
+          state.lastMcpInfo = info;
           const cmds = info.commands || {};
           if ($("mcp-cmd-agent-prompt")) $("mcp-cmd-agent-prompt").value = cmds.agent_chat_prompt || "";
           if ($("mcp-url-with-token")) $("mcp-url-with-token").value = info.mcp_url_with_token || "";
@@ -3415,9 +3416,45 @@
           if ($("mcp-cmd-codex-stdio")) $("mcp-cmd-codex-stdio").value = cmds.codex_cli_stdio || "";
           if ($("mcp-cmd-http")) $("mcp-cmd-http").value = cmds.claude_code_http || "";
           if ($("mcp-cmd-json")) $("mcp-cmd-json").value = cmds.mcp_servers_json || "";
+
+          const presets = info.workflow_presets || [];
+          const pSel = $("mcp-preset-select");
+          if (pSel && presets.length > 0) {
+            pSel.innerHTML = presets
+              .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.title)}</option>`)
+              .join("");
+            const syncPresetDesc = () => {
+              const cur = presets.find((x) => x.id === pSel.value) || presets[0];
+              if ($("mcp-preset-desc") && cur) {
+                $("mcp-preset-desc").textContent = `${cur.when_to_use} — ${cur.solves_problem}`;
+              }
+            };
+            pSel.onchange = syncPresetDesc;
+            syncPresetDesc();
+          }
           $("mcp-modal").hidden = false;
         } catch (e) {
           toast(e.message, "error");
+        }
+      });
+    }
+    if ($("btn-copy-mcp-preset-order")) {
+      $("btn-copy-mcp-preset-order").addEventListener("click", async () => {
+        const pid = ($("mcp-preset-select") && $("mcp-preset-select").value) || "coherencia_personajes_entorno_avance";
+        const scene = (($("mcp-preset-scene-input") && $("mcp-preset-scene-input").value) || "").trim() ||
+          "dos personas andando por la calle hablando al atardecer";
+        const guideUrl = (state.lastMcpInfo && state.lastMcpInfo.agent_guide_url) || "";
+        const guideLine = guideUrl ? ` (Si aún no estás conectado, lee primero con curl ${guideUrl}).` : "";
+        const msg =
+          `Usa obligatoriamente la herramienta MCP \`studio_get_workflow_preset\` con \`preset_id="${pid}"\` y ` +
+          `\`scene_description="${scene}"\` antes de generar nada, y ejecuta paso a paso su \`execution_plan\` ` +
+          `respetando todas sus \`golden_rules_mandatory\` (avance espacial real metro a metro sin congelar el fondo, ` +
+          `auditoría \`expect_spatial_progression=true\` y prompt de vídeo \`flf2v\` en 3 vectores).${guideLine}`;
+        try {
+          await navigator.clipboard.writeText(msg);
+          toast("🧭 Orden con Preset copiada para pegar a tu Agente.", "success");
+        } catch (_e) {
+          toast("No se pudo copiar automáticamente.", "error");
         }
       });
     }

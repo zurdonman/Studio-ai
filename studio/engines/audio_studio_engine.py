@@ -36,6 +36,7 @@ from studio.memory_manager import memory_manager
 
 AMBIENCE_PRESETS: Dict[str, str] = {
     "restaurant_warm_murmur": "Ambiente cálido de restaurante/cafetería (murmullo lejano suave y micro-acústica de sala)",
+    "city_street_walk": "Ambiente urbano de calle peatonal (aire exterior estéreo, pasos suaves rítmicos y murmullo urbano lejano)",
     "rain_cozy": "Lluvia suave detrás del cristal / calle húmeda en estéreo",
     "cinematic_warm_pad": "Pad armónico cinematográfico cálido y envolvente",
     "wind_nature": "Brisa natural exterior / aire abierto suave",
@@ -48,6 +49,8 @@ def infer_ambience_preset(prompt: str, preset: str = "auto") -> str:
     if p in AMBIENCE_PRESETS:
         return p
     low = (prompt or "").lower()
+    if any(k in low for k in ("calle", "street", "andando", "caminando", "walking", "acera", "sidewalk", "ciudad", "city", "paseando")):
+        return "city_street_walk"
     if any(k in low for k in ("restaur", "cafe", "café", "bar", "cena", "comiendo", "comida", "charla", "murmur", "chatter", "diner", "table")):
         return "restaurant_warm_murmur"
     if any(k in low for k in ("lluvia", "rain", "tormenta", "storm", "agua", "water")):
@@ -172,6 +175,35 @@ def synthesize_procedural_ambience_wav(
         left = _bandpass_fft(nl, 120.0, 920.0, sample_rate) * swell_l
         right = _bandpass_fft(nr, 120.0, 920.0, sample_rate) * swell_r
         target_peak = 0.30
+
+    elif preset_id == "city_street_walk":
+        # Aire urbano abierto en estéreo + murmullo lejano + pasos suaves rítmicos de paseo (~1.85 pasos/seg)
+        air_l = _bandpass_fft(rng.standard_normal(n_samples).astype(np.float32), 110.0, 1600.0, sample_rate) * 0.24
+        air_r = _bandpass_fft(rng.standard_normal(n_samples).astype(np.float32), 110.0, 1600.0, sample_rate) * 0.24
+        murmur_l = _bandpass_fft(rng.standard_normal(n_samples).astype(np.float32), 260.0, 920.0, sample_rate) * (
+            0.14 * (0.6 + 0.4 * np.sin(2.0 * np.pi * 0.42 * t)).astype(np.float32)
+        )
+        murmur_r = _bandpass_fft(rng.standard_normal(n_samples).astype(np.float32), 260.0, 920.0, sample_rate) * (
+            0.14 * (0.6 + 0.4 * np.sin(2.0 * np.pi * 0.39 * t + 1.1)).astype(np.float32)
+        )
+        left = air_l + murmur_l
+        right = air_r + murmur_r
+        step_interval = 0.54  # cadencia natural caminando conversando
+        step_t = 0.18
+        step_idx = 0
+        while step_t < dur - 0.15:
+            pos = int(step_t * sample_rate)
+            slen = min(int(sample_rate * 0.085), n_samples - pos)
+            if slen > 16:
+                st = np.linspace(0.0, slen / float(sample_rate), slen, endpoint=False, dtype=np.float32)
+                step_noise = _bandpass_fft(rng.standard_normal(slen).astype(np.float32), 140.0, 2200.0, sample_rate)
+                env = np.exp(-st * 42.0).astype(np.float32) * float(rng.uniform(0.045, 0.075))
+                pan = 0.62 if (step_idx % 2 == 0) else 0.38
+                left[pos : pos + slen] += step_noise * env * pan
+                right[pos : pos + slen] += step_noise * env * (1.0 - pan)
+            step_t += step_interval + float(rng.uniform(-0.03, 0.03))
+            step_idx += 1
+        target_peak = 0.22
 
     else:
         # room_tone_clean

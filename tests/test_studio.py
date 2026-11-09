@@ -2347,6 +2347,136 @@ def test_lora_catalog_multi_model_compatibility_and_stacking(temp_studio_env) ->
     ]
 
 
+def test_mcp_agent_workflow_presets_and_anti_static_coherence(temp_studio_env, tmp_path: Path) -> None:
+    """Verifica el Preset MCP `coherencia_personajes_entorno_avance` (andando por la calle hablando), `city_street_walk` y el detector `TOO_STATIC_NEEDS_ADVANCE`."""
+    import json
+    import numpy as np
+
+    from studio.agent_presets import compile_agent_workflow_preset
+    from studio.engines.audio_studio_engine import synthesize_procedural_ambience_wav
+    from studio.engines.coherence_engine import run_coherence_analysis
+
+    client, data_dir = temp_studio_env
+    tok = client.get("/api/mcp/info").json()["token"]
+    hdrs = {"Authorization": f"Bearer {tok}"} if tok else {}
+
+    # 1) Guía /mcp/guia y endpoints REST de presets
+    guia_txt = client.get("/mcp/guia", headers=hdrs).text
+    assert "studio_get_workflow_preset" in guia_txt
+    assert "coherencia_personajes_entorno_avance" in guia_txt
+    assert "expect_spatial_progression" in guia_txt
+
+    r_presets = client.get("/api/mcp/presets").json()
+    assert r_presets["ok"] is True
+    assert len(r_presets["presets"]) >= 6
+
+    # 2) Compilación sobre GPU L4 simulada (22.5 GB VRAM) y llamada vía MCP JSON-RPC
+    plan_l4 = compile_agent_workflow_preset(
+        preset_id="andando_por_la_calle",
+        scene_description="dos amigos andando por la calle hablando al atardecer",
+        num_clips=2,
+        gpu_override={"gpu_name": "NVIDIA L4", "vram_total_gb": 22.5, "has_gpu": True},
+    )
+    assert plan_l4["preset_id"] == "coherencia_personajes_entorno_avance"
+    vstack = plan_l4["detected_gpu"]["selected_video_stack"]
+    assert vstack["model_id"] == "wan21-vace-14b-fp8"
+    assert "lora-wan21-14b-unianimate-char" in vstack["extra_video_lora_ids"]
+    assert "lora-wan21-14b-moviigen-cinema" in vstack["extra_video_lora_ids"]
+
+    steps = plan_l4["execution_plan"]
+    # Paso 1 = Ancla, Paso 2 = Frame 2 con Next Scene, Paso 3 = Frame 3 con [FRAME_1, FRAME_2]
+    assert steps[0]["tool"] == "studio_generate_or_edit_image"
+    assert "qwen-lora-next-scene" in steps[1]["arguments"]["custom_lora_ids"]
+    assert steps[1]["arguments"]["prompt"].startswith("Next Scene:")
+    assert steps[2]["arguments"]["base_image_rel"] == "<FRAME_2_REL>"
+    assert steps[2]["arguments"]["reference_rels"] == ["<FRAME_1_REL>", "<FRAME_2_REL>"]
+    assert steps[3]["tool"] == "studio_analyze_coherence"
+    assert steps[3]["arguments"]["expect_spatial_progression"] is True
+    assert steps[4]["tool"] == "studio_generate_video"
+    assert steps[4]["arguments"]["video_submode"] == "flf2v"
+    assert "Steadicam" in steps[4]["arguments"]["prompt"]
+
+    mcp_resp = client.post(
+        "/mcp",
+        headers=hdrs,
+        json={
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": "studio_get_workflow_preset",
+                "arguments": {
+                    "preset_id": "coherencia_personajes_entorno_avance",
+                    "scene_description": "dos personas andando por la calle hablando",
+                    "num_clips": 2,
+                },
+            },
+        },
+    ).json()["result"]
+    assert mcp_resp["isError"] is False
+    parsed_mcp = json.loads(mcp_resp["content"][0]["text"])
+    assert parsed_mcp["preset_id"] == "coherencia_personajes_entorno_avance"
+
+    # 3) Ambiente urbano `city_street_walk` (0 GB VRAM)
+    street_wav = tmp_path / "street.wav"
+    amb_info = synthesize_procedural_ambience_wav(street_wav, preset="city_street_walk", duration_seconds=3.0)
+    assert street_wav.exists() and street_wav.stat().st_size > 10_000
+    assert amb_info["preset"] == "city_street_walk"
+
+    # 4) Detector anti-estático `TOO_STATIC_NEEDS_ADVANCE` vs fotograma con avance real `PASS`
+    up_dir = data_dir / "uploads"
+    up_dir.mkdir(parents=True, exist_ok=True)
+    # Crear un fotograma ancla con textura nítida de calle y personajes simulados
+    arr_a = np.zeros((360, 640, 3), dtype=np.uint8)
+    arr_a[:, :] = [160, 140, 120]
+    arr_a[60:260, 100:220] = [50, 90, 170]  # edificio / tienda posición A
+    arr_a[110:340, 250:330] = [40, 60, 95]  # personaje izq
+    arr_a[115:340, 360:440] = [185, 165, 130]  # personaje dcha
+    # Añadir detalle de alta frecuencia para superar el filtro Laplaciano de nitidez
+    rng = np.random.default_rng(7)
+    arr_a = np.clip(arr_a.astype(np.int16) + rng.integers(-18, 19, size=arr_a.shape), 0, 255).astype(np.uint8)
+    p_anchor = up_dir / "walk_anchor.png"
+    Image.fromarray(arr_a).save(p_anchor)
+
+    # Fotograma congelado (idéntico al ancla -> debe saltar TOO_STATIC_NEEDS_ADVANCE)
+    p_static = up_dir / "walk_static.png"
+    Image.fromarray(arr_a).save(p_static)
+
+    res_static = run_coherence_analysis(
+        anchor_path=p_anchor,
+        candidate_paths=[p_static],
+        scene_goal="dos personas andando por la calle",
+        mode="fast_cv",
+        expect_spatial_progression=True,
+    )
+    assert res_static["all_consistent"] is False
+    assert res_static["comparisons"][0]["verdict"] == "TOO_STATIC_NEEDS_ADVANCE"
+    rep_args = res_static["comparisons"][0]["recommended_repair_tool_call"]["arguments"]
+    assert "qwen-lora-next-scene" in rep_args["custom_lora_ids"]
+
+    # Fotograma con avance real (la tienda de fondo se desplaza en perspectiva y cambia la zancada, misma paleta y luz)
+    arr_adv = np.zeros((360, 640, 3), dtype=np.uint8)
+    arr_adv[:, :] = [160, 140, 120]
+    arr_adv[80:230, 20:115] = [50, 90, 170]  # tienda desplazada hacia atrás/izquierda
+    arr_adv[70:250, 480:600] = [65, 115, 85]  # árbol nuevo entrando en plano
+    arr_adv[105:345, 235:320] = [40, 60, 95]  # personaje izq avanzando
+    arr_adv[110:345, 370:455] = [185, 165, 130]  # personaje dcha avanzando
+    arr_adv = np.clip(arr_adv.astype(np.int16) + rng.integers(-18, 19, size=arr_adv.shape), 0, 255).astype(np.uint8)
+    p_adv = up_dir / "walk_advanced.png"
+    Image.fromarray(arr_adv).save(p_adv)
+
+    res_adv = run_coherence_analysis(
+        anchor_path=p_anchor,
+        candidate_paths=[p_adv],
+        scene_goal="dos personas andando por la calle",
+        mode="fast_cv",
+        expect_spatial_progression=True,
+    )
+    assert res_adv["all_consistent"] is True
+    assert res_adv["comparisons"][0]["verdict"] == "PASS"
+
+
+
 
 
 

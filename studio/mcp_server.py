@@ -25,6 +25,11 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from studio.agent_presets import (
+    AGENT_PRESET_SUMMARY_CATALOG,
+    compile_agent_workflow_preset,
+    list_agent_workflow_presets,
+)
 from studio.catalog import catalog_manager, evaluate_gpu_tier, resolve_gpu_profile
 from studio.config import (
     AUDIO_OUT_DIR,
@@ -120,7 +125,7 @@ def get_mcp_connection_details(request: Optional[Request] = None) -> Dict[str, A
     termux_one_liner = f'{curl_bridge} && python3 studio_mcp.py --cli studio_get_state_and_manual'
     agent_chat_prompt = (
         f"Conéctate a mi servidor Studio IA en Google Colab leyendo primero con curl este enlace oficial "
-        f"(incluye URL, token de sesión y el manual obligatorio sin inventar parámetros): {agent_guide_url}"
+        f"(incluye URL, token de sesión, presets `studio_get_workflow_preset` y el manual obligatorio sin inventar parámetros): {agent_guide_url}"
     )
     claude_stdio = (
         f'{curl_bridge} && (claude mcp remove studio-ia >/dev/null 2>&1 || true) && '
@@ -189,8 +194,14 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
    - En tu primera acción de la sesión, llama SIEMPRE a `studio_get_state_and_manual`.
    - Comprueba la GPU activa (ej. T4 15 GB, L4 22.5 GB, A100 40/80 GB), la VRAM libre, el disco libre (`free_disk_gb`) y los archivos existentes.
 
-2. CERO INVENCIÓN DE MODELOS O PARÁMETROS:
-   - Antes de lanzar una tarea nueva si dudas qué modelo o LoRA elegir, llama a `studio_recommend_pipeline(task=..., priority=...)`. Te devolverá la combinación exacta verificada para la GPU actual.
+2. PRESETS OFICIALES DE FLUJO Y CERO INVENCIÓN DE PARÁMETROS (OBLIGATORIO):
+   - **SIEMPRE QUE EL USUARIO PIDA UNA ESCENA COHERENTE, PERSONAJES ANDANDO/AVANZANDO, DIÁLOGO O VARIOS PLANOS**, llama PRIMERO a `studio_get_workflow_preset` pasando la descripción de la escena (`scene_description`) y el `preset_id` adecuado:
+     * `"coherencia_personajes_entorno_avance"` → **OBLIGATORIO cuando los personajes van andando/caminando por la calle, pasillo o parque hablando** (evita el error de movimiento estático forzando avance real metro a metro con LoRA `Next Scene`, zancada alterna, paralaje de calle y prompt de vídeo en 3 vectores).
+     * `"coherencia_escena_fija_dialogo"` → cuando conversan sentados/quietos en un mismo lugar (restaurante, mesa, sofá).
+     * `"cambio_angulo_3d_mismo_personaje"` → plano/contraplano y rotación de cámara 3D (`Multiple-Angles 3D`).
+     * `"corto_1_minuto_multiescena"` → cortos coherentes de 30–60 s (Casting Vault + lote de keyframes + lote de vídeo + BSO Auto-Ducking).
+     * `"edicion_fotografica_relight_cine"` → edición fotográfica pro, re-iluminación (`AnyLight` + `Relight`) y piel realista.
+   - Si dudas qué modelo suelto elegir, llama también a `studio_recommend_pipeline(task=..., priority=...)`.
    - En `studio_generate_video` y `studio_generate_or_edit_image` mantén `use_official_defaults=true` (valor por defecto): Studio IA aplica automáticamente `steps`, `guidance_scale`, `video_lora_scale`, `width`, `height` y `fps` óptimos del fabricante.
 
 3. REGLAS ESTRICTAS DE VÍDEO Y «FRAME A FRAME» (INICIO → FIN):
@@ -208,12 +219,16 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
      d) Prototipo rápido o GPU T4 (~25 s):
         `model_id="wan21-vace-1.3b"` + `video_lora_id="lora-wan21-1.3b-bidirect2"`
 
-4. CONSISTENCIA ESTRICTA DE PERSONAJES EN SECUENCIAS / VARIOS FOTOGRAMAS (OBLIGATORIO):
-   - NUNCA generes el Fotograma 2, 3, 4... desde cero (`Text-to-Image` sin referencia) cuando deban salir las mismas personas o el mismo lugar (ej. personas comiendo en un restaurante), porque cada llamada suelta inventará caras y ropa distintas.
-   - Sigue SIEMPRE este protocolo de 3 pasos para secuencias coherentes:
-     1) **Fotograma 1 = ANCLA MAESTRA (`anchor_image_rel`):** Genera únicamente el Fotograma 1 desde texto (o usa la foto subida por el usuario).
-     2) **Fotogramas 2..N = EDICIÓN ANCLADA (`qwen-image-edit-2511-pack`):** Llama a `studio_generate_or_edit_image` pasando SIEMPRE `model_id="qwen-image-edit-2511-pack"`, `base_image_rel=<anchor_image_rel>` y `reference_rels=[<anchor_image_rel>]`, pidiendo conservar exactamente los mismos rostros, peinados, ropa, mesa e iluminación y cambiar SOLO la pose/acción de ese instante.
-     3) **AUDITORÍA DE COHERENCIA (`studio_analyze_coherence`):** Antes de renderizar vídeo pesado, llama a `studio_analyze_coherence(anchor_image_rel=<anchor>, candidate_image_rels=[...], mode="hybrid_auto")` (combina OpenCV fotométrico 0.1s + Qwen2.5-VL-3B 4-bit semántico). Si algún fotograma sale `verdict="NEEDS_REPAIR"`, ejecuta directamente el `recommended_repair_tool_call` que te devuelve la herramienta para corregirlo.
+4. CONSISTENCIA ESTRICTA DE PERSONAJES Y AVANCE ESPACIAL REAL (PROHIBIDO EL MOVIMIENTO ESTÁTICO):
+   - NUNCA generes el Fotograma 2, 3, 4... desde cero (`Text-to-Image` sin referencia) cuando deban salir las mismas personas, porque cada llamada suelta inventará caras y ropa distintas.
+   - DISTINGUE SIEMPRE ENTRE **ESCENA FIJA** Y **ESCENA EN AVANCE (ej. dos personas andando por la calle hablando)**:
+     A) **SI VAN ANDANDO / AVANZANDO POR LA CALLE (`coherencia_personajes_entorno_avance`):**
+        1) **Fotograma 1 (Ancla en Punto A):** Usa `plano americano (knee-up) o cuerpo entero` con elementos claros de profundidad en la calle (escaparates, árboles, farolas, acera) y `custom_lora_ids=["qwen-lora-skin-realism", "qwen-lora-flatlog-cinema"]`.
+        2) **Fotograma 2 (Punto B, 4 metros más adelante — ¡PROHIBIDO CONGELAR EL FONDO!):** Pasa `base_image_rel=FRAME_1`, `reference_rels=[FRAME_1]`, `custom_lora_ids=["qwen-lora-next-scene", "qwen-lora-skin-realism", "qwen-lora-anylight-env"]` y empieza el prompt con `"Next Scene:"` exigiendo **pierna contraria adelantada**, nuevo gesto de conversación y que **las tiendas/farolas del fondo retrocedan 4 metros en perspectiva** manteniendo los mismos rostros, ropa y luz. (Para un Fotograma 3 usa `base_image_rel=FRAME_2` y `reference_rels=[FRAME_1, FRAME_2]`).
+        3) **Auditoría Anti-Estática (`studio_analyze_coherence`):** Pasa `expect_spatial_progression=true`. Si devuelve `"TOO_STATIC_NEEDS_ADVANCE"` o `"NEEDS_REPAIR"`, ejecuta el `recommended_repair_tool_call` devuelto antes de animar.
+        4) **Prompt de Vídeo en 3 Vectores (`studio_generate_video` en `flf2v`):** Apila `extra_video_lora_ids=["lora-wan21-14b-unianimate-char", "lora-wan21-14b-moviigen-cinema"]` (en GPUs 14B) y redacta SIEMPRE los 3 vectores en el prompt: **(1) Steadicam retrocediendo a velocidad de paseo**, **(2) locomoción continua de piernas/cuerpo + gestos al hablar**, y **(3) paralaje 3D de acera, escaparates y árboles deslizándose detrás**.
+     B) **SI ESTÁN SENTADOS / EN ESCENARIO FIJO (`coherencia_escena_fija_dialogo`):**
+        1) Fotograma 1 = Ancla; Fotogramas 2..N con `base_image_rel=FRAME_1` + `reference_rels=[FRAME_1]` pidiendo conservar la misma mesa/pared/luz y cambiar solo postura/gesto, seguido de `studio_analyze_coherence(expect_spatial_progression=false)`.
 
 5. LIPSYNC HD MULTI-PERSONAJE, MÚSICA, SONIDO DE FONDO Y MEZCLA FFMPEG CON AUTO-DUCKING:
    - Para que los personajes MUEVAN LA BOCA en sincronía real con las voces (sobre una foto o sobre un vídeo generado con Wan 14B):
@@ -558,6 +573,59 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                     },
                 },
                 "required": ["task"],
+            },
+        },
+        {
+            "name": "studio_get_workflow_preset",
+            "description": (
+                "★ DIRECTOR TÉCNICO DE PRESETS PARA AGENTES (LLÁMALO SIEMPRE ANTES DE ESCENAS COHERENTES O DE AVANCE): "
+                "Compila un plan paso a paso listo para ejecutar adaptado a la GPU real de Colab, con apilamiento Multi-LoRA, "
+                "fórmulas de keyframes anti-estáticos (ej. dos personas andando por la calle hablando avanzando metro a metro "
+                "con LoRA `Next Scene`), auditoría `expect_spatial_progression=true`, prompts de vídeo `flf2v` en 3 vectores, "
+                "voces TTS, LipSync HD por turnos y ambiente exterior con Auto-Ducking."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "preset_id": {
+                        "type": "string",
+                        "enum": ["list"] + list(AGENT_PRESET_SUMMARY_CATALOG.keys()) + ["auto"],
+                        "default": "coherencia_personajes_entorno_avance",
+                        "description": (
+                            "Usa `'coherencia_personajes_entorno_avance'` para personajes caminando/avanzando por una calle o entorno; "
+                            "`'coherencia_escena_fija_dialogo'` para conversaciones en mesa/interior; `'cambio_angulo_3d_mismo_personaje'` "
+                            "para plano/contraplano; `'corto_1_minuto_multiescena'` para clips de 30–60s; `'edicion_fotografica_relight_cine'` "
+                            "para relight/piel; `'auto'` para detección automática según `scene_description`; o `'list'` para listar todos."
+                        ),
+                    },
+                    "scene_description": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Descripción de la escena pedida por el usuario (ej. 'dos amigos andando por la calle hablando al atardecer').",
+                    },
+                    "characters_description": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Opcional: rasgos físicos y ropa de los personajes izquierdo y derecho para fijarlos en cada paso.",
+                    },
+                    "dialogue_lines": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Opcional: frases de diálogo de cada personaje para incluirlas en el plan de TTS + LipSync.",
+                    },
+                    "num_clips": {
+                        "type": "integer",
+                        "default": 2,
+                        "minimum": 1,
+                        "maximum": 12,
+                        "description": "Número de tramos de vídeo encadenados de ~5s (ej. 1 = 5s, 2 = 10s continuos, 12 = 60s).",
+                    },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "enum": ["16:9", "9:16", "1:1"],
+                        "default": "16:9",
+                    },
+                },
             },
         },
         {
@@ -988,6 +1056,15 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                         "minimum": 45.0,
                         "maximum": 95.0,
                         "description": "Puntuación mínima (0-100) para dar por válido (`PASS`) un fotograma.",
+                    },
+                    "expect_spatial_progression": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Ponlo en `true` SIEMPRE que los personajes deban avanzar espacialmente entre fotogramas "
+                            "(ej. andando por la calle hablando). Detecta si el fotograma quedó congelado en el sitio "
+                            "(`TOO_STATIC_NEEDS_ADVANCE`) sin penalizar el paralaje natural del fondo."
+                        ),
                     },
                     "wait": {"type": "boolean", "default": True},
                 },
@@ -1552,7 +1629,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         for k, v in args.items()
     }
     colab_console_log(
-        f"[MCP → Studio IA] Agente ejecutó «{name}» · args={json.dumps(compact_args, ensure_ascii=False)[:240]}",
+        f"[MCP → Studio IA] Agente ejecutó «{name}» · args={json.dumps(compact_args, ensure_ascii=False)[:650]}",
         icon="🤖",
     )
 
@@ -1576,17 +1653,37 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "loaded_in_vram": loaded,
             "downloaded_on_disk": downloaded_models,
             "active_jobs": job_manager.list_jobs(limit=5, include_logs=False),
+            "available_workflow_presets": list_agent_workflow_presets(),
             "golden_rules": [
-                "Llama a `studio_recommend_pipeline` si dudas qué modelo o LoRA usar.",
-                "En `studio_generate_video` deja `use_official_defaults=true` para no inventar pasos/CFG.",
-                "En `flf2v` pasa siempre `image_rel` + `end_image_rel` (o rutas locales en el puente) y usa solo modelos/LoRAs bidireccionales.",
+                "ANTES de generar escenas de personajes caminando/hablando, secuencias coherentes o cortos, llama SIEMPRE a `studio_get_workflow_preset` (ej. `preset_id='coherencia_personajes_entorno_avance'`).",
+                "En escenas donde los personajes avanzan (ej. andando por la calle), NUNCA congeles el fondo entre fotogramas: usa `qwen-lora-next-scene` + zancada alterna + `expect_spatial_progression=true` en `studio_analyze_coherence`.",
+                "En `studio_generate_video` deja `use_official_defaults=true` e incluye los 3 vectores de movimiento (cámara + locomoción de personajes + paralaje de entorno).",
             ],
         }
         if bool(args.get("include_recent_assets", True)):
             payload["recent_assets"] = _list_assets_summary(bucket_filter="all", limit_per_bucket=8)
         return _ok_result(payload)
 
-    # 2. Oráculo de recomendación
+    # 2. Oráculo de recomendación y Presets Compilados de Flujo para Agentes
+    if name == "studio_get_workflow_preset":
+        pid_raw = str(args.get("preset_id") or "coherencia_personajes_entorno_avance").strip()
+        if pid_raw.lower() == "list":
+            return _ok_result({"ok": True, "presets": list_agent_workflow_presets()})
+        compiled_plan = compile_agent_workflow_preset(
+            preset_id=pid_raw,
+            scene_description=str(args.get("scene_description") or ""),
+            characters_description=str(args.get("characters_description") or ""),
+            dialogue_lines=list(args.get("dialogue_lines") or []),
+            num_clips=int(args.get("num_clips") or 2),
+            aspect_ratio=str(args.get("aspect_ratio") or "16:9"),
+        )
+        colab_console_log(
+            f"[MCP Preset] Compilado «{compiled_plan['preset_id']}» ({len(compiled_plan.get('execution_plan', []))} fases · "
+            f"stack={compiled_plan['detected_gpu']['selected_video_stack']['model_id']})",
+            icon="🧭",
+        )
+        return _ok_result(compiled_plan)
+
     if name == "studio_recommend_pipeline":
         task = str(args.get("task") or "video_flf2v")
         priority = str(args.get("priority") or "max_quality_14b")
@@ -2283,6 +2380,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             )
         scene_goal = str(args.get("scene_goal") or "")
         thresh = float(args.get("strictness_threshold") or 78.0)
+        expect_prog = bool(args.get("expect_spatial_progression", False))
         wait_flag = bool(args.get("wait", True))
 
         job = job_manager.submit(
@@ -2294,6 +2392,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 scene_goal=scene_goal,
                 mode=coh_mode,
                 strictness_threshold=thresh,
+                expect_spatial_progression=expect_prog,
                 job=j,
             ),
         )
@@ -2888,6 +2987,21 @@ def _dispatch_single_jsonrpc(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "result": {
                 "prompts": [
                     {
+                        "name": "coherencia_personajes_entorno_avance",
+                        "description": "★ Preset Estrella: Dos o más personajes avanzando/andando por una calle o entorno hablando (sin movimiento estático, con LoRA Next Scene + FLF2V 3 vectores + LipSync).",
+                        "arguments": [
+                            {"name": "scene_description", "description": "Descripción de la escena (ej. dos personas andando por la calle hablando)", "required": True},
+                            {"name": "num_clips", "description": "Número de tramos encadenados de 5s (por defecto 2)", "required": False},
+                        ],
+                    },
+                    {
+                        "name": "coherencia_escena_fija_dialogo",
+                        "description": "Preset de conversación coherente en escenario fijo (mesa, restaurante, salón) con LipSync HD por turnos.",
+                        "arguments": [
+                            {"name": "scene_description", "description": "Descripción de la escena fija", "required": True},
+                        ],
+                    },
+                    {
                         "name": "flf2v_production_workflow",
                         "description": "Flujo guiado paso a paso para generar un vídeo Frame a Frame (Inicio → Fin) perfecto sin saltos.",
                         "arguments": [
@@ -2911,6 +3025,31 @@ def _dispatch_single_jsonrpc(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         p_name = str(params.get("name") or "")
         p_args = params.get("arguments") or {}
         colab_console_log(f"[MCP] Agente solicitó plantilla guiada «{p_name}».", icon="🧭")
+        if p_name in AGENT_PRESET_SUMMARY_CATALOG or p_name in ("coherencia_personajes_entorno_avance", "coherencia_escena_fija_dialogo"):
+            plan = compile_agent_workflow_preset(
+                preset_id=p_name,
+                scene_description=str(p_args.get("scene_description") or ""),
+                num_clips=int(p_args.get("num_clips") or 2),
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "description": plan["title"],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": {
+                                "type": "text",
+                                "text": (
+                                    "Sigue exactamente este plan técnico compilado sin saltar pasos ni congelar el fondo:\n\n"
+                                    + json.dumps(plan, indent=2, ensure_ascii=False)
+                                ),
+                            },
+                        }
+                    ],
+                },
+            }
         if p_name == "flf2v_production_workflow":
             text = (
                 "Ejecuta exactamente estos pasos en orden sin inventar ningún parámetro:\n"
@@ -3119,27 +3258,75 @@ Todos los archivos generados (`.mp4`, `.png`, `.mp3`, `.wav`, `.zip`) se descarg
 python3 studio_mcp.py --list-tools
 ```
 
-### 2) Pedir la receta exacta verificada antes de generar (Cero Alucinaciones)
-- `task` permitidos: `"video_flf2v"`, `"video_i2v"`, `"video_t2v"`, `"image_create"`, `"image_edit"`, `"tts"`, `"montage"`.
-- `priority` permitidos: `"max_quality_14b"`, `"balanced_fast"`, `"ultra_fast_draft"`, `"zero_vram_cpu"`.
+### 2) Pedir el PRESET OFICIAL DE FLUJO antes de generar (`studio_get_workflow_preset` — ¡OBLIGATORIO EN ESCENAS COHERENTES!)
+Antes de lanzar imágenes o vídeos cuando el usuario pida una escena coherente (especialmente **personajes andando por la calle hablando**, secuencias con avance real o cortos de varios planos), ejecuta `studio_get_workflow_preset` para recibir el plan paso a paso exacto adaptado a tu GPU:
+- `preset_id` disponibles:
+  - `"coherencia_personajes_entorno_avance"` → **★ OBLIGATORIO cuando van caminando / avanzando por una calle o escenario mientras hablan** (impide el error de «movimiento estático» usando LoRA `Next Scene`, zancada alterna, desplazamiento de escaparates/fondo en perspectiva, auditoría `expect_spatial_progression=true` y prompt de vídeo en 3 vectores).
+  - `"coherencia_escena_fija_dialogo"` → conversaciones en un lugar fijo (mesa, restaurante, sofá).
+  - `"cambio_angulo_3d_mismo_personaje"` → plano / contraplano girando cámara 3D (`qwen-lora-multi-angles-3d`).
+  - `"corto_1_minuto_multiescena"` → producción coherente de 30–60 s (10–12 planos encadenados + BSO).
+  - `"edicion_fotografica_relight_cine"` → edición fotográfica pro, re-iluminación de entorno y piel realista.
 ```bash
-python3 studio_mcp.py --cli studio_recommend_pipeline '{{"task": "video_flf2v", "priority": "max_quality_14b"}}'
+python3 studio_mcp.py --cli studio_get_workflow_preset '{{
+  "preset_id": "coherencia_personajes_entorno_avance",
+  "scene_description": "dos personas andando por la calle hablando al atardecer",
+  "num_clips": 2,
+  "dialogue_lines": [
+    "¿Has visto qué luz tan increíble hace hoy en esta calle?",
+    "Sí, me encanta pasear por aquí al salir del trabajo."
+  ]
+}}'
 ```
+*(También puedes usar `studio_recommend_pipeline` para tareas sueltas: `task` en `"video_flf2v"`, `"video_i2v"`, `"video_t2v"`, `"image_create"`, `"image_edit"`, `"tts"`, `"montage"`).*
 
-### 3) Generar Vídeo «Frame a Frame» (Inicio → Fin) subiendo 2 fotos desde Termux/Android y bajando el MP4
+### 3) Ejemplo Exacto: Dos Personas Andando por la Calle Hablando (AVANCE REAL · CERO MOVIMIENTO ESTÁTICO)
+1. **Fotograma 1 (Ancla Maestra en Punto A — plano americano mostrando piernas caminando y profundidad de calle):**
+```bash
+python3 studio_mcp.py --cli studio_generate_or_edit_image '{{
+  "model_id": "qwen-image-edit-2511-pack",
+  "aspect_ratio": "16:9",
+  "custom_lora_ids": ["qwen-lora-skin-realism", "qwen-lora-flatlog-cinema"],
+  "prompt": "Cinematic Steadicam front-tracking medium-wide shot (knee-up framing showing walking legs) of two friends walking forward toward camera down a sunlit city sidewalk talking: man on left in dark denim jacket stepping forward with LEFT leg, woman on right in beige trench coat stepping forward with RIGHT leg, warm cafe awning right behind them, trees and shopfronts receding in depth"
+}}'
+```
+2. **Fotograma 2 (Punto B — 4 metros más adelante con LoRA `Next Scene`, zancada alterna y tiendas desplazadas atrás):**
+```bash
+python3 studio_mcp.py --cli studio_generate_or_edit_image '{{
+  "model_id": "qwen-image-edit-2511-pack",
+  "base_image_rel": "outputs/images/FOTOGRAMA_1.jpg",
+  "reference_rels": ["outputs/images/FOTOGRAMA_1.jpg"],
+  "aspect_ratio": "16:9",
+  "custom_lora_ids": ["qwen-lora-next-scene", "qwen-lora-skin-realism", "qwen-lora-anylight-env"],
+  "lora_scales": {{"qwen-lora-next-scene": 0.85, "qwen-lora-skin-realism": 0.75, "qwen-lora-anylight-env": 0.65}},
+  "prompt": "Next Scene: The exact same two people from the reference image with identical faces, hairstyles and exact same outfits have walked 4 meters further forward down the same street. Camera tracks backward ahead of them. Opposite legs now step forward in natural walking gait, new hand gesture while replying, and the cafe awning from before has receded further back in the background distance while a new bookstore window enters beside them under identical lighting."
+}}'
+```
+3. **Auditar que mantienen identidad Y que NO han quedado estáticos (`expect_spatial_progression: true`):**
+```bash
+python3 studio_mcp.py --cli studio_analyze_coherence '{{
+  "anchor_image_rel": "outputs/images/FOTOGRAMA_1.jpg",
+  "candidate_image_rels": ["outputs/images/FOTOGRAMA_2.jpg"],
+  "scene_goal": "dos amigos andando por la calle hablando avanzando hacia delante",
+  "expect_spatial_progression": true,
+  "mode": "hybrid_auto"
+}}'
+```
+4. **Animar `flf2v` con Multi-LoRA (`FusionX` + `UniAnimate` + `MoviiGen`) y Prompt en 3 Vectores (Steadicam + Zancada + Paralaje):**
 ```bash
 python3 studio_mcp.py --cli studio_generate_video '{{
   "video_submode": "flf2v",
   "mode": "ai",
   "model_id": "wan21-vace-14b-fp8",
   "video_lora_id": "lora-wan21-14b-fusionx-phantom",
+  "extra_video_lora_ids": ["lora-wan21-14b-unianimate-char", "lora-wan21-14b-moviigen-cinema"],
   "use_official_defaults": true,
-  "prompt": "el personaje gira suavemente la cabeza y sonríe con iluminación cinematográfica realista",
-  "local_image_path": "./inicio.png",
-  "local_end_image_path": "./final.png",
-  "duration_sec": 3.5
+  "image_rel": "outputs/images/FOTOGRAMA_1.jpg",
+  "end_image_rel": "outputs/images/FOTOGRAMA_2.jpg",
+  "duration_sec": 5.0,
+  "prompt": "Smooth backward-moving Steadicam tracking shot leading two friends walking forward down a lively city sidewalk, both characters walk forward continuously with realistic alternating leg strides, subtle shoulder sway and expressive conversational gestures, storefronts and trees glide past smoothly in the background with natural 3D depth parallax, stable facial identity."
 }}'
 ```
+*(Después añade voces con `studio_generate_speech`, ambiente urbano con `studio_generate_music_or_sfx` `preset="city_street_walk"` y sincroniza labios por turnos con `studio_lipsync_character`).*
 
 ### 4) Crear Secuencia de Fotogramas con PERSONAJES 100% CONSISTENTES + Auditar con `studio_analyze_coherence`
 **¡REGLA CRÍTICA!** Nunca generes el Fotograma 2, 3, 4 desde cero si deben aparecer las mismas personas:
@@ -3243,7 +3430,30 @@ python3 studio_mcp.py --cli studio_export_session_log '{{"format": "md"}}'
 
 @mcp_router.get("/api/mcp/info")
 def api_get_mcp_info(request: Request) -> Dict[str, Any]:
-    return {"ok": True, **get_mcp_connection_details(request)}
+    return {
+        "ok": True,
+        **get_mcp_connection_details(request),
+        "workflow_presets": list_agent_workflow_presets(),
+    }
+
+
+@mcp_router.get("/api/mcp/presets")
+def api_list_mcp_presets() -> Dict[str, Any]:
+    return {"ok": True, "presets": list_agent_workflow_presets()}
+
+
+@mcp_router.post("/api/mcp/presets/compile")
+async def api_compile_mcp_preset(request: Request) -> Dict[str, Any]:
+    body = await request.json()
+    plan = compile_agent_workflow_preset(
+        preset_id=str(body.get("preset_id") or "coherencia_personajes_entorno_avance"),
+        scene_description=str(body.get("scene_description") or ""),
+        characters_description=str(body.get("characters_description") or ""),
+        dialogue_lines=list(body.get("dialogue_lines") or []),
+        num_clips=int(body.get("num_clips") or 2),
+        aspect_ratio=str(body.get("aspect_ratio") or "16:9"),
+    )
+    return plan
 
 
 @mcp_router.post("/api/mcp/tunnel-info")

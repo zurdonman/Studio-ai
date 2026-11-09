@@ -1564,6 +1564,21 @@
         Conecta tu agente local (<strong>Claude Code</strong>, <strong>Codex CLI</strong>, <strong>Gemini CLI</strong>, <strong>OpenCode</strong> o <strong>Cursor</strong>) a esta sesión de Google Colab. El agente recibe automáticamente el manual estructurado, esquemas cerrados anti-invención y todo lo que ejecute se verá <strong>en vivo en tu celda de Colab y en esta pantalla</strong>.
       </p>
       <div class="form-stack">
+        <!-- SELECTOR DE PRESET GUIADO PARA EL AGENTE MCP -->
+        <div class="lora-rack-box" style="margin-top:0;">
+          <div class="lora-rack-head">
+            <strong>🧭 Presets Oficiales Guiados para tu Agente (`studio_get_workflow_preset`)</strong>
+            <span class="lora-active-pill has-active">Anti-Estático + Multi-LoRA</span>
+          </div>
+          <label class="field-label" for="mcp-preset-select">Elige el Preset de Flujo</label>
+          <select id="mcp-preset-select"></select>
+          <div id="mcp-preset-desc" class="muted" style="font-size:0.77rem;margin-top:5px;"></div>
+          <div class="row-gap" style="margin-top:7px;">
+            <input type="text" id="mcp-preset-scene-input" class="flex-1" placeholder="Ej: dos personas andando por la calle hablando al atardecer..." />
+            <button type="button" class="btn btn-primary btn-sm" id="btn-copy-mcp-preset-order">📋 Copiar Orden para el Agente</button>
+          </div>
+        </div>
+
         <div>
           <label class="field-label">📱 Opción Termux Android / DeepSeek Harness / Qwen / OpenCode (¡Pega este mensaje en el chat de tu agente!)</label>
           <div class="row-gap">

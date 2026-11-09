@@ -735,6 +735,13 @@ def _sync_video_lora_on_handle(
             raise ValueError(f"LoRA desconocido: {lid}")
         compat_models = ldef.get("compatible_models")
         if compat_models and loaded_model_id and loaded_model_id not in compat_models:
+            if lid != clean_primary:
+                if job is not None:
+                    job.log(
+                        f"Omitiendo LoRA extra «{ldef['name']}» por ser específico de {', '.join(compat_models)} (modelo activo: {loaded_model_id}).",
+                        level="warning",
+                    )
+                continue
             raise ValueError(
                 f"El LoRA «{ldef['name']}» está diseñado para {', '.join(compat_models)} "
                 f"y no es compatible con «{loaded_model_id}»."
@@ -757,6 +764,9 @@ def _sync_video_lora_on_handle(
         eff_sc = float(custom_sc) if custom_sc is not None else float(ldef.get("default_lora_scale", 1.0))
         ad_name = "vid_speed_lora" if idx_l == 0 and lid == clean_primary else (ldef.get("adapter_name") or f"vid_lora_{idx_l}")
         resolved_specs.append((lid, ad_name, eff_sc, ldef))
+
+    if not resolved_specs:
+        return None
 
     new_ids_tuple = tuple(x[0] for x in resolved_specs)
     adapter_names = [x[1] for x in resolved_specs]

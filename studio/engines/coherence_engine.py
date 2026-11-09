@@ -168,12 +168,13 @@ def analyze_pair_fast_cv(anchor_path: Path, candidate_path: Path) -> Dict[str, A
         "color_palette_score": round(color_sim, 1),
         "lighting_exposure_score": round(lighting_score, 1),
         "structural_anchor_score": structural_score,
+        "spatial_displacement_pct": round(min(100.0, mad_grid * 3.8), 1),
         "sharpness_score": round(sharp_c_score, 1),
         "cv_overall_score": cv_overall,
         "cv_warnings": warnings,
         "elapsed_ms": round((time.time() - t0) * 1000, 1),
         "limitation_note": (
-            "OpenCV mide color, luz, proporción y estructura física en 0.1s, pero NO distingue rostros ni identidad semántica; "
+            "OpenCV mide color, luz, proporción, nitidez y desplazamiento espacial en 0.1s, pero NO distingue rostros semánticos; "
             "para verificar identidad de personajes usa mode='hybrid_auto' o mode='vlm_qwen' (Qwen2.5-VL-3B)."
         ),
     }
@@ -340,6 +341,7 @@ def analyze_pair_qwen_vl(
     anchor_path: Path,
     candidate_path: Path,
     scene_goal: str = "",
+    expect_spatial_progression: bool = False,
 ) -> Dict[str, Any]:
     """
     Etapa 2 (Semántica Multimodal con Qwen2.5-VL-3B-Instruct):
@@ -359,9 +361,19 @@ def analyze_pair_qwen_vl(
     img_cand = _resize_for_qwen_vl(Image.open(candidate_path), max_side=756)
 
     goal_line = f"Contexto de la escena pedida por el usuario: «{scene_goal.strip()}».\n" if scene_goal.strip() else ""
+    env_criterion = (
+        "4. `environment_props_score` (0-100): tratándose de una ESCENA EN AVANCE (ej. caminando por la calle), ¿se mantiene la MISMA calle/entorno, estilo arquitectónico, hora del día e iluminación aunque el fondo se haya desplazado por perspectiva al caminar? (NO penalices el paralaje natural del fondo al avanzar).\n"
+        if expect_spatial_progression
+        else "4. `environment_props_score` (0-100): ¿se mantiene el mismo lugar, mobiliario (ej. mesa, restaurante, pared), objetos e iluminación?\n"
+    )
+    advance_criterion = (
+        "5. `flf2v_pose_transition_score` (0-100): ¿los personajes REALMENTE han avanzado caminando/moviéndose respecto a la Imagen 1 (pierna contraria adelantada, nuevo gesto de conversación y perspectiva de calle desplazada) sin quedarse congelados en la misma postura exacta? Si están casi idénticos/congelados en el sitio, pon < 50.\n"
+        if expect_spatial_progression
+        else "5. `flf2v_pose_transition_score` (0-100): ¿el cambio de postura entre Imagen 1 e Imagen 2 es conectable de forma natural en un clip de 3 a 5 segundos?\n"
+    )
     system_prompt = (
         "Eres un supervisor experto de continuidad cinematográfica (Script Supervisor) para producción de vídeo con IA. "
-        "Sé estricto y objetivo evaluando si dos fotogramas mantienen EXACTAMENTE los mismos personajes y el mismo escenario."
+        "Sé estricto y objetivo evaluando si dos fotogramas mantienen EXACTAMENTE los mismos personajes y coherencia espacial."
     )
     user_instruction = (
         f"{goal_line}"
@@ -370,11 +382,11 @@ def analyze_pair_qwen_vl(
         "1. `same_people_count` (boolean): ¿hay exactamente el mismo número de personas protagonistas?\n"
         "2. `character_identity_score` (0-100): ¿son exactamente las mismas personas con los mismos rasgos faciales, edad, gafas/barba y etnia? (Si parece otro actor/persona, pon < 55).\n"
         "3. `clothing_hair_score` (0-100): ¿mantienen exactamente el mismo peinado, color de pelo y las mismas prendas/colores de ropa?\n"
-        "4. `environment_props_score` (0-100): ¿se mantiene el mismo lugar, mobiliario (ej. mesa, restaurante, pared), objetos e iluminación?\n"
-        "5. `flf2v_pose_transition_score` (0-100): ¿el cambio de postura entre Imagen 1 e Imagen 2 es conectable de forma natural en un clip de 3 a 5 segundos?\n"
+        f"{env_criterion}"
+        f"{advance_criterion}"
         "6. `anchor_characters_summary`: descripción breve y precisa de los personajes de la Imagen 1.\n"
-        "7. `drifts_detected`: lista de fallos concretos de consistencia observados en la Imagen 2 respecto a la Imagen 1 (vacía `[]` si todo coincide).\n"
-        "8. `repair_edit_prompt`: si hay cambios indeseados de rostro/ropa/fondo, redacta en español la instrucción exacta para `Qwen-Image-Edit-2511` tomando como base la Imagen 1 para generar la pose de la Imagen 2 SIN perder la identidad.\n\n"
+        "7. `drifts_detected`: lista de fallos concretos de consistencia (o de falta de avance si están congelados) observados en la Imagen 2 respecto a la Imagen 1 (vacía `[]` si todo es correcto).\n"
+        "8. `repair_edit_prompt`: si hay fallos, redacta la instrucción exacta para `Qwen-Image-Edit-2511` manteniendo la identidad de la Imagen 1.\n\n"
         "Responde ÚNICAMENTE con un objeto JSON válido con esas 8 claves exactas, sin texto adicional."
     )
 
@@ -464,14 +476,13 @@ def run_coherence_analysis(
     scene_goal: str = "",
     mode: str = "hybrid_auto",
     strictness_threshold: float = 78.0,
+    expect_spatial_progression: bool = False,
     job: Optional[JobRecord] = None,
 ) -> Dict[str, Any]:
     """
     Ejecuta el análisis completo de coherencia (1 fotograma Ancla vs 1..N fotogramas candidatos).
-    Modos disponibles:
-      - `hybrid_auto` (Recomendado): Ejecuta OpenCV instantáneo (0.1s) + Qwen2.5-VL-3B 4-bit en GPU si hay GPU disponible.
-      - `vlm_qwen`: Exige análisis semántico multimodal con Qwen2.5-VL-3B-Instruct (descarga automática la 1ª vez).
-      - `fast_cv`: Ejecuta únicamente OpenCV fotométrico/estructural en CPU (0 GB VRAM, ~0.12s por par).
+    Si `expect_spatial_progression=True` (ej. personajes caminando por la calle), verifica ADEMÁS
+    que cada fotograma consecutivo tenga desplazamiento espacial real y no sea una copia estática congelada.
     """
     mode = (mode or "hybrid_auto").strip().lower()
     if mode not in ("hybrid_auto", "vlm_qwen", "fast_cv"):
@@ -488,19 +499,27 @@ def run_coherence_analysis(
 
     if job:
         job.log(
-            f"Iniciando auditoría de coherencia ({mode} · umbral={threshold}/100) sobre {len(candidate_paths)} fotograma(s) respecto al ancla `{anchor_rel}`...",
+            f"Iniciando auditoría de coherencia ({mode} · umbral={threshold}/100 · avance_espacial={expect_spatial_progression}) sobre {len(candidate_paths)} fotograma(s)...",
             progress=3.0,
             step="Etapa 1: Métricas físicas OpenCV...",
         )
 
-    # Etapa 1: OpenCV instantáneo en todos los pares
+    # Etapa 1: OpenCV instantáneo en todos los pares (contra ancla + desplazamiento paso a paso contra el fotograma previo)
     cv_results: List[Dict[str, Any]] = []
+    prev_step_path = anchor_path
     for idx, cpath in enumerate(candidate_paths, 1):
         cv_r = analyze_pair_fast_cv(anchor_path, cpath)
+        if prev_step_path == anchor_path:
+            step_disp = cv_r["spatial_displacement_pct"]
+        else:
+            step_cv = analyze_pair_fast_cv(prev_step_path, cpath)
+            step_disp = step_cv["spatial_displacement_pct"]
+        cv_r["step_displacement_from_prev_pct"] = step_disp
+        prev_step_path = cpath
         cv_results.append(cv_r)
         if job:
             job.log(
-                f"OpenCV Fotograma #{idx} (`{cpath.name}`): color={cv_r['color_palette_score']} · luz={cv_r['lighting_exposure_score']} · estructura={cv_r['structural_anchor_score']} → {cv_r['cv_overall_score']}/100",
+                f"OpenCV Fotograma #{idx} (`{cpath.name}`): color={cv_r['color_palette_score']} · luz={cv_r['lighting_exposure_score']} · avance={step_disp}% → {cv_r['cv_overall_score']}/100",
                 progress=5.0 + (idx / len(candidate_paths)) * (15.0 if use_vlm else 90.0),
                 step=f"OpenCV #{idx}/{len(candidate_paths)} completado",
             )
@@ -527,16 +546,28 @@ def run_coherence_analysis(
 
     for idx, (cpath, cv_r) in enumerate(zip(candidate_paths, cv_results), 1):
         crel = _to_rel_str(cpath)
+        prev_rel = anchor_rel if idx == 1 else _to_rel_str(candidate_paths[idx - 2])
         vlm_r: Optional[Dict[str, Any]] = None
         if vlm_loaded_ok:
             if job:
                 pct = 70.0 + ((idx - 1) / len(candidate_paths)) * 26.0
                 job.log(
-                    f"Qwen2.5-VL inspeccionando rostros, ropa y escenario en Fotograma #{idx} (`{cpath.name}`)...",
+                    f"Qwen2.5-VL inspeccionando rostros, ropa y avance espacial en Fotograma #{idx} (`{cpath.name}`)...",
                     progress=pct,
                     step=f"Inspección Qwen2.5-VL #{idx}/{len(candidate_paths)}...",
                 )
-            vlm_r = analyze_pair_qwen_vl(anchor_path=anchor_path, candidate_path=cpath, scene_goal=scene_goal)
+            vlm_r = analyze_pair_qwen_vl(
+                anchor_path=anchor_path,
+                candidate_path=cpath,
+                scene_goal=scene_goal,
+                expect_spatial_progression=expect_spatial_progression,
+            )
+
+        step_disp_pct = float(cv_r.get("step_displacement_from_prev_pct", cv_r.get("spatial_displacement_pct", 25.0)))
+        too_static = bool(
+            expect_spatial_progression
+            and (step_disp_pct < 8.0 or (vlm_r is not None and vlm_r.get("flf2v_pose_transition_score", 80.0) < 52.0))
+        )
 
         if vlm_r is not None:
             combined = round(0.80 * vlm_r["vlm_overall_score"] + 0.20 * cv_r["cv_overall_score"], 1)
@@ -546,18 +577,34 @@ def run_coherence_analysis(
                 or (vlm_r["clothing_hair_score"] < (threshold - 5.0))
                 or (not cv_r["aspect_ratio_compatible"])
             )
-            passed = (combined >= threshold) and (not hard_fail)
+            passed = (combined >= threshold) and (not hard_fail) and (not too_static)
         else:
+            # En escenas en avance el fondo cambia por paralaje, por lo que relajamos el umbral estructural puro
+            eff_cv_thresh = (threshold - 16.0) if expect_spatial_progression else (threshold - 10.0)
             combined = cv_r["cv_overall_score"]
-            passed = (combined >= (threshold - 10.0)) and cv_r["aspect_ratio_compatible"]
+            passed = (combined >= eff_cv_thresh) and cv_r["aspect_ratio_compatible"] and (not too_static)
 
-        verdict = "PASS" if passed else "NEEDS_REPAIR"
+        if passed:
+            verdict = "PASS"
+        elif too_static:
+            verdict = "TOO_STATIC_NEEDS_ADVANCE"
+        else:
+            verdict = "NEEDS_REPAIR"
+
         if not passed:
             inconsistent_rels.append(crel)
 
         repair_prompt = ""
         if not passed:
-            if vlm_r and vlm_r.get("repair_edit_prompt"):
+            if too_static:
+                goal_txt = scene_goal.strip() or "walking forward down the same street while conversing"
+                repair_prompt = (
+                    "Next Scene: The exact same people from the reference image with identical faces, hairstyles and exact same outfits "
+                    f"have walked 4 meters further forward ({goal_txt}). Camera tracks backward ahead of them; "
+                    "ALTERNATE LEG STRIDE with the opposite foot stepping forward, new natural hand gesture while speaking, "
+                    "and background storefronts, trees and streetlamps shifted further back in perspective along the same street under identical lighting."
+                )
+            elif vlm_r and vlm_r.get("repair_edit_prompt"):
                 repair_prompt = vlm_r["repair_edit_prompt"]
             else:
                 goal_txt = scene_goal.strip() or "la nueva pose deseada para este plano"
@@ -568,15 +615,28 @@ def run_coherence_analysis(
 
         repair_call = None
         if not passed:
+            ref_list = [anchor_rel] if prev_rel == anchor_rel else [anchor_rel, prev_rel]
+            repair_args: Dict[str, Any] = {
+                "model_id": "qwen-image-edit-2511-pack",
+                "base_image_rel": prev_rel if expect_spatial_progression else anchor_rel,
+                "reference_rels": ref_list,
+                "use_official_defaults": True,
+                "prompt": repair_prompt,
+            }
+            if expect_spatial_progression:
+                repair_args["custom_lora_ids"] = [
+                    "qwen-lora-next-scene",
+                    "qwen-lora-skin-realism",
+                    "qwen-lora-anylight-env",
+                ]
+                repair_args["lora_scales"] = {
+                    "qwen-lora-next-scene": 0.85,
+                    "qwen-lora-skin-realism": 0.75,
+                    "qwen-lora-anylight-env": 0.65,
+                }
             repair_call = {
                 "tool": "studio_generate_or_edit_image",
-                "arguments": {
-                    "model_id": "qwen-image-edit-2511-pack",
-                    "base_image_rel": anchor_rel,
-                    "reference_rels": [anchor_rel],
-                    "use_official_defaults": True,
-                    "prompt": repair_prompt,
-                },
+                "arguments": repair_args,
             }
 
         comp_entry: Dict[str, Any] = {
