@@ -99,3 +99,5 @@ def apply_runtime_compatibility_patches() -> None:
                     _wrap_parameter_subclass_new(cls)
 
         _patch_peft_integrations()
+        from studio.memory_safety_hooks import install_memory_safety_hooks
+        install_memory_safety_hooks()

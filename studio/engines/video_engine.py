@@ -24,13 +24,14 @@ from studio.engines.ffmpeg_utils import (
     probe_media_info,
 )
 from studio.hardware import query_gpu_info
+from studio.memory_safety_hooks import guarded_model_load
 from studio.jobs import JobRecord
 from studio.memory_manager import (
     flush_ram_and_vram,
     memory_manager,
     run_with_live_memory_progress,
-    require_available_host_ram,
     serialized_gpu_operation,
+    checkpoint_current_operation,
 )
 
 # Prompts negativos oficiales verificados en las model cards de cada fabricante
@@ -541,7 +542,7 @@ def _enable_fp8_layerwise_casting_safe(transformer: Any) -> Any:
 
     fp8_dt = getattr(torch, "float8_e4m3fn", None)
     if fp8_dt is None or not hasattr(transformer, "enable_layerwise_casting"):
-        return transformer.to(torch.bfloat16)
+        raise RuntimeError("FP8_RUNTIME_UNSUPPORTED: la receta requiere FP8 layerwise; no se expande el transformer a BF16 ni se descarga otra variante.")
 
     transformer.enable_layerwise_casting(
         storage_dtype=fp8_dt,
@@ -556,6 +557,7 @@ def _enable_fp8_layerwise_casting_safe(transformer: Any) -> Any:
         if dt is not None
     )
     for mod in transformer.modules():
+        checkpoint_current_operation()
         dh = getattr(mod, "_diffusers_hook", None)
         has_lc = dh is not None and callable(getattr(dh, "get_hook", None)) and dh.get_hook("layerwise_casting") is not None
         if not has_lc:
@@ -592,7 +594,7 @@ def _load_wan_fp8_single_file_transformer(
             "FP8_RUNTIME_UNSUPPORTED: esta receta necesita Torch FP8 y layerwise casting de Diffusers; "
             "no se expande el transformer 14B a BF16/FP32 ni se descarga otro modelo."
         )
-    raw_sd = safetensors.torch.load_file(str(sf_path), device="cpu")
+    raw_sd = guarded_model_load(safetensors.torch.load_file, str(sf_path), device="cpu")
 
     # Extraer `img_emb.emb_pos` antes de `from_single_file` para inyectarlo intacto en FLF2V-14B (`pos_embed_seq_len=514`)
     emb_pos_tensor = None
@@ -605,6 +607,7 @@ def _load_wan_fp8_single_file_transformer(
     scale_suffixes = (".scale_weight", ".weight_scale")
     aux_drop_suffixes = (".scale_input", ".input_scale", ".comfy_quant")
     for k in list(raw_sd.keys()):
+        checkpoint_current_operation()
         if k.endswith(aux_drop_suffixes):
             raw_sd.pop(k, None)
             continue
@@ -633,7 +636,7 @@ def _load_wan_fp8_single_file_transformer(
         restore_sd = convert_wan_transformer_to_diffusers(restore_sd)
 
     try:
-        transformer = transformer_cls.from_single_file(
+        transformer = guarded_model_load(transformer_cls.from_single_file,
             raw_sd,
             config=str(base_dir),
             subfolder="transformer",
@@ -645,6 +648,7 @@ def _load_wan_fp8_single_file_transformer(
         transformer = _enable_fp8_layerwise_casting_safe(transformer)
         if restore_sd:
             for name, param in list(transformer.named_parameters()) + list(transformer.named_buffers()):
+                checkpoint_current_operation()
                 original = restore_sd.get(name)
                 if original is not None and param.dtype != storage_dtype:
                     param.data.copy_(original.to(device=param.device, dtype=param.dtype))
@@ -691,16 +695,16 @@ def _load_single_video_lora_onto_pipe(
     ):
         import safetensors.torch  # type: ignore
 
-        raw_sd = safetensors.torch.load_file(str(lora_file), device="cpu")
+        raw_sd = guarded_model_load(safetensors.torch.load_file, str(lora_file), device="cpu")
         clean_sd = _prepare_wan_lora_state_dict(raw_sd)
         if is_fp8_lc and torch_mod is not None:
             clean_sd = {
                 k: (v.to(torch_mod.bfloat16) if hasattr(v, "dtype") and v.is_floating_point() else v)
                 for k, v in clean_sd.items()
             }
-            pipe.load_lora_weights(clean_sd, adapter_name=adapter_name, low_cpu_mem_usage=True)
+            guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name, low_cpu_mem_usage=True)
         else:
-            pipe.load_lora_weights(clean_sd, adapter_name=adapter_name)
+            guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name)
     else:
         lora_kw: Dict[str, Any] = {
             "weight_name": lora_file.name,
@@ -708,7 +712,7 @@ def _load_single_video_lora_onto_pipe(
         }
         if is_fp8_lc:
             lora_kw["low_cpu_mem_usage"] = True
-        pipe.load_lora_weights(str(lora_file.parent), **lora_kw)
+        guarded_model_load(pipe.load_lora_weights, str(lora_file.parent), **lora_kw)
 
 
 def _sync_video_lora_on_handle(
@@ -758,9 +762,10 @@ def _sync_video_lora_on_handle(
             handle["active_lora_scale"] = None
             handle["active_lora_signature"] = None
             handle["active_lora_defns"] = []
+            memory_manager.update_adapters("video", [])
         return None
 
-    loaded_model_id = (handle.get("defn") or {}).get("id")
+    loaded_model_id = (handle.get("defn") or {}).get("id") or handle.get("model_id")
     resolved_specs: List[Tuple[str, str, float, Dict[str, Any]]] = []  # (lora_id, adapter_name, scale, defn)
 
     for idx_l, (lid, custom_sc) in enumerate(requested_pairs):
@@ -780,21 +785,6 @@ def _sync_video_lora_on_handle(
                 f"El LoRA «{ldef['name']}» está diseñado para {', '.join(compat_models)} "
                 f"y no es compatible con «{loaded_model_id}»."
             )
-        if not catalog_manager.is_downloaded(lid):
-            if job is not None:
-                job.log(
-                    f"Descargando LoRA «{ldef['name']}» ({ldef.get('estimated_gb', 0.3)} GB)...",
-                    progress=max(1.0, pct_base - 4.0),
-                    step=f"Descargando {ldef['name'][:30]}...",
-                )
-                catalog_manager.download_model(
-                    lid,
-                    job,
-                    progress_range=(max(1.0, pct_base - 4.0), pct_base),
-                )
-            else:
-                raise RuntimeError(f"El LoRA «{ldef['name']}» aún no está descargado.")
-
         eff_sc = float(custom_sc) if custom_sc is not None else float(ldef.get("default_lora_scale", 1.0))
         ad_name = "vid_speed_lora" if idx_l == 0 and lid == clean_primary else (ldef.get("adapter_name") or f"vid_lora_{idx_l}")
         resolved_specs.append((lid, ad_name, eff_sc, ldef))
@@ -813,6 +803,27 @@ def _sync_video_lora_on_handle(
         handle["active_lora_scale"] = adapter_weights[0]
         handle["active_lora_defns"] = all_defns
         return next((d for d in all_defns if d.get("max_steps") is not None), all_defns[0])
+
+    definition = handle.get("defn") or catalog_manager.get_definition(loaded_model_id)
+    memory_manager.prepare_for_adapters(definition, all_defns, job=job)
+    for lid, _, _, ldef in resolved_specs:
+        if not catalog_manager.is_downloaded(lid):
+            if job is not None:
+                job.log(
+                    f"Descargando LoRA «{ldef['name']}» ({ldef.get('estimated_gb', 0.3)} GB)...",
+                    progress=max(1.0, pct_base - 4.0),
+                    step=f"Descargando {ldef['name'][:30]}...",
+                )
+                catalog_manager.download_model(
+                    lid,
+                    job,
+                    progress_range=(max(1.0, pct_base - 4.0), pct_base),
+                )
+            else:
+                raise RuntimeError(f"El LoRA «{ldef['name']}» aún no está descargado.")
+
+
+    memory_manager.prepare_for_adapters(definition, all_defns, job=job)
 
     if job:
         summary_str = " + ".join(f"«{d['name'][:34]}» ({w:.2f})" for _, _, w, d in resolved_specs)
@@ -871,6 +882,7 @@ def _sync_video_lora_on_handle(
     handle["active_lora_scale"] = adapter_weights[0]
     handle["active_lora_signature"] = new_ids_tuple
     handle["active_lora_defns"] = all_defns
+    memory_manager.update_adapters("video", list(new_ids_tuple))
     return next((d for d in all_defns if d.get("max_steps") is not None), all_defns[0])
 
 
@@ -973,7 +985,6 @@ def _instantiate_video_pipeline(
     """Instancia la clase exacta de Diffusers con los tipos y schedulers oficiales verificados."""
     apply_runtime_compatibility_patches()
     import torch  # type: ignore
-    import diffusers  # type: ignore
 
     bdir = str(base_dir)
     idx_cfg = _read_model_index_json(base_dir)
@@ -982,10 +993,10 @@ def _instantiate_video_pipeline(
     if engine == "wan_ti2v":
         from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanImageToVideoPipeline, WanPipeline  # type: ignore
 
-        vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
+        vae = guarded_model_load(AutoencoderKLWan.from_pretrained, bdir, subfolder="vae", torch_dtype=torch.float32)
         exp_ts = bool(idx_cfg.get("expand_timesteps", True))
         b_ratio = idx_cfg.get("boundary_ratio", None)
-        pipe_i2v = WanImageToVideoPipeline.from_pretrained(
+        pipe_i2v = guarded_model_load(WanImageToVideoPipeline.from_pretrained,
             bdir,
             vae=vae,
             torch_dtype=torch.bfloat16,
@@ -1009,8 +1020,8 @@ def _instantiate_video_pipeline(
     if engine == "wan_t2v":
         from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanPipeline  # type: ignore
 
-        vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
-        pipe = WanPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
+        vae = guarded_model_load(AutoencoderKLWan.from_pretrained, bdir, subfolder="vae", torch_dtype=torch.float32)
+        pipe = guarded_model_load(WanPipeline.from_pretrained, bdir, vae=vae, torch_dtype=torch.bfloat16)
         flow_shift = float(spec.get("flow_shift", 3.0))
         pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=flow_shift)
         return {
@@ -1028,8 +1039,8 @@ def _instantiate_video_pipeline(
     if engine == "wan_vace":
         from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanVACEPipeline  # type: ignore
 
-        vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
-        pipe = WanVACEPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
+        vae = guarded_model_load(AutoencoderKLWan.from_pretrained, bdir, subfolder="vae", torch_dtype=torch.float32)
+        pipe = guarded_model_load(WanVACEPipeline.from_pretrained, bdir, vae=vae, torch_dtype=torch.bfloat16)
         flow_shift = float(spec.get("flow_shift", 3.0))
         pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=flow_shift)
         return {
@@ -1050,9 +1061,9 @@ def _instantiate_video_pipeline(
         if not defn:
             raise ValueError("Se requiere definición de modelo para cargar Wan VACE 14B FP8.")
         sf_path = _resolve_fp8_transformer_file(defn)
-        vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
+        vae = guarded_model_load(AutoencoderKLWan.from_pretrained, bdir, subfolder="vae", torch_dtype=torch.float32)
         transformer = _load_wan_fp8_single_file_transformer(WanVACETransformer3DModel, sf_path, base_dir)
-        pipe = WanVACEPipeline.from_pretrained(
+        pipe = guarded_model_load(WanVACEPipeline.from_pretrained,
             bdir,
             vae=vae,
             transformer=transformer,
@@ -1075,9 +1086,9 @@ def _instantiate_video_pipeline(
     if engine == "wan_i2v_14b":
         from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanImageToVideoPipeline  # type: ignore
 
-        vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
+        vae = guarded_model_load(AutoencoderKLWan.from_pretrained, bdir, subfolder="vae", torch_dtype=torch.float32)
         # Respetar la clase exacta declarada en model_index.json (CLIPVisionModel o CLIPVisionModelWithProjection)
-        pipe = WanImageToVideoPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
+        pipe = guarded_model_load(WanImageToVideoPipeline.from_pretrained, bdir, vae=vae, torch_dtype=torch.bfloat16)
         if getattr(pipe, "image_encoder", None) is not None:
             pipe.image_encoder.to(torch.float32)
         _attach_dual_image_flf2v_fix(pipe)
@@ -1102,9 +1113,9 @@ def _instantiate_video_pipeline(
         if not defn:
             raise ValueError("Se requiere definición de modelo para cargar Wan 14B FP8.")
         sf_path = _resolve_fp8_transformer_file(defn)
-        vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
+        vae = guarded_model_load(AutoencoderKLWan.from_pretrained, bdir, subfolder="vae", torch_dtype=torch.float32)
         transformer = _load_wan_fp8_single_file_transformer(WanTransformer3DModel, sf_path, base_dir)
-        pipe = WanImageToVideoPipeline.from_pretrained(
+        pipe = guarded_model_load(WanImageToVideoPipeline.from_pretrained,
             bdir,
             vae=vae,
             transformer=transformer,
@@ -1131,7 +1142,7 @@ def _instantiate_video_pipeline(
     if engine in ("ltx_video", "ltx_video_distilled"):
         from diffusers import LTXConditionPipeline  # type: ignore
 
-        pipe = LTXConditionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+        pipe = guarded_model_load(LTXConditionPipeline.from_pretrained, bdir, torch_dtype=torch.bfloat16)
         if engine == "ltx_video_distilled" and getattr(pipe, "transformer", None) is not None:
             _enable_fp8_layerwise_casting_safe(pipe.transformer)
         return {
@@ -1148,7 +1159,7 @@ def _instantiate_video_pipeline(
     if engine == "ltx2_av":
         from diffusers import LTX2ConditionPipeline, LTX2Pipeline  # type: ignore
 
-        pipe_cond = LTX2ConditionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+        pipe_cond = guarded_model_load(LTX2ConditionPipeline.from_pretrained, bdir, torch_dtype=torch.bfloat16)
         return {
             "pipe": pipe_cond,
             "all_components": dict(pipe_cond.components),
@@ -1163,7 +1174,7 @@ def _instantiate_video_pipeline(
     if engine == "sana_video":
         from diffusers import SanaImageToVideoPipeline, SanaVideoPipeline  # type: ignore
 
-        pipe_i2v = SanaImageToVideoPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+        pipe_i2v = guarded_model_load(SanaImageToVideoPipeline.from_pretrained, bdir, torch_dtype=torch.bfloat16)
         if hasattr(pipe_i2v, "vae") and pipe_i2v.vae is not None:
             pipe_i2v.vae.to(torch.float32)
         if hasattr(pipe_i2v, "text_encoder") and pipe_i2v.text_encoder is not None:
@@ -1182,8 +1193,8 @@ def _instantiate_video_pipeline(
     if engine == "skyreels_v2":
         from diffusers import AutoencoderKLWan, SkyReelsV2ImageToVideoPipeline, UniPCMultistepScheduler  # type: ignore
 
-        vae = AutoencoderKLWan.from_pretrained(bdir, subfolder="vae", torch_dtype=torch.float32)
-        pipe = SkyReelsV2ImageToVideoPipeline.from_pretrained(bdir, vae=vae, torch_dtype=torch.bfloat16)
+        vae = guarded_model_load(AutoencoderKLWan.from_pretrained, bdir, subfolder="vae", torch_dtype=torch.float32)
+        pipe = guarded_model_load(SkyReelsV2ImageToVideoPipeline.from_pretrained, bdir, vae=vae, torch_dtype=torch.bfloat16)
         if getattr(pipe, "image_encoder", None) is not None:
             pipe.image_encoder.to(torch.float32)
         _attach_dual_image_flf2v_fix(pipe)
@@ -1203,7 +1214,7 @@ def _instantiate_video_pipeline(
     if engine == "cogvideox_i2v":
         from diffusers import CogVideoXImageToVideoPipeline  # type: ignore
 
-        pipe = CogVideoXImageToVideoPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+        pipe = guarded_model_load(CogVideoXImageToVideoPipeline.from_pretrained, bdir, torch_dtype=torch.bfloat16)
         return {
             "pipe": pipe,
             "all_components": dict(pipe.components),
@@ -1218,12 +1229,13 @@ def _instantiate_video_pipeline(
     raise ValueError(f"MODEL_ENGINE_UNSUPPORTED: sin receta revisada de vídeo para {engine!r}. No se deducen submodos por el nombre o la firma de una clase.")
 
 
-@serialized_gpu_operation
+@serialized_gpu_operation(slots=lambda args: () if args["model_id"] == "ffmpeg-motion-cpu" else ("video",), managed=True)
 def load_video_model_into_memory(
     model_id: str = "wan22-ti2v-5b",
     auto_download: bool = False,
     job: Optional[JobRecord] = None,
     progress_range: Tuple[float, float] = (0.0, 100.0),
+    extra_lora_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Carga cualquier modelo de vídeo del catálogo liberando antes otros modelos de VRAM."""
     return _load_video_model_into_memory_locked(
@@ -1231,6 +1243,7 @@ def load_video_model_into_memory(
         auto_download=auto_download,
         job=job,
         progress_range=progress_range,
+        extra_lora_ids=extra_lora_ids,
     )
 
 
@@ -1239,6 +1252,7 @@ def _load_video_model_into_memory_locked(
     auto_download: bool = False,
     job: Optional[JobRecord] = None,
     progress_range: Tuple[float, float] = (0.0, 100.0),
+    extra_lora_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     apply_runtime_compatibility_patches()
     p_lo, p_hi = progress_range
@@ -1309,10 +1323,13 @@ def _load_video_model_into_memory_locked(
 
     flush_ram_and_vram()
 
-    from studio.model_recipes import ENGINE_CONTRACTS
-    required_ram = defn.get("min_ram_gb", ENGINE_CONTRACTS.get(defn.get("engine"), {}).get("ram_gb"))
-    if required_ram is not None:
-        require_available_host_ram(float(required_ram), stage=f"preparación de {model_id}", job=job)
+    adapter_defs = []
+    for lid in dict.fromkeys(extra_lora_ids or []):
+        ld = catalog_manager.get_definition(lid)
+        if not ld or ld.get("category") != "lora" or ld.get("validation_state") == "candidate" or model_id not in ld.get("compatible_models", []):
+            raise ValueError(f"LoRA de vídeo sin base exacta compatible: {lid}")
+        adapter_defs.append(ld)
+    memory_manager.prepare_for_load(defn, adapters=adapter_defs, job=job)
 
     if not catalog_manager.is_downloaded(model_id):
         if auto_download:
@@ -1343,8 +1360,7 @@ def _load_video_model_into_memory_locked(
     def _map_pct(frac: float) -> float:
         return _span(load_frac_start + frac * (1.0 - load_frac_start))
 
-    if required_ram is not None:
-        require_available_host_ram(float(required_ram), stage=f"carga de {model_id}", job=job)
+    memory_manager.prepare_for_load(defn, adapters=adapter_defs, job=job)
 
     art = defn["artifacts"][0]
     base_dir = catalog_manager.model_dir(model_id) / art["subdir"]
@@ -1582,7 +1598,7 @@ def _frames_to_mp4(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-@serialized_gpu_operation
+@serialized_gpu_operation(slots=lambda args: () if args["mode"] == "ffmpeg_motion" or args["model_id"] == "ffmpeg-motion-cpu" else ("video",), managed=True)
 def generate_video_clip(
     mode: str = "ai",  # "ai" | "ffmpeg_motion"
     video_submode: str = "auto",  # "auto" | "t2v" | "i2v" | "flf2v"
@@ -1730,6 +1746,7 @@ def generate_video_clip(
             auto_download=True,
             job=job,
             progress_range=(1.0, 42.0),
+            extra_lora_ids=list(dict.fromkeys(([video_lora_id] if video_lora_id else []) + list(extra_video_lora_ids or []))),
         )
         slot = memory_manager.get_slot("video")
         infer_pct_start = 44.0
@@ -1898,6 +1915,7 @@ def generate_video_clip(
     pct_span = 90.0 - infer_pct_start
 
     def _step_cb(_p: Any, idx: int, _ts: Any, kw: Dict[str, Any]) -> Dict[str, Any]:
+        checkpoint_current_operation(job=job, force=True)
         if job:
             job.check_cancelled()
             now = time.time()
@@ -2045,6 +2063,7 @@ def generate_video_clip(
             kwargs["last_image"] = end_pil
 
     generated_audio_wav: Optional[Path] = None
+    checkpoint_current_operation(job=job, force=True)
     try:
         if engine == "ltx2_av":
             kwargs["output_type"] = "np"
@@ -2060,14 +2079,7 @@ def generate_video_clip(
                 generated_audio_wav = VIDEOS_OUT_DIR / f"_tmp_ltx2_audio_{ts_slug}.wav"
                 _write_float_audio_wav(audio_out[0], sr, generated_audio_wav)
         else:
-            try:
-                output = pipe(**kwargs)
-            except TypeError as exc:
-                if "callback_on_step_end" in str(exc) and "callback_on_step_end" in kwargs:
-                    kwargs.pop("callback_on_step_end", None)
-                    output = pipe(**kwargs)
-                else:
-                    raise
+            output = pipe(**kwargs)
             frames = output.frames[0] if hasattr(output, "frames") else output.images
 
         out_name = f"vid_{ts_slug}_{actual_seed % 10000:04d}.mp4"

@@ -18,7 +18,6 @@ from __future__ import annotations
 import gc
 import json
 import subprocess
-import tempfile
 import threading
 import wave
 from datetime import datetime
@@ -28,10 +27,11 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from studio.catalog import CatalogManager, catalog_manager
-from studio.config import AUDIO_OUT_DIR, VIDEOS_OUT_DIR
+from studio.config import AUDIO_OUT_DIR
 from studio.engines.ffmpeg_utils import get_ffmpeg_bin, probe_media_info
+from studio.memory_safety_hooks import (guarded_model_load, cleanup_partial_load, generation_memory_criteria, diffusion_memory_callback_kwargs)
 from studio.jobs import JobRecord
-from studio.memory_manager import memory_manager
+from studio.memory_manager import memory_manager, serialized_gpu_operation, checkpoint_current_operation
 
 
 AMBIENCE_PRESETS: Dict[str, str] = {
@@ -296,6 +296,7 @@ class AudioStudioEngine:
         except Exception:
             pass
 
+    @serialized_gpu_operation(slots=lambda args: () if args["model_id"] == "procedural-ambience-cpu" else ("audio_bgm",), managed=True)
     def generate_music_or_ambience(
         self,
         job: JobRecord,
@@ -327,6 +328,7 @@ class AudioStudioEngine:
 
         engine = defn.get("engine")
         if engine == "procedural_dsp":
+            checkpoint_current_operation(job=job, force=True)
             chosen_preset = infer_ambience_preset(prompt=prompt, preset=preset)
             job.log(
                 f"Sintetizando paisaje acústico estéreo «{chosen_preset}» ({dur:.1f}s)...",
@@ -379,29 +381,36 @@ class AudioStudioEngine:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         base_dir = self.catalog.model_dir(chosen_id) / "base"
 
+        if self.loaded_model_id != chosen_id or self._pipe is None:
+            if memory_manager.get_slot("audio_bgm"):
+                memory_manager.unload_slot("audio_bgm")
+            else:
+                self.unload()
+            memory_manager.prepare_for_load(defn, job=job)
+
         if engine == "musicgen":
             from transformers import AutoProcessor, MusicgenForConditionalGeneration
 
-            with self._lock:
-                if self.loaded_model_id != chosen_id or self._pipe is None:
-                    self.unload()
-                    job.log(
-                        f"Cargando «{defn['name']}» en {device.upper()}...",
-                        progress=15.0,
-                        step="Cargando MusicGen...",
-                    )
-                    dtype = torch.float16 if device == "cuda" else torch.float32
-                    self._processor = AutoProcessor.from_pretrained(str(base_dir), local_files_only=True)
-                    self._pipe = MusicgenForConditionalGeneration.from_pretrained(
-                        str(base_dir),
-                        torch_dtype=dtype,
-                        local_files_only=True,
-                    ).to(device)
-                    self.loaded_model_id = chosen_id
-                    memory_manager.register_loaded("audio_bgm", chosen_id, defn["name"], self)
+            with cleanup_partial_load(self.unload):
+                with self._lock:
+                    if self.loaded_model_id != chosen_id or self._pipe is None:
+                        job.log(
+                            f"Cargando «{defn['name']}» en {device.upper()}...",
+                            progress=15.0,
+                            step="Cargando MusicGen...",
+                        )
+                        dtype = torch.float16 if device == "cuda" else torch.float32
+                        self._processor = guarded_model_load(AutoProcessor.from_pretrained, str(base_dir), local_files_only=True)
+                        self._pipe = guarded_model_load(MusicgenForConditionalGeneration.from_pretrained,
+                            str(base_dir),
+                            torch_dtype=dtype,
+                            local_files_only=True,
+                        ).to(device)
+                        self.loaded_model_id = chosen_id
+                        memory_manager.register_loaded("audio_bgm", chosen_id, defn["name"], self)
 
-                processor = self._processor
-                model = self._pipe
+                    processor = self._processor
+                    model = self._pipe
 
             clean_prompt = (prompt or "").strip() or "warm smooth acoustic jazz piano restaurant background music"
             max_tokens = max(64, min(1500, int(round(dur * 51.2))))
@@ -413,8 +422,10 @@ class AudioStudioEngine:
             if seed >= 0:
                 torch.manual_seed(int(seed))
             inputs = processor(text=[clean_prompt], padding=True, return_tensors="pt").to(device)
+            checkpoint_current_operation(job=job, force=True)
             with torch.inference_mode():
-                audio_values = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=True, guidance_scale=3.0)
+                audio_values = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=True, guidance_scale=3.0,
+                                              stopping_criteria=generation_memory_criteria(job))
             sr = int(getattr(model.config.audio_encoder, "sampling_rate", 32000))
             wav_np = audio_values[0].detach().float().cpu().numpy()
             _write_float_wav(out_path, wav_np, sample_rate=sr)
@@ -422,22 +433,22 @@ class AudioStudioEngine:
         elif engine == "audioldm2":
             from diffusers import AudioLDM2Pipeline
 
-            with self._lock:
-                if self.loaded_model_id != chosen_id or self._pipe is None:
-                    self.unload()
-                    job.log(
-                        f"Cargando «{defn['name']}» en {device.upper()}...",
-                        progress=15.0,
-                        step="Cargando AudioLDM 2...",
-                    )
-                    dtype = torch.float16 if device == "cuda" else torch.float32
-                    pipe = AudioLDM2Pipeline.from_pretrained(str(base_dir), torch_dtype=dtype, local_files_only=True)
-                    if device == "cuda":
-                        pipe.enable_model_cpu_offload()
-                    self._pipe = pipe
-                    self.loaded_model_id = chosen_id
-                    memory_manager.register_loaded("audio_bgm", chosen_id, defn["name"], self)
-                pipe = self._pipe
+            with cleanup_partial_load(self.unload):
+                with self._lock:
+                    if self.loaded_model_id != chosen_id or self._pipe is None:
+                        job.log(
+                            f"Cargando «{defn['name']}» en {device.upper()}...",
+                            progress=15.0,
+                            step="Cargando AudioLDM 2...",
+                        )
+                        dtype = torch.float16 if device == "cuda" else torch.float32
+                        pipe = guarded_model_load(AudioLDM2Pipeline.from_pretrained, str(base_dir), torch_dtype=dtype, local_files_only=True)
+                        if device == "cuda":
+                            pipe.enable_model_cpu_offload()
+                        self._pipe = pipe
+                        self.loaded_model_id = chosen_id
+                        memory_manager.register_loaded("audio_bgm", chosen_id, defn["name"], self)
+                    pipe = self._pipe
 
             clean_prompt = (prompt or "").strip() or "cozy restaurant ambience, soft background conversation and subtle cutlery"
             gen = torch.Generator(device="cpu").manual_seed(int(seed) if seed >= 0 else 42)
@@ -446,6 +457,7 @@ class AudioStudioEngine:
                 progress=45.0,
                 step="Sintetizando audio con AudioLDM 2...",
             )
+            checkpoint_current_operation(job=job, force=True)
             with torch.inference_mode():
                 out = pipe(
                     clean_prompt,
@@ -453,6 +465,7 @@ class AudioStudioEngine:
                     num_inference_steps=60,
                     audio_length_in_s=dur,
                     generator=gen,
+                    **diffusion_memory_callback_kwargs(pipe, job),
                 )
             wav_np = out.audios[0]
             _write_float_wav(out_path, wav_np, sample_rate=16000)

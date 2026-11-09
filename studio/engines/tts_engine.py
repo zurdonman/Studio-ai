@@ -9,11 +9,15 @@ from typing import Any, Dict, List, Optional
 from studio.catalog import catalog_manager
 from studio.config import AUDIO_OUT_DIR
 from studio.engines.ffmpeg_utils import probe_media_info
+from studio.memory_safety_hooks import guarded_model_load
 from studio.jobs import JobRecord
+from studio.memory_policy import MemoryPressureError
 from studio.memory_manager import (
     flush_ram_and_vram,
     memory_manager,
     run_with_live_memory_progress,
+    serialized_gpu_operation,
+    checkpoint_current_operation,
 )
 
 EDGE_TTS_VOICES: List[Dict[str, str]] = [
@@ -41,6 +45,7 @@ def _write_pcm16_wav(samples: Any, sample_rate: int, out_path: Path) -> None:
         wf.writeframes(pcm16.tobytes())
 
 
+@serialized_gpu_operation(slots=lambda args: () if args["model_id"] == "edge-tts-cloud" else ("tts",), managed=True)
 def load_tts_model_into_memory(
     model_id: str,
     auto_download: bool = False,
@@ -64,6 +69,13 @@ def load_tts_model_into_memory(
             job.log(f"«{defn['name']}» ya está cargado en memoria.", level="success", progress=100.0, step="Listo")
         return {"model_id": model_id}
 
+    if not catalog_manager.is_downloaded(model_id) and (not auto_download or job is None):
+        raise RuntimeError(f"«{defn['name']}» no está descargado; no se modifica la memoria ni el disco.")
+    if cur_tts:
+        memory_manager.unload_slot("tts")
+        del cur_tts
+    memory_manager.prepare_for_load(defn, job=job)
+
     if not catalog_manager.is_downloaded(model_id):
         if auto_download and job is not None:
             catalog_manager.download_model(model_id, job, progress_range=(1.0, 65.0))
@@ -73,9 +85,7 @@ def load_tts_model_into_memory(
     else:
         p_start = 8.0
 
-    if cur_tts:
-        memory_manager.unload_slot("tts")
-
+    memory_manager.prepare_for_load(defn, job=job)
     art = defn["artifacts"][0]
     base_dir = catalog_manager.model_dir(model_id) / art["subdir"]
 
@@ -91,8 +101,8 @@ def load_tts_model_into_memory(
                 end_pct=96.0,
                 step_label="Cargando Kokoro-82M",
                 fn=lambda: KPipeline(lang_code="e", repo_id=art["repo_id"],
-                    model=KModel(repo_id=art["repo_id"], config=str(base_dir / "config.json"),
-                                 model=str(base_dir / "kokoro-v1_0.pth")).to("cpu").eval()),
+                    model=guarded_model_load(KModel, repo_id=art["repo_id"], config=str(base_dir / "config.json"),
+                                             model=str(base_dir / "kokoro-v1_0.pth")).to("cpu").eval()),
                 expected_seconds=10.0,
             )
             memory_manager.register_loaded(
@@ -117,7 +127,7 @@ def load_tts_model_into_memory(
             start_pct=p_start,
             end_pct=96.0,
             step_label=f"Cargando {defn['name']}",
-            fn=lambda: pipeline("text-to-speech", model=str(base_dir), device=device),
+            fn=lambda: guarded_model_load(pipeline, "text-to-speech", model=str(base_dir), device=device),
             expected_seconds=12.0,
         )
         memory_manager.register_loaded(
@@ -127,10 +137,13 @@ def load_tts_model_into_memory(
             handle={"type": "transformers_tts", "pipe": tts_pipe},
         )
         return {"model_id": model_id}
+    except MemoryPressureError:
+        raise
     except Exception as exc:
         raise RuntimeError(f"No se pudo inicializar el modelo local TTS ({exc}).") from exc
 
 
+@serialized_gpu_operation(slots=lambda args: () if args["engine_id"] == "edge-tts-cloud" else ("tts",), managed=True)
 def synthesize_voice(
     text: str,
     engine_id: str = "edge-tts-cloud",
@@ -170,6 +183,7 @@ def synthesize_voice(
             comm = edge_tts.Communicate(clean_text, voice=voice_id, rate=rate_str, pitch=pitch_str)
             await comm.save(str(out_path))
 
+        checkpoint_current_operation(job=job, force=True)
         try:
             asyncio.run(_run_edge())
         except Exception as exc:
@@ -221,12 +235,14 @@ def synthesize_voice(
 
         chunks = []
         for _, _, audio in handle["pipe"](clean_text, voice=handle["voice"], speed=1.0 + (rate_pct / 100.0)):
+            checkpoint_current_operation(job=job, force=True)
             chunks.append(audio)
         if not chunks:
             raise RuntimeError("Kokoro no devolvió muestras de audio.")
         full_audio = np.concatenate(chunks)
         _write_pcm16_wav(full_audio, 24000, out_path)
     else:
+        checkpoint_current_operation(job=job, force=True)
         res = handle["pipe"](clean_text)
         _write_pcm16_wav(res["audio"], int(res["sampling_rate"]), out_path)
 

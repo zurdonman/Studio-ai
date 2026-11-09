@@ -719,7 +719,8 @@ def test_official_model_specs_prevent_hallucination_and_incompatible_flf2v(temp_
         assert "Wan 2.1 VACE 1.3B" in r_bad_flf.json()["detail"]
 
 
-def test_video_speed_loras_and_steps_reset_controls(temp_studio_env, monkeypatch):
+def test_video_speed_loras_and_steps_reset_controls(temp_studio_env, monkeypatch, colab_memory):
+    colab_memory()
     import numpy as np
     from studio.catalog import DEFAULT_CATALOG, catalog_manager
     from studio.engines.video_engine import _prepare_wan_lora_state_dict, _sync_video_lora_on_handle
@@ -2234,7 +2235,8 @@ def test_higgsfield_mode_local_cinema_motion_cast_clipper_and_mcp(temp_studio_en
     assert r_del["ok"] is True
 
 
-def test_lora_catalog_multi_model_compatibility_and_stacking(temp_studio_env) -> None:
+def test_lora_catalog_multi_model_compatibility_and_stacking(temp_studio_env, colab_memory) -> None:
+    colab_memory()
     """Verifica los 35 LoRAs de HF (personaje, entorno, calidad, edición, cámara, estilo y velocidad) y el apilamiento Multi-LoRA."""
     from studio.catalog import catalog_manager
     from studio.engines.image_engine import _is_image_lora_compatible
@@ -2773,7 +2775,8 @@ def test_same_model_download_lock_prevents_hf_cache_deletion_race(temp_studio_en
 
 
 @pytest.fixture
-def mock_colab_image_runtime(temp_studio_env, monkeypatch, tmp_path):
+def mock_colab_image_runtime(temp_studio_env, monkeypatch, tmp_path, colab_memory):
+    colab_memory()
     import sys
     import types
     from studio.engines import image_engine as engine
@@ -3219,3 +3222,55 @@ def test_mcp_sanitizes_raw_image_and_video_prompts_before_inference(temp_studio_
     assert len(prompts) == 2
     assert all("tree-lined avenue" in prompt for prompt in prompts)
     assert all(not any(meta in prompt.lower() for meta in ("diálogos", "clip de", "60s", "loras", "lipsync")) for prompt in prompts)
+
+
+def test_image_full_stack_admission_precedes_downloads(mock_colab_image_runtime, colab_memory):
+    from studio.memory_policy import MemoryPressureError
+    engine, manager, events, pipes, downloaded = mock_colab_image_runtime
+    colab_memory(ram=32, available=30)
+    with pytest.raises(MemoryPressureError, match="MEMORY_BUDGET_EXCEEDED"):
+        engine.generate_or_edit_image(prompt="two people walking", use_ffmpeg_bt709=False,
+            custom_lora_ids=["qwen-lora-skin-realism", "qwen-lora-flatlog-cinema", "qwen-lora-next-scene", "qwen-lora-anylight-env"],
+            lora_scales={"qwen-lora-next-scene": 0, "qwen-lora-anylight-env": 0})
+    assert not downloaded and not pipes and not events
+    assert not manager.loaded_model_ids()
+
+
+def test_real_image_callback_stops_pressure_without_job_or_inference_replay(mock_colab_image_runtime, colab_memory, monkeypatch):
+    from studio.memory_policy import MemoryPressureError
+    engine, manager, events, pipes, _ = mock_colab_image_runtime
+    state = colab_memory()
+    calls = []
+    class Pipe:
+        def __call__(self, prompt, callback_on_step_end=None, **kwargs):
+            calls.append(True)
+            state["available"] = 2
+            callback_on_step_end(self, 0, 0, {})
+            pytest.fail("No next diffusion step after memory protection")
+    def instantiate(*args):
+        # Base factory still follows the normal reviewed/pre-offload load flow.
+        pipe = Pipe()
+        pipe.enable_model_cpu_offload = lambda: None
+        pipe.load_lora_weights = lambda *a, **kw: None
+        pipe.set_adapters = lambda *a, **kw: None
+        pipe.disable_lora = lambda: None
+        pipe.enable_lora = lambda: None
+        return pipe
+    monkeypatch.setattr(engine, "_instantiate_image_pipeline", instantiate)
+    with pytest.raises(MemoryPressureError, match="MEMORY_SAFETY_STOP"):
+        engine.generate_or_edit_image(prompt="a street", use_ffmpeg_bt709=False, use_lightning_lora=False)
+    assert calls == [True] and not manager.loaded_model_ids()
+
+
+def test_image_internal_typeerror_is_not_retried(mock_colab_image_runtime, monkeypatch):
+    engine, manager, events, pipes, _ = mock_colab_image_runtime
+    engine.load_image_model_into_memory(auto_download=True)
+    pipe = pipes[0]
+    calls = []
+    def fail(self, prompt, **kwargs):
+        calls.append(True)
+        raise TypeError("internal tensor callback_on_step_end type mismatch")
+    monkeypatch.setattr(type(pipe), "__call__", fail)
+    with pytest.raises(TypeError, match="internal tensor"):
+        engine.generate_or_edit_image(prompt="a street", use_ffmpeg_bt709=False)
+    assert calls == [True]

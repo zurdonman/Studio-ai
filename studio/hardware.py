@@ -1,17 +1,14 @@
 import json
-import os
 import shutil
 import subprocess
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
-import psutil
 
 from studio.config import DATA_ROOT, STATE_DIR, is_colab_env
 from studio.diagnostics import redact_secrets
+from studio.memory_policy import host_memory
 
 CREDITS_STATE_FILE = STATE_DIR / "credits_state.json"
 SHUTDOWN_FLAG_FILE = STATE_DIR / "shutdown_requested.flag"
@@ -93,9 +90,17 @@ def query_gpu_info() -> Dict[str, Any]:
                 total_gb = total_b / (1024**3)
                 free_gb = free_b / (1024**3)
                 used_gb = max(0.0, total_gb - free_gb)
+                measurement_source = "cuda_driver_mem_get_info"
             except Exception:
+                # PyTorch's own allocator excludes ONNX/bnb/external processes.
+                # Never mistake its unused share for real device headroom.
+                smi = _query_nvidia_smi()
+                if smi:
+                    return {**smi, "vram_allocated_gb": round(alloc_gb, 2),
+                            "vram_reserved_gb": round(reserved_gb, 2)}
                 used_gb = max(alloc_gb, reserved_gb)
-                free_gb = max(0.0, total_gb - used_gb)
+                free_gb = None
+                measurement_source = "allocator_only_device_free_unknown"
 
             tier = _classify_gpu_tier(name)
             return {
@@ -104,13 +109,14 @@ def query_gpu_info() -> Dict[str, Any]:
                 "gpu_tier": tier,
                 "gpu_count": torch.cuda.device_count(),
                 "memory_scope": "device_0_not_sum",
+                "measurement_source": measurement_source,
                 "compute_capability": f"{props.major}.{props.minor}" if hasattr(props, "major") else None,
                 "bf16_supported": props.major >= 8 if hasattr(props, "major") else None,
                 "vram_total_gb": round(total_gb, 2),
                 "vram_used_gb": round(used_gb, 2),
                 "vram_allocated_gb": round(alloc_gb, 2),
                 "vram_reserved_gb": round(reserved_gb, 2),
-                "vram_free_gb": round(free_gb, 2),
+                "vram_free_gb": round(free_gb, 2) if free_gb is not None else None,
                 "vram_percent": round((used_gb / total_gb) * 100, 1) if total_gb > 0 else 0.0,
             }
     except Exception:
@@ -168,6 +174,7 @@ def _query_nvidia_smi() -> Optional[Dict[str, Any]]:
             "gpu_tier": tier,
             "gpu_count": len(lines),
             "memory_scope": "device_0_not_sum",
+            "measurement_source": "nvidia_smi_driver",
             "compute_capability": None,
             "bf16_supported": True if tier in ("L4", "A100", "H100") else False if tier in ("T4", "V100") else None,
             "vram_total_gb": round(total_gb, 2),
@@ -263,7 +270,7 @@ class HardwareAndCreditsTracker:
         if self._state.get("rate_auto", True):
             self._state["hourly_rate"] = detected_default_rate
 
-        vm = psutil.virtual_memory()
+        effective_ram = host_memory()
         DATA_ROOT.mkdir(parents=True, exist_ok=True)
         disk = shutil.disk_usage(DATA_ROOT)
 
@@ -293,10 +300,7 @@ class HardwareAndCreditsTracker:
             ),
             "gpu": gpu,
             "ram": {
-                "total_gb": round(vm.total / (1024**3), 2),
-                "used_gb": round((vm.total - vm.available) / (1024**3), 2),
-                "available_gb": round(vm.available / (1024**3), 2),
-                "percent": round(vm.percent, 1),
+                **{k: round(v, 2) if isinstance(v, float) else v for k, v in effective_ram.items()},
             },
             "disk": {
                 "path": str(DATA_ROOT),

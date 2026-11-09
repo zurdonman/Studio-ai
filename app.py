@@ -98,10 +98,12 @@ STATIC_DIR = Path(__file__).resolve().parent / "studio" / "static"
 @asynccontextmanager
 async def studio_lifespan(_app: FastAPI):
     model_discovery.start()
+    memory_manager.start()
     try:
         yield
     finally:
         model_discovery.stop()
+        memory_manager.stop()
 
 
 app = FastAPI(
@@ -372,12 +374,18 @@ def api_status() -> Dict[str, Any]:
         "memory": {
             "loaded_slots": memory_manager.status_summary(),
             "loaded_ids": memory_manager.loaded_model_ids(),
+            "guardian": memory_manager.guardian_status(),
         },
         "jobs": jobs,
         "active_jobs_count": active_cnt,
         "unexported_outputs_count": _count_unexported_outputs(),
         "hf_auth": catalog_manager.hf_auth_status(),
     }
+
+
+@app.get("/api/memory/status")
+def api_memory_status() -> Dict[str, Any]:
+    return {"guardian": memory_manager.guardian_status(), "loaded_slots": memory_manager.status_summary()}
 
 
 @app.get("/api/hf/auth")
@@ -597,8 +605,6 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
             extra.append(req.model_id)
 
         def _load_img(j: Any) -> Dict[str, Any]:
-            if cat == "lora" and req.auto_download and not catalog_manager.is_downloaded(req.model_id):
-                catalog_manager.download_model(req.model_id, j)
             return load_image_model_into_memory(
                 model_id=target_id,
                 extra_lora_ids=extra,
@@ -620,8 +626,9 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
                 model_id=req.model_id,
                 auto_download=req.auto_download,
                 job=j,
+                extra_lora_ids=list(req.extra_lora_ids),
             ),
-            dedup_key=f"prepare:{req.model_id}",
+            dedup_key=model_prepare_job_key(req.model_id, req.extra_lora_ids),
         )
     elif cat == "tts":
         job = job_manager.submit(

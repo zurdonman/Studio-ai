@@ -170,12 +170,12 @@ Las importaciones manuales se guardan como `validation_state=candidate`. Se cons
 `wait_seconds` admite 1–88 (NO `max_wait_seconds`). `running`, `queued`, heartbeat lento o timeout HTTP no son fallo del modelo. No duplicar preparación ni invocar otra variante en paralelo. Un ID de job se obtiene de una respuesta real.
 
 5. Error de librería/PEFT/bitsandbytes/tensor meta: parar, conservar pesos y exportar log con `studio_export_session_log`. Actualizar/reiniciar el proceso correcto; no desconectar Colab ni borrar `/content/studio_data` como primer remedio.
-6. OOM: revisar memoria real, liberar slots, reducir resolución/frames **dentro de la receta**, o elegir otra receta con autorización. No asumir que cualquier combinación de 4-bit, sequential/model/group offload y casting es válida.
+6. La memoria se gestiona automáticamente: consultar `memory_guardian` antes de actuar. Ante OOM o parada preventiva, revisar memoria real y eventos, reducir resolución/frames **dentro de la receta**, o elegir otra receta con autorización. No asumir que cualquier combinación de 4-bit, sequential/model/group offload y casting es válida.
 7. Espacio insuficiente: exportar salidas, revisar sugerencias y **pedir permiso** antes de `delete_from_disk`. No borrar cachés/pesos de trabajo sin autorización.
 
 ### 8.1. Caída del proceso o túnel, no confundir con un fallo del modelo
 
-Ver [procedimiento de rescate de Colab](COLAB_RECOVERY.md). Wan 14B FP8 usa dtype FP8 explícito y carga meta/CPU: no expandir a FP32 con dtype `None` antes del casting. Se vuelve a medir RAM después de liberar slots y antes de descargar/cargar; `HOST_RAM_BUDGET_EXCEEDED` conserva los pesos y no autoriza una descarga alternativa.
+Ver [procedimiento de rescate de Colab](COLAB_RECOVERY.md). Wan 14B FP8 usa dtype FP8 explícito y carga meta/CPU: no expandir a FP32 con dtype `None` antes del casting. Se vuelve a medir RAM después de liberar slots y antes de descargar/cargar; `MEMORY_BUDGET_EXCEEDED` (antes `HOST_RAM_BUDGET_EXCEEDED`) conserva los pesos y no autoriza una descarga alternativa.
 
 Un 502 o 530/1033 **no confirma OOM ni que la VM haya desaparecido**. El padre puede cerrar el túnel después de que muera solo el servidor. Revisar `state/diagnostics` y la celda de rescate del notebook: código/señal de salida, stderr, cloudflared, RSS/RAM y eventos cgroup. El ZIP de `GET /api/logs/diagnostics` oculta tokens y no incluye pesos/multimedia. Si la VM se elimina, su disco efímero también: descargar antes.
 
@@ -183,9 +183,18 @@ Actualizar también el puente `studio_mcp.py`. Una conexión interrumpida conser
 
 El inspector usa archivos locales y la API real del catálogo. No hace un segundo intento BF16 tras fallar 4-bit. Si `hybrid_auto` no pudo ejecutar el VLM, `all_consistent=false`, `identity_verified=false`, `ready_for_video=false`: revisar `vlm_fallback_reason`. En `fast_cv` explícito, PASS/`all_consistent` solo se refieren a fotometría con el `effective_comparison_threshold` publicado; **no prueban identidad ni autorizan por sí solos el preset semántico de vídeo**.
 
+### 8.2. Memoria automática, también sin agente conectado
+
+Studio inicia un vigilante de RAM/VRAM con el servidor (1 s por defecto), usa memoria efectiva cgroup y reserva margen adicional (RAM: 10 % o 1 GiB; VRAM: 8 % o 0,5 GiB). Limpia caché y expulsa por LRU solo modelos inactivos, volviendo a medir. Todos los motores —también TTS, música y ONNX— comparten turno y protección de slots activos. Si el turno está ocupado, el vigilante espera a un punto seguro del motor; no borra un pipeline vivo desde otro hilo.
+
+La admisión suma **base + componentes + todos los LoRA residentes + reserva**, incluso adaptadores a escala cero. Un preset publica `selected_video_stack.memory_assessment`; `ok=true` es compilación, no validación GPU. Una fase con `do_not_execute=true` no se ejecuta ni se sustituye automáticamente. Al reutilizar una base, la admisión incremental no cuenta de nuevo sus pesos.
+
+Consultar `studio_get_state_and_manual.memory_guardian`, `GET /api/memory/status` y `job.memory_protection`. `MEMORY_BUDGET_EXCEEDED`/`MEMORY_BUDGET_UNKNOWN` paran la admisión; `MEMORY_SAFETY_STOP` para cooperativamente una operación sin margen. No repetir automáticamente el mismo job ni borrar archivos. Los eventos locales acotados se incluyen en el ZIP de diagnóstico. [Política completa y límites](MEMORY_MANAGEMENT.md): una asignación nativa individual puede adelantarse al muestreo; no es una garantía de cero OOM ni una prueba GPU.
+
 ## 9. API web equivalente y pruebas reproducibles
 
 - `GET /api/catalog/hf-search?query=Wan&category=video&gpu_profile=auto&only_compatible=true&limit=12&offset=0`
+- `GET /api/memory/status` (vigilancia, presión, reserva y modelos protegidos)
 - `GET /api/models/discovery/status`
 - `POST /api/models/discovery/settings` con `{"auto_refresh":true,"interval_minutes":360}`
 - `POST /api/models/discovery/refresh` con `{"category":"all"}` → job, no pesos.

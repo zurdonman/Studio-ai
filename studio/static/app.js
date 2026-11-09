@@ -203,7 +203,26 @@
     $("ephemeral-note-text").textContent = hw.ephemeral_disk_notice;
 
     const loadedSlots = (mem && mem.loaded_slots) || [];
-    $("nav-loaded-count").textContent = `${loadedSlots.length} en VRAM`;
+    $("nav-loaded-count").textContent = `${loadedSlots.length} en RAM/VRAM`;
+    const guardian = mem && mem.guardian;
+    if (guardian && $("memory-guardian-state")) {
+      const observation = guardian.last_observation || {};
+      const pressure = observation.pressure || {};
+      const reserve = pressure.reserve || {};
+      const pending = guardian.last_action === "pressure_pending_safe_checkpoint";
+      $("memory-guardian-state").textContent = !guardian.running ? "Sin vigilancia activa"
+        : pending ? "Esperando punto seguro"
+        : pressure.level === "critical" ? "Presión crítica"
+        : pressure.level === "pressure" ? "Liberando inactivos"
+        : pressure.level === "unknown" || guardian.measurements_healthy === false ? "Medición no disponible" : "Vigilando";
+      $("memory-guardian-reserve").textContent = reserve.ram_gb !== undefined
+        ? `Margen: ${Number(reserve.ram_gb).toFixed(1)} RAM · ${Number(reserve.vram_gb || 0).toFixed(1)} VRAM GiB`
+        : "Modelos en uso protegidos";
+      $("memory-guardian-pill").classList.toggle("memory-warning", guardian.measurements_healthy === false || (pressure.level && pressure.level !== "normal"));
+      const events = guardian.recent_events || [];
+      const lastEvent = events.length ? events[events.length - 1].message : "Sin expulsiones recientes.";
+      $("memory-guardian-pill").title = `Solo se liberan modelos inactivos. En uso: ${(guardian.protected_slots || []).join(", ") || "ninguno"}. ${lastEvent}`;
+    }
 
     const badge = $("unexported-badge");
     if (state.unexportedCount > 0) {

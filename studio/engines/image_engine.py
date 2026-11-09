@@ -19,21 +19,24 @@ from studio.engines.ffmpeg_utils import (
     verify_image_file,
 )
 from studio.hardware import query_gpu_info
+from studio.memory_safety_hooks import guarded_model_load
 from studio.jobs import JobRecord
+from studio.memory_policy import MemoryPressureError
 from studio.model_recipes import REVIEWED_IMAGE_ENGINES
 from studio.memory_manager import (
     flush_ram_and_vram,
     memory_manager,
     run_with_live_memory_progress,
     serialized_gpu_operation,
+    checkpoint_current_operation,
 )
 
 
 def _safe_load_lora(pipe: Any, lora_dir: Path, filename: Optional[str], adapter_name: str) -> None:
     if filename:
-        pipe.load_lora_weights(str(lora_dir), weight_name=filename, adapter_name=adapter_name)
+        guarded_model_load(pipe.load_lora_weights, str(lora_dir), weight_name=filename, adapter_name=adapter_name)
         return
-    pipe.load_lora_weights(str(lora_dir), adapter_name=adapter_name)
+    guarded_model_load(pipe.load_lora_weights, str(lora_dir), adapter_name=adapter_name)
 
 
 def _instantiate_image_pipeline(engine: str, base_dir: Path, definition: Optional[Dict[str, Any]] = None) -> Any:
@@ -45,20 +48,18 @@ def _instantiate_image_pipeline(engine: str, base_dir: Path, definition: Optiona
     if engine == "qwen_image_edit":
         from diffusers import QwenImageEditPlusPipeline  # type: ignore
 
-        return QwenImageEditPlusPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+        return guarded_model_load(QwenImageEditPlusPipeline.from_pretrained, bdir, torch_dtype=torch.bfloat16)
 
     if engine == "qwen_image_t2i":
         from diffusers import QwenImagePipeline  # type: ignore
 
-        return QwenImagePipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+        return guarded_model_load(QwenImagePipeline.from_pretrained, bdir, torch_dtype=torch.bfloat16)
 
     if engine == "sdxl_turbo":
         from diffusers import AutoPipelineForText2Image  # type: ignore
 
-        try:
-            return AutoPipelineForText2Image.from_pretrained(bdir, torch_dtype=torch.float16, variant="fp16")
-        except Exception:
-            return AutoPipelineForText2Image.from_pretrained(bdir, torch_dtype=torch.float16)
+        return guarded_model_load(AutoPipelineForText2Image.from_pretrained, bdir, torch_dtype=torch.float16,
+                                  variant="fp16", low_cpu_mem_usage=True, local_files_only=True)
 
     if engine in REVIEWED_IMAGE_ENGINES:
         contract = REVIEWED_IMAGE_ENGINES[engine]
@@ -81,7 +82,7 @@ def _instantiate_image_pipeline(engine: str, base_dir: Path, definition: Optiona
         kwargs = {"torch_dtype": getattr(torch, contract["dtype"]), "local_files_only": True, "use_safetensors": True}
         if engine == "sdxl_base":
             kwargs["variant"] = "fp16"
-        pipe = pipeline_cls.from_pretrained(bdir, **kwargs)
+        pipe = guarded_model_load(pipeline_cls.from_pretrained, bdir, **kwargs)
         component_dtypes = ((definition or {}).get("official_spec") or {}).get("component_dtypes", {})
         for component, dtype in component_dtypes.items():
             module = getattr(pipe, component, None)
@@ -116,7 +117,7 @@ def _is_image_lora_compatible(ldef: Dict[str, Any], model_id: str, engine: Optio
     return False
 
 
-@serialized_gpu_operation
+@serialized_gpu_operation(slots=("image",), managed=True)
 def load_image_model_into_memory(
     model_id: str = "qwen-image-edit-2511-pack",
     extra_lora_ids: Optional[List[str]] = None,
@@ -199,6 +200,31 @@ def _load_image_model_into_memory_locked(
         if getattr(torch.cuda.get_device_properties(0), "major", 0) < 8:
             raise RuntimeError("La receta seleccionada exige BF16 nativo; no descargues pesos para una T4/V100 con esta receta.")
 
+    if not auto_download and not catalog_manager.is_downloaded(model_id):
+        raise RuntimeError(f"«{defn['name']}» no está descargado; no se modifica la memoria ni el disco.")
+    adapter_defs = []
+    for lid in sorted(downloaded_loras | set(requested_loras)):
+        ld = catalog_manager.get_definition(lid)
+        if not ld or not _is_image_lora_compatible(ld, model_id, target_engine):
+            raise ValueError(f"LoRA de imagen desconocido o incompatible con {model_id}: {lid}")
+        adapter_defs.append(ld)
+    # Liberar cualquier modelo previo (vídeo o imagen anterior) antes de alojar el nuevo
+    for prev_slot in ("video", "image"):
+        ps = memory_manager.get_slot(prev_slot)
+        if ps:
+            if job:
+                job.log(
+                    f"Liberando «{ps['name']}» de RAM/VRAM antes de cargar «{defn['name']}»...",
+                    progress=2.0,
+                    step=f"Liberando VRAM previa ({prev_slot})...",
+                )
+            del ps
+            memory_manager.unload_slot(prev_slot)
+
+    flush_ram_and_vram()
+
+    memory_manager.prepare_for_load(defn, adapters=adapter_defs, job=job)
+
     was_downloaded = catalog_manager.is_downloaded(model_id)
     if not was_downloaded:
         if auto_download:
@@ -242,21 +268,6 @@ def _load_image_model_into_memory_locked(
 
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    # Liberar cualquier modelo previo (vídeo o imagen anterior) antes de alojar el nuevo
-    for prev_slot in ("video", "image"):
-        ps = memory_manager.get_slot(prev_slot)
-        if ps:
-            if job:
-                job.log(
-                    f"Liberando «{ps['name']}» de RAM/VRAM antes de cargar «{defn['name']}»...",
-                    progress=_map_load_pct(0.06),
-                    step=f"Liberando VRAM previa ({prev_slot})...",
-                )
-            del ps
-            memory_manager.unload_slot(prev_slot)
-
-    flush_ram_and_vram()
-
     m_dir = catalog_manager.model_dir(model_id)
     base_dir = m_dir / "base"
     if not base_dir.exists():
@@ -272,6 +283,7 @@ def _load_image_model_into_memory_locked(
             step="Cargando pesos en memoria...",
         )
 
+    memory_manager.prepare_for_load(defn, adapters=adapter_defs, job=job)
     pipe: Any = None
     try:
         pipe = run_with_live_memory_progress(
@@ -333,6 +345,8 @@ def _load_image_model_into_memory_locked(
                         )
                     _safe_load_lora(pipe, l_sub, l_fn, adapter_name)
                     loaded_adapters[adapter_name] = lid
+                except MemoryPressureError:
+                    raise
                 except Exception as e:
                     if lid in requested_loras:
                         raise RuntimeError(f"No se pudo cargar el LoRA solicitado {lid}: {e}") from e
@@ -388,7 +402,7 @@ def _load_image_model_into_memory_locked(
     }
 
 
-@serialized_gpu_operation
+@serialized_gpu_operation(slots=("image",), managed=True)
 def generate_or_edit_image(
     prompt: str,
     model_id: Optional[str] = None,
@@ -590,6 +604,7 @@ def generate_or_edit_image(
     step_start = {"ts": time.time()}
 
     def _on_step_end(_pipe: Any, step_index: int, _timestep: Any, callback_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        checkpoint_current_operation(job=job, force=True)
         if job:
             job.check_cancelled()
             now = time.time()
@@ -642,11 +657,8 @@ def generate_or_edit_image(
     if "callback_on_step_end" in call_sig:
         call_kwargs["callback_on_step_end"] = _on_step_end
 
-    try:
-        out = pipe(**call_kwargs)
-    except TypeError:
-        call_kwargs.pop("callback_on_step_end", None)
-        out = pipe(**call_kwargs)
+    checkpoint_current_operation(job=job, force=True)
+    out = pipe(**call_kwargs)
 
     result_pil: Image.Image = out.images[0].convert("RGB")
 

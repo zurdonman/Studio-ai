@@ -2282,3 +2282,7 @@ select:focus {
   .hf-card-heading { flex-wrap: wrap; }
   .hf-live-results { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Automatic model-cache governance: the telemetry is also actionable at safe points. */
+.memory-guardian .metric-val { color: #86efac; }
+.memory-guardian.memory-warning .metric-val { color: #fbbf24; }

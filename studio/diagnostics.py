@@ -68,6 +68,64 @@ def _proc_memory(pid: int) -> dict[str, Any]:
     return values
 
 
+def cgroup_memory_snapshot() -> dict[str, Any]:
+    """Read the process quota and visible ancestors without optional frameworks.
+
+    Containers can be limited by a parent cgroup, not only their leaf. Keep
+    clean inactive page-cache facts separate from the hard quota headroom.
+    """
+    root = Path("/sys/fs/cgroup")
+    candidates = [root]
+    legacy = [root / "memory"]
+    try:
+        for line in Path("/proc/self/cgroup").read_text().splitlines():
+            _, controllers, relative = line.split(":", 2)
+            rel = Path(relative.lstrip("/"))
+            if ".." in rel.parts:
+                continue
+            if not controllers:
+                leaf = root / rel
+                candidates = [leaf, *(p for p in leaf.parents if p != root and root in p.parents), root]
+            elif "memory" in controllers.split(","):
+                memory_root = root / "memory"
+                leaf = memory_root / rel
+                legacy = [leaf, *(p for p in leaf.parents if p != memory_root and memory_root in p.parents), memory_root]
+    except (OSError, ValueError):
+        pass
+
+    def read(folder: Path, version: int) -> dict[str, Any] | None:
+        names = {"memory.max": "memory.max", "memory.current": "memory.current", "memory.peak": "memory.peak"}
+        if version == 1:
+            names = {"memory.max": "memory.limit_in_bytes", "memory.current": "memory.usage_in_bytes", "memory.peak": "memory.max_usage_in_bytes"}
+        record: dict[str, Any] = {"path": str(folder), "version": version}
+        try:
+            for key, filename in names.items():
+                try:
+                    value = (folder / filename).read_text().strip()
+                    record[key] = int(value) if value.isdigit() else value
+                except OSError:
+                    record[key] = "unknown"
+            if record["memory.max"] == "unknown" or record["memory.current"] == "unknown":
+                return None
+            for filename, key in (("memory.stat", "stat"), ("memory.events", "events")):
+                try:
+                    record[key] = {k: int(v) for k, v in (line.split() for line in (folder / filename).read_text().splitlines())}
+                except (OSError, ValueError):
+                    record[key] = {}
+            return record
+        except (OSError, ValueError):
+            return None
+
+    records = [record for folder in dict.fromkeys(candidates) if (record := read(folder, 2))]
+    if not records:
+        records = [record for folder in dict.fromkeys(legacy) if (record := read(folder, 1))]
+    if not records:
+        return {}
+    # Keep the tightest numeric ceiling as the primary diagnostic cgroup.
+    primary = min(records, key=lambda record: record["memory.max"] if isinstance(record["memory.max"], int) else float("inf"))
+    return {**primary, "ancestors": [record for record in records if record is not primary]}
+
+
 def memory_snapshot(pid: int | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {"ts": time.time(), "process": _proc_memory(pid or os.getpid())}
     try:
@@ -79,26 +137,7 @@ def memory_snapshot(pid: int | None = None) -> dict[str, Any]:
         result["host"] = info
     except (OSError, ValueError):
         pass
-    # Resolve the process's cgroup when mounted with the host hierarchy visible.
-    cgroup_paths = [Path("/sys/fs/cgroup")]
-    try:
-        for line in Path("/proc/self/cgroup").read_text().splitlines():
-            if line.startswith("0::"):
-                rel = line[3:].lstrip("/")
-                if ".." not in Path(rel).parts:
-                    cgroup_paths.insert(0, Path("/sys/fs/cgroup") / rel)
-    except OSError:
-        pass
-    for folder in cgroup_paths:
-        try:
-            events = dict(line.split() for line in (folder / "memory.events").read_text().splitlines())
-            result["cgroup"] = {"path": str(folder), "events": {k: int(v) for k, v in events.items()}}
-            for name in ("memory.current", "memory.max", "memory.peak"):
-                value = (folder / name).read_text().strip() if (folder / name).exists() else "unknown"
-                result["cgroup"][name] = int(value) if value.isdigit() else value
-            break
-        except (OSError, ValueError):
-            continue
+    result["cgroup"] = cgroup_memory_snapshot()
     return result
 
 
@@ -180,7 +219,7 @@ def export_diagnostic_bundle(root: Path | None = None, destination: Path | None 
     destination = destination or root / "temp" / ("studio_diagnostics_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + ".zip")
     destination.parent.mkdir(parents=True, exist_ok=True)
     diagnostics = root / "state" / "diagnostics"
-    files = [root / "state" / "session_console.log"]
+    files = [root / "state" / "session_console.log", root / "state" / "memory_guardian.json"]
     if diagnostics.is_dir():
         files += sorted((p for p in diagnostics.rglob("*") if p.is_file() and not p.is_symlink()
                          and p.name in ("server.log", "server.log.1", "tunnel.log", "tunnel.log.1", "events.jsonl", "events.jsonl.1", "telemetry.jsonl", "telemetry.jsonl.1", "status.json")),
@@ -210,7 +249,7 @@ def export_diagnostic_bundle(root: Path | None = None, destination: Path | None 
                           "502/530 no prueban OOM ni pérdida de VM. Consultar exit code, eventos y memoria.\n"
                           "Si Colab destruye la VM, el disco /content también se pierde. Descargar este ZIP antes.\n")
         for path in files:
-            if remaining <= 0 or path.is_symlink():
+            if remaining <= 0 or path.is_symlink() or not path.is_file():
                 continue
             try:
                 resolved = path.resolve()

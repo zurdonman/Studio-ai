@@ -12,12 +12,14 @@ from studio.catalog import catalog_manager
 from studio.compat_patches import apply_runtime_compatibility_patches
 from studio.config import DATA_ROOT
 from studio.hardware import colab_console_log, query_gpu_info
+from studio.memory_safety_hooks import guarded_model_load, generation_memory_criteria
+from studio.memory_policy import MemoryPressureError
 from studio.jobs import JobRecord
 from studio.memory_manager import (
-    flush_ram_and_vram,
     memory_manager,
     run_with_live_memory_progress,
     serialized_gpu_operation,
+    checkpoint_current_operation,
 )
 
 
@@ -182,7 +184,7 @@ def analyze_pair_fast_cv(anchor_path: Path, candidate_path: Path) -> Dict[str, A
     }
 
 
-@serialized_gpu_operation
+@serialized_gpu_operation(slots=("vision",), managed=True)
 def load_coherence_vlm_into_memory(
     model_id: str = "qwen25-vl-3b-coherence",
     auto_download: bool = True,
@@ -219,26 +221,13 @@ def load_coherence_vlm_into_memory(
             "Qwen2.5-VL requiere GPU NVIDIA activa en Colab (o usa mode='fast_cv' para análisis instantáneo OpenCV en CPU)."
         )
 
-    # Si un modelo gigante de vídeo (ej. 14B) dejó menos de 4.2 GB libres, liberar primero el slot de vídeo
-    gpu_pre = query_gpu_info()
-    if gpu_pre["vram_free_gb"] < 4.2:
-        if memory_manager.get_slot("video"):
-            if job:
-                job.log(
-                    f"Liberando modelo de vídeo de VRAM ({gpu_pre['vram_free_gb']:.1f} GB libres) para hacer sitio al inspector Qwen2.5-VL...",
-                    progress=8.0,
-                    step="Liberando VRAM de vídeo...",
-                )
-            memory_manager.unload_slot("video")
-        gpu_pre = query_gpu_info()
-        if gpu_pre["vram_free_gb"] < 3.8 and memory_manager.get_slot("image"):
-            if job:
-                job.log(
-                    "Liberando temporalmente slot de imagen por VRAM ajustada...",
-                    progress=10.0,
-                    step="Liberando VRAM...",
-                )
-            memory_manager.unload_slot("image")
+    if not auto_download and not catalog_manager.is_downloaded(model_id):
+        raise RuntimeError(f"«{defn['name']}» no está descargado; no se modifica la memoria ni el disco.")
+    if cur:
+        memory_manager.unload_slot("vision")
+    del cur
+
+    memory_manager.prepare_for_load(defn, job=job)
 
     dl_job = job or JobRecord("download", f"Auto-descarga {model_id}")
     if not catalog_manager.is_downloaded(model_id):
@@ -258,6 +247,8 @@ def load_coherence_vlm_into_memory(
     base_artifact = next(a for a in defn.get("artifacts", []) if a.get("role") == "base")
     base_dir = catalog_manager.model_dir(model_id) / base_artifact["subdir"]
 
+    memory_manager.prepare_for_load(defn, job=job)
+
     def _do_load() -> Dict[str, Any]:
         apply_runtime_compatibility_patches()
         import transformers  # type: ignore
@@ -272,7 +263,7 @@ def load_coherence_vlm_into_memory(
                 "Ejecuta pip install -U 'transformers>=4.49.0'."
             )
 
-        processor = AutoProcessor.from_pretrained(str(base_dir), local_files_only=True, trust_remote_code=False)
+        processor = guarded_model_load(AutoProcessor.from_pretrained, str(base_dir), local_files_only=True, trust_remote_code=False)
         bnb_cfg = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -282,7 +273,7 @@ def load_coherence_vlm_into_memory(
         )
         # A quantization failure is not permission to allocate another full model
         # in BF16. hybrid_auto may return an explicitly limited CV result instead.
-        model = cls_vlm.from_pretrained(
+        model = guarded_model_load(cls_vlm.from_pretrained,
             str(base_dir),
             quantization_config=bnb_cfg,
             torch_dtype=torch.bfloat16,
@@ -339,7 +330,7 @@ def _extract_first_json_dict(raw_text: str) -> Dict[str, Any]:
     return {}
 
 
-@serialized_gpu_operation
+@serialized_gpu_operation(slots=("vision",), managed=True)
 def analyze_pair_qwen_vl(
     anchor_path: Path,
     candidate_path: Path,
@@ -416,11 +407,13 @@ def analyze_pair_qwen_vl(
     target_dev = next(model.parameters()).device
     inputs = {k: (v.to(target_dev) if hasattr(v, "to") else v) for k, v in inputs.items()}
 
+    checkpoint_current_operation(force=True)
     with torch.inference_mode():
         generated_ids = model.generate(
             **inputs,
             max_new_tokens=420,
             do_sample=False,
+            stopping_criteria=generation_memory_criteria(),
         )
 
     in_len = inputs["input_ids"].shape[1]
@@ -473,7 +466,7 @@ def _to_rel_str(path: Path) -> str:
         return path.name
 
 
-@serialized_gpu_operation
+@serialized_gpu_operation(slots=lambda args: () if args["mode"] == "fast_cv" else ("vision",), managed=True)
 def run_coherence_analysis(
     anchor_path: Path,
     candidate_paths: List[Path],
@@ -512,6 +505,9 @@ def run_coherence_analysis(
     cv_results: List[Dict[str, Any]] = []
     prev_step_path = anchor_path
     for idx, cpath in enumerate(candidate_paths, 1):
+        checkpoint_current_operation(job=job, force=True)
+        if job:
+            job.check_cancelled()
         cv_r = analyze_pair_fast_cv(anchor_path, cpath)
         if prev_step_path == anchor_path:
             step_disp = cv_r["spatial_displacement_pct"]
@@ -535,6 +531,8 @@ def run_coherence_analysis(
         try:
             load_coherence_vlm_into_memory(model_id="qwen25-vl-3b-coherence", auto_download=True, job=job)
             vlm_loaded_ok = True
+        except MemoryPressureError:
+            raise
         except Exception as exc:
             if mode == "vlm_qwen":
                 raise

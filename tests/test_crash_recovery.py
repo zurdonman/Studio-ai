@@ -12,16 +12,18 @@ import pytest
 pytestmark = pytest.mark.usefixtures("temp_studio_env")
 
 
-def test_ram_guard_fails_before_native_allocations(monkeypatch):
+def test_ram_guard_fails_before_native_allocations(monkeypatch, colab_memory):
+    colab_memory(ram=53, available=39, gpu=False)
     from studio import memory_manager as mm
     monkeypatch.setattr(mm.psutil, "virtual_memory", lambda: types.SimpleNamespace(total=53 * 1024**3, available=39 * 1024**3))
-    with pytest.raises(RuntimeError, match="HOST_RAM_BUDGET_EXCEEDED"):
+    with pytest.raises(RuntimeError, match="MEMORY_BUDGET_EXCEEDED"):
         mm.require_available_host_ram(40, stage="14B")
     monkeypatch.setattr(mm.psutil, "virtual_memory", lambda: types.SimpleNamespace(total=53 * 1024**3, available=50 * 1024**3))
     assert mm.require_available_host_ram(40, stage="14B")["available_gb"] == 50
 
 
-def test_video_ram_guard_runs_after_release_before_download_or_load(monkeypatch, tmp_path):
+def test_video_ram_guard_runs_after_release_before_download_or_load(monkeypatch, tmp_path, colab_memory):
+    colab_memory(ram=53, available=20)
     from studio.engines import video_engine as engine
     from studio import memory_manager as mm
     from studio.catalog import DEFAULT_CATALOG
@@ -42,7 +44,7 @@ def test_video_ram_guard_runs_after_release_before_download_or_load(monkeypatch,
     monkeypatch.setattr(engine, "_instantiate_video_pipeline", lambda *a, **k: events.append("instantiate"))
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True)))
     monkeypatch.setitem(sys.modules, "diffusers", types.ModuleType("diffusers"))
-    with pytest.raises(RuntimeError, match="HOST_RAM_BUDGET_EXCEEDED"):
+    with pytest.raises(RuntimeError, match="MEMORY_BUDGET_EXCEEDED"):
         engine.load_video_model_into_memory(definition["id"], auto_download=True)
     assert manager.get_slot("image") is None and old_handle == {}
     assert events == []
@@ -107,15 +109,23 @@ def test_fp8_loader_restores_original_precision_of_excluded_modules(monkeypatch,
 
 
 @pytest.fixture
-def fake_vision_runtime(monkeypatch, tmp_path):
+def fake_vision_runtime(monkeypatch, tmp_path, colab_memory):
+    colab_memory()
     from studio.engines import coherence_engine as engine
     calls, registered = [], []
     # Deliberately has no nonexistent local_artifact_dir method.
     monkeypatch.setattr(engine, "catalog_manager", types.SimpleNamespace(
-        get_definition=lambda _: {"name": "Qwen VL", "artifacts": [{"role": "base", "subdir": "base"}]},
+        get_definition=lambda _: {"id": "qwen25-vl-3b-coherence", "name": "Qwen VL", "engine": "qwen25_vl_coherence",
+                                  "min_vram_gb": 3.2, "artifacts": [{"role": "base", "subdir": "base"}]},
         is_downloaded=lambda _: True, model_dir=lambda _: tmp_path))
-    monkeypatch.setattr(engine, "memory_manager", types.SimpleNamespace(
-        get_slot=lambda _: None, register_loaded=lambda **kw: registered.append(kw)))
+    from studio.memory_manager import RuntimeMemoryManager
+    manager = RuntimeMemoryManager()
+    register = manager.register_loaded
+    def register_and_capture(**kw):
+        registered.append(kw)
+        return register(**kw)
+    monkeypatch.setattr(manager, "register_loaded", register_and_capture)
+    monkeypatch.setattr(engine, "memory_manager", manager)
     monkeypatch.setattr(engine, "apply_runtime_compatibility_patches", lambda: None)
     monkeypatch.setattr(engine, "query_gpu_info", lambda: {"vram_free_gb": 15, "vram_used_gb": 3})
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True), bfloat16="bf16"))

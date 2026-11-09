@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from packaging.version import InvalidVersion, Version
 
 from studio.model_recipes import ENGINE_CONTRACTS
+from studio.memory_policy import model_budget, reserves
 
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIME_CACHE: Dict[str, Any] = {}
@@ -142,14 +143,9 @@ def assess_definition(defn: Dict[str, Any], context: Dict[str, Any], *, catalog:
     hardware, target = context["hardware"], context["target"]
     gpu = hardware.get("gpu", {})
     ram, disk = hardware.get("ram", {}), hardware.get("disk", {})
-    cpu = bool(contract and (contract.get("cpu") or (contract.get("cpu_capable") and not target.get("has_gpu"))))
-    min_vram = 0.0 if cpu else _number(defn.get("min_vram_gb"))
-    min_ram = _number(defn.get("min_ram_gb", (contract or {}).get("ram_gb")))
-    # Very large BF16/MoE recipes stage more than the family's smallest variant.
-    if "min_ram_gb" not in defn and engine == "wan_i2v_14b" and defn.get("id") == "wan21-fun-1.3b-inp":
-        min_ram = 32.0
-    if "min_ram_gb" not in defn and engine == "wan_i2v_14b" and defn.get("id") == "wan22-i2v-a14b":
-        min_ram = 128.0
+    budget = model_budget(defn, has_gpu=bool(target.get("has_gpu")))
+    cpu = budget["cpu"]
+    min_vram, min_ram = budget["vram_gb"], budget["ram_gb"]
     downloaded = bool(catalog.is_downloaded(defn["id"]))
     estimated_disk = _number(defn.get("estimated_gb"))
     needed_disk = 0.0 if downloaded or defn.get("builtin_no_download") else (
@@ -161,7 +157,10 @@ def assess_definition(defn: Dict[str, Any], context: Dict[str, Any], *, catalog:
     # Preserve at least 1 GiB for outputs/temporary files even with local weights.
     output_reserve = 1.0
     total_disk_budget = max(output_reserve, needed_disk) if needed_disk is not None else None
-    fits = {"vram": _fit(min_vram, vram_total), "ram": _fit(min_ram, ram_total), "disk": _fit(total_disk_budget, disk_free)}
+    reserve = reserves(ram_total or 0, vram_total or 0)
+    ram_admission = min_ram + reserve["ram_gb"] if min_ram is not None else None
+    vram_admission = min_vram + reserve["vram_gb"] if min_vram else min_vram
+    fits = {"vram": _fit(vram_admission, vram_total), "ram": _fit(ram_admission, ram_total), "disk": _fit(total_disk_budget, disk_free)}
     reasons, warnings = [], []
     if not supported:
         reasons.append("No hay receta de ejecución revisada para este registro. Guardarlo no habilita un cargador.")
@@ -183,8 +182,8 @@ def assess_definition(defn: Dict[str, Any], context: Dict[str, Any], *, catalog:
     dtype_unknown = bool((contract or {}).get("native_bf16") and bf16 is None)
     if dtype_unknown:
         warnings.append("Soporte BF16 de la GPU no comprobado.")
-    needs_unload = bool(min_vram and vram_free is not None and vram_free < min_vram and fits["vram"] == "fits_estimate")
-    ram_pressure = bool(min_ram and ram_free is not None and ram_free < min_ram and fits["ram"] == "fits_estimate")
+    needs_unload = bool(min_vram and vram_free is not None and vram_free < vram_admission and fits["vram"] == "fits_estimate")
+    ram_pressure = bool(min_ram and ram_free is not None and ram_free < ram_admission and fits["ram"] == "fits_estimate")
     if needs_unload:
         warnings.append("VRAM libre insuficiente ahora: descargar de memoria el modelo anterior, conservar los pesos en disco y volver a medir.")
     if ram_pressure:
@@ -220,8 +219,8 @@ def assess_definition(defn: Dict[str, Any], context: Dict[str, Any], *, catalog:
         "gpu_target": target.get("gpu_name"), "is_simulated": bool(target.get("is_simulated")),
         "simulation_scope": "GPU simulada; RAM y disco son los de la sesión real" if target.get("is_simulated") else None,
         "resources": {
-            "vram": {"status": fits["vram"], "required_gb": min_vram, "recommended_gb": defn.get("recommended_vram_gb"), "total_gb": vram_total, "free_gb": vram_free, "needs_unload": needs_unload},
-            "ram": {"status": fits["ram"], "required_gb": min_ram, "total_gb": ram_total, "available_gb": ram_free, "needs_release": ram_pressure},
+            "vram": {"status": fits["vram"], "required_gb": min_vram, "reserve_gb": reserve["vram_gb"] if min_vram else 0, "admission_required_gb": vram_admission, "recommended_gb": defn.get("recommended_vram_gb"), "total_gb": vram_total, "free_gb": vram_free, "needs_unload": needs_unload},
+            "ram": {"status": fits["ram"], "required_gb": min_ram, "reserve_gb": reserve["ram_gb"], "admission_required_gb": ram_admission, "total_gb": ram_total, "available_gb": ram_free, "needs_release": ram_pressure},
             "disk": {"status": fits["disk"], "download_budget_gb": needed_disk, "estimated_weights_gb": estimated_disk, "free_gb": disk_free, "already_downloaded": downloaded,
                      "output_reserve_gb": output_reserve, "total_required_free_gb": total_disk_budget},
         },
@@ -229,6 +228,41 @@ def assess_definition(defn: Dict[str, Any], context: Dict[str, Any], *, catalog:
         "memory_strategy": (contract or {}).get("quantization", "CPU" if cpu else "Precisión del pipeline + CPU offload; sin cuantización automática"),
         "limits": "Estimación para los valores predeterminados. Resolución, frames, VAE, encoders, LoRAs y procesos externos cambian el pico; no garantiza ausencia de OOM ni tiempos.",
     }
+
+
+def assess_model_stack(base: Dict[str, Any], adapters: List[Dict[str, Any]], context: Dict[str, Any], *, catalog: Any) -> Dict[str, Any]:
+    """Assess one exact base plus ALL resident adapters, including scale zero.
+
+    Read-only planning. A compatible stack still needs real admission after
+    unloading idle models; a loaded base is never charged twice by the runtime.
+    """
+    unique = {item["id"]: item for item in adapters}
+    adapters = list(unique.values())
+    budget = model_budget(base, has_gpu=bool(context["target"].get("has_gpu")), adapters=adapters)
+    definitions = [base, *adapters]
+    prepared = all(catalog.is_downloaded(item["id"]) for item in definitions)
+    weights = [_number(item.get("estimated_gb")) for item in definitions]
+    missing = [0.0 if catalog.is_downloaded(item["id"]) or item.get("builtin_no_download") else weight
+               for item, weight in zip(definitions, weights)]
+    combined = {**base, "_with_adapter": bool(adapters),
+                "estimated_gb": sum(missing) if None not in missing else None,
+                "min_ram_gb": budget["ram_gb"], "min_vram_gb": budget["vram_gb"]}
+    preparation = SimpleNamespace(is_downloaded=lambda _mid: prepared)
+    result = assess_definition(combined, context, catalog=preparation, include_base=False)
+    result["resources"]["disk"].update(
+        estimated_weights_gb=sum(weights) if None not in weights else None,
+        base_prepared=bool(catalog.is_downloaded(base["id"])),
+        adapters_prepared=all(catalog.is_downloaded(item["id"]) for item in adapters))
+    invalid = [item["id"] for item in adapters if item.get("category") != "lora"
+               or item.get("validation_state") == "candidate" or base["id"] not in item.get("compatible_models", [])]
+    if invalid:
+        result.update(compatible=False, runnable_now=False, status="blocked", tier="incompatible", tier_rank=3,
+                      label="🔴 Adaptadores sin base exacta revisada", sticker="🔴 Adaptadores sin base exacta revisada")
+        result["reasons"].append(f"Adaptadores sin base exacta revisada: {', '.join(invalid)}")
+    result["stack"] = {"base_model_id": base["id"], "adapter_ids": list(unique),
+                       "zero_scale_adapters_still_consume_memory": True, "budget": budget}
+    result["gpu_tested"] = all(item.get("gpu_tested", False) for item in definitions)
+    return result
 
 
 def _assess_adapter(defn: Dict[str, Any], context: Dict[str, Any], catalog: Any) -> Dict[str, Any]:
@@ -240,32 +274,8 @@ def _assess_adapter(defn: Dict[str, Any], context: Dict[str, Any], catalog: Any)
         base = catalog.get_definition(mid)
         if not base or base.get("category") == "lora" or base.get("validation_state") == "candidate":
             continue
-        base_assessment = assess_definition(base, context, catalog=catalog, include_base=False)
-        base_prepared = bool(catalog.is_downloaded(mid))
-        adapter_prepared = bool(catalog.is_downloaded(defn["id"]))
-        prepared = base_prepared and adapter_prepared
-        base_weights = _number(base.get("estimated_gb"))
-        adapter_weights = _number(defn.get("estimated_gb"))
-        missing_base = 0.0 if base_prepared else base_weights
-        missing_adapter = 0.0 if adapter_prepared else adapter_weights
-        missing_weights = missing_base + missing_adapter if missing_base is not None and missing_adapter is not None else None
-        base_vram = base_assessment["resources"]["vram"]["required_gb"]
-        base_ram = base_assessment["resources"]["ram"]["required_gb"]
-        adapter_vram = _number(defn.get("min_vram_gb"))
-        adapter_ram = _number(defn.get("adapter_ram_gb"))
-        if adapter_ram is None and adapter_weights is not None:
-            adapter_ram = round(adapter_weights * 2 + 0.25, 2)
-        combined = {**base, "_with_adapter": True,
-                    "estimated_gb": missing_weights,
-                    "min_vram_gb": base_vram + adapter_vram if base_vram is not None and adapter_vram is not None else None,
-                    "min_ram_gb": base_ram + adapter_ram if base_ram is not None and adapter_ram is not None else None}
-        # Neither an adapter marker nor a downloaded base alone prepares the pair.
-        preparation = SimpleNamespace(is_downloaded=lambda _mid, ready=prepared: ready)
-        result = assess_definition(combined, context, catalog=preparation, include_base=False)
-        result["resources"]["disk"].update(
-            estimated_weights_gb=base_weights + adapter_weights if base_weights is not None and adapter_weights is not None else None,
-            base_prepared=base_prepared, adapter_prepared=adapter_prepared,
-        )
+        result = assess_model_stack(base, [defn], context, catalog=catalog)
+        result["resources"]["disk"]["adapter_prepared"] = bool(catalog.is_downloaded(defn["id"]))
         result["requires_base"] = base_ids
         result["assessed_base_model_id"] = mid
         result["incompatible_submodes"] = defn.get("incompatible_submodes", [])

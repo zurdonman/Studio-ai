@@ -85,7 +85,7 @@ from studio.hardware import (
 from studio.jobs import job_manager
 from studio.memory_manager import memory_manager
 from studio.model_discovery import model_discovery, CATEGORIES
-from studio.model_compatibility import assessment_context, assess_definition, get_runtime_capabilities
+from studio.model_compatibility import assessment_context, assess_definition, assess_model_stack, get_runtime_capabilities
 from studio.model_recipes import ENGINE_CONTRACTS, image_defaults
 from studio.model_oracle import recommend_pipeline
 
@@ -364,6 +364,7 @@ MCP_SERVER_INSTRUCTIONS += """
    - Lee `studio://manual/model-oracle` o `studio_get_model_guide(guide='operations')`.
    - `studio_search_models` busca metadatos públicos con cache/fecha y filtro de recursos; `studio_inspect_model` explica receta, formato y límites. Un repo HF NO es un model_id de ejecución.
    - `reviewed_recipe` = receta implementada, NO GPU validada. `candidate` = sin receta; `unsupported` = backend/formato/código remoto no autorizado. Nunca promover un candidato ni inventar un cargador por el nombre o número de parámetros.
+   - `memory_guardian` vigila RAM/VRAM y libera modelos inactivos automáticamente; los slots en uso están protegidos. La admisión suma base + TODOS los LoRA residentes + reserva adicional. MEMORY_BUDGET_EXCEEDED / MEMORY_SAFETY_STOP requieren leer el diagnóstico y parar, no borrar pesos ni descargar otra receta. Un preset `ok=true` solo está compilado: respetar `do_not_execute` y `selected_video_stack.memory_assessment`.
    - `compatible` es encaje ESTIMADO de VRAM/RAM/disco; `runnable_now` exige preparación actual y GPU real. Simular L4 no convierte la CPU real en una L4. No sumar VRAM de varias GPU.
    - El oráculo actual comprueba capacidad, RAM, disco, precisión y dependencias; puede devolver `no_compatible_recipe`. Sus diagnósticos prevalecen sobre tablas de tiempos/minutos orientativas, que NO son benchmarks.
    - `studio_refresh_model_index` actualiza SOLO metadatos, manualmente o cada intervalo configurado. NO descarga pesos, instala paquetes, actualiza recetas ni ejecuta Python remoto. Las importaciones manuales sin receta se conservan como candidatos no ejecutables.
@@ -1576,6 +1577,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "ok": True,
             "hardware": hw,
             "loaded_in_vram": loaded,
+            "memory_guardian": memory_manager.guardian_status(),
             "downloaded_on_disk": downloaded_models,
             "active_jobs": job_manager.list_jobs(limit=5, include_logs=False),
             "available_workflow_presets": list_agent_workflow_presets(),
@@ -1589,6 +1591,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "En `studio_generate_video` deja `use_official_defaults=true` e incluye los 3 vectores de movimiento (cámara + locomoción de personajes + paralaje de entorno).",
                 "FASES: todos los keyframes → auditoría y reparaciones → todos los vídeos → audio/LipSync/montaje. No prepares vídeo antes de acabar los keyframes.",
                 "Un job running/queued requiere esperar el mismo job_id, no volver a preparar. Ante un fallo no descargues modelos alternativos en cascada.",
+                "La memoria se gestiona automáticamente: solo se expulsan modelos inactivos, nunca sus archivos. MEMORY_SAFETY_STOP o MEMORY_BUDGET_EXCEEDED requieren revisar memory_guardian; no repetir ciegamente ni borrar pesos.",
             ],
         }
         if bool(args.get("include_model_manual", False)):
@@ -2157,6 +2160,18 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         extra_v_loras = [str(x).strip() for x in (args.get("extra_video_lora_ids") or []) if str(x).strip()]
         raw_ev_scales = args.get("extra_video_lora_scales") if isinstance(args.get("extra_video_lora_scales"), dict) else {}
         extra_v_scales = {str(k): float(v) for k, v in raw_ev_scales.items()}
+
+        if mode == "ai":
+            stack_ids = list(dict.fromkeys(([lora_id] if lora_id else []) + list(extra_v_loras)))
+            stack_defs = [catalog_manager.get_definition(mid) for mid in stack_ids]
+            if any(definition is None for definition in stack_defs):
+                return _guided_error("UNKNOWN_VIDEO_LORA", "Uno de los adaptadores extra no existe en el catálogo.",
+                                     "Consulta los IDs exactos con studio_list_models; no se inicia ninguna descarga.")
+            stack_assessment = assess_model_stack(m_defn, stack_defs, assessment_context(), catalog=catalog_manager)
+            if not stack_assessment["compatible"]:
+                return _guided_error("MODEL_RESOURCE_CONSTRAINT", "El conjunto base + todos los LoRA + reserva no cabe o no está revisado.",
+                    "Leer assessment. No se descargan alternativas, no se borran pesos ni se reenvía el trabajo automáticamente.",
+                    extra={"assessment": stack_assessment, "memory_guardian": memory_manager.guardian_status()})
 
         job = job_manager.submit(
             kind="video",

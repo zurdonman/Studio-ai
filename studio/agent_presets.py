@@ -267,7 +267,7 @@ def _select_video_stack_for_gpu(vram_gb: float, has_gpu: bool) -> Dict[str, Any]
     }
 
 
-def compile_agent_workflow_preset(
+def _compile_agent_workflow_preset(
     preset_id: str = "coherencia_personajes_entorno_avance",
     scene_description: str = "",
     characters_description: str = "",
@@ -899,3 +899,56 @@ def compile_agent_workflow_preset(
             },
         ],
     }
+
+
+def compile_agent_workflow_preset(
+    preset_id: str = "coherencia_personajes_entorno_avance",
+    scene_description: str = "",
+    characters_description: str = "",
+    dialogue_lines: Optional[List[str]] = None,
+    num_clips: Optional[int] = None,
+    aspect_ratio: str = "16:9",
+    gpu_override: Optional[Dict[str, Any]] = None,
+    hardware_override: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Compile a plan, then assess the FULL stack, never VRAM alone.
+
+    ok means compilation succeeded, not permission to execute a blocked phase.
+    Overrides are for explicit simulations/tests; they never change admission.
+    """
+    import shutil
+    from studio.catalog import catalog_manager
+    from studio.config import DATA_ROOT
+    from studio.memory_policy import host_memory
+    from studio.model_compatibility import assessment_context, assess_model_stack
+
+    gpu = gpu_override if gpu_override is not None else query_gpu_info()
+    plan = _compile_agent_workflow_preset(preset_id, scene_description, characters_description,
+                                         dialogue_lines, num_clips, aspect_ratio, gpu)
+    stack = plan["detected_gpu"]["selected_video_stack"]
+    base = catalog_manager.get_definition(stack["model_id"])
+    ids = list(dict.fromkeys(([stack["video_lora_id"]] if stack["video_lora_id"] else []) + stack["extra_video_lora_ids"]))
+    adapters = [catalog_manager.get_definition(mid) for mid in ids]
+    snapshot = hardware_override if hardware_override is not None else {
+        "gpu": gpu, "ram": host_memory(), "disk": {"free_gb": shutil.disk_usage(DATA_ROOT).free / (1024**3)}}
+    context = assessment_context(snapshot=snapshot, detected_gpu=gpu)
+    if gpu_override is not None or hardware_override is not None:
+        context["target"]["is_simulated"] = True
+    assessment = assess_model_stack(base, adapters, context, catalog=catalog_manager)
+    stack["memory_assessment"] = assessment
+    stack["execution_allowed_by_capacity"] = assessment["compatible"]
+    stack["note"] += " Base + todos los LoRA + reservas evaluados; falta la admisión real al ejecutar."
+    policy = plan.setdefault("execution_policy", {})
+    policy.update(memory_management="automatic_idle_LRU_with_active_slot_protection",
+                  on_memory_admission_failure="STOP con diagnóstico; no repetir, borrar pesos ni descargar otra receta automáticamente.",
+                  allow_automatic_fallback_downloads=False,
+                  require_full_stack_admission=True)
+    plan["video_stack_capacity_ok"] = assessment["compatible"]
+    plan["planning_only"] = not assessment["runnable_now"]
+    for step in plan.get("execution_plan", []):
+        if step.get("tool") == "studio_generate_video":
+            step["requires_memory_admission"] = True
+            if not assessment["compatible"]:
+                step["do_not_execute"] = True
+                step["blocked_reason"] = "MODEL_RESOURCE_CONSTRAINT: leer detected_gpu.selected_video_stack.memory_assessment. No hay fallback automático."
+    return plan

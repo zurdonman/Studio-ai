@@ -24,7 +24,7 @@ import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -37,8 +37,9 @@ from studio.engines.ffmpeg_utils import (
     get_ffmpeg_bin,
     probe_media_info,
 )
+from studio.memory_safety_hooks import guarded_model_load, cleanup_partial_load
 from studio.jobs import JobRecord
-from studio.memory_manager import memory_manager
+from studio.memory_manager import memory_manager, serialized_gpu_operation
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -444,58 +445,70 @@ class LipSyncEngine:
         except Exception:
             pass
 
+    @serialized_gpu_operation(slots=("lipsync",), managed=True)
     def _ensure_loaded(self, model_id: str, job: Optional[JobRecord] = None) -> Dict[str, Any]:
         definition = self.catalog.get_definition(model_id)
-        if definition and definition.get("validation_state") == "candidate":
+        if not definition:
+            raise ValueError(f"Modelo LipSync desconocido: {model_id}")
+        if definition.get("validation_state") == "candidate":
             raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato LipSync sin receta revisada.")
-        with self._lock:
-            if self.loaded_model_id == model_id and self._sessions.get("edtalk") is not None:
+        if not self.catalog.is_downloaded(model_id):
+            raise RuntimeError(f"El paquete LipSync «{definition['name']}» no está descargado; no se cambia la memoria.")
+        if self.loaded_model_id != model_id or self._sessions.get("edtalk") is None:
+            if memory_manager.get_slot("lipsync"):
+                memory_manager.unload_slot("lipsync")
+            else:
+                self.unload()
+            memory_manager.prepare_for_load(definition, job=job)
+        with cleanup_partial_load(self.unload):
+            with self._lock:
+                if self.loaded_model_id == model_id and self._sessions.get("edtalk") is not None:
+                    return self._sessions
+
+                if not self.catalog.is_downloaded(model_id):
+                    defn = self.catalog.get_definition(model_id)
+                    mname = defn["name"] if defn else model_id
+                    raise RuntimeError(
+                        f"El paquete LipSync «{mname}» ({model_id}) no está descargado aún. "
+                        f"Descárgalo primero con studio_download_model('{model_id}') (solo 0.65 GB, tarda ~4 segundos en Colab)."
+                    )
+
+                import onnxruntime as ort
+
+                avail = ort.get_available_providers()
+                providers: List[Any] = []
+                if "CUDAExecutionProvider" in avail:
+                    providers.append("CUDAExecutionProvider")
+                providers.append("CPUExecutionProvider")
+                self._provider_used = providers[0]
+
+                onnx_dir = self.catalog.model_dir(model_id) / "onnx"
+                if job:
+                    job.log(
+                        f"Cargando motores ONNX de LipSync HD ({self._provider_used})...",
+                        progress=12.0,
+                        step="Cargando EDTalk + YuNet + XSeg + GFPGAN...",
+                    )
+
+                sess_opts = ort.SessionOptions()
+                sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+                self._sessions = {}
+                for key, filename, required in (("yunet", "yunet_2023_mar.onnx", True),
+                                                ("edtalk", "edtalk_256.onnx", True),
+                                                ("xseg", "xseg_1.onnx", False),
+                                                ("gfpgan", "gfpgan_1.4.onnx", False)):
+                    path = onnx_dir / filename
+                    if required or path.exists():
+                        self._sessions[key] = guarded_model_load(ort.InferenceSession, str(path),
+                                                                sess_options=sess_opts, providers=providers)
+
+                self.loaded_model_id = model_id
+                defn = self.catalog.get_definition(model_id)
+                memory_manager.register_loaded("lipsync", model_id, defn["name"] if defn else model_id, self)
                 return self._sessions
 
-            if not self.catalog.is_downloaded(model_id):
-                defn = self.catalog.get_definition(model_id)
-                mname = defn["name"] if defn else model_id
-                raise RuntimeError(
-                    f"El paquete LipSync «{mname}» ({model_id}) no está descargado aún. "
-                    f"Descárgalo primero con studio_download_model('{model_id}') (solo 0.65 GB, tarda ~4 segundos en Colab)."
-                )
-
-            import onnxruntime as ort
-
-            avail = ort.get_available_providers()
-            providers: List[Any] = []
-            if "CUDAExecutionProvider" in avail:
-                providers.append("CUDAExecutionProvider")
-            providers.append("CPUExecutionProvider")
-            self._provider_used = providers[0]
-
-            onnx_dir = self.catalog.model_dir(model_id) / "onnx"
-            if job:
-                job.log(
-                    f"Cargando motores ONNX de LipSync HD ({self._provider_used})...",
-                    progress=12.0,
-                    step="Cargando EDTalk + YuNet + XSeg + GFPGAN...",
-                )
-
-            sess_opts = ort.SessionOptions()
-            sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
-            self._sessions = {
-                "yunet": ort.InferenceSession(str(onnx_dir / "yunet_2023_mar.onnx"), sess_options=sess_opts, providers=providers),
-                "edtalk": ort.InferenceSession(str(onnx_dir / "edtalk_256.onnx"), sess_options=sess_opts, providers=providers),
-            }
-            xseg_fp = onnx_dir / "xseg_1.onnx"
-            if xseg_fp.exists():
-                self._sessions["xseg"] = ort.InferenceSession(str(xseg_fp), sess_options=sess_opts, providers=providers)
-            gfp_fp = onnx_dir / "gfpgan_1.4.onnx"
-            if gfp_fp.exists():
-                self._sessions["gfpgan"] = ort.InferenceSession(str(gfp_fp), sess_options=sess_opts, providers=providers)
-
-            self.loaded_model_id = model_id
-            defn = self.catalog.get_definition(model_id)
-            memory_manager.register_loaded("lipsync", model_id, defn["name"] if defn else model_id, self)
-            return self._sessions
-
+    @serialized_gpu_operation(slots=("lipsync",), managed=True)
     def render_lipsync(
         self,
         job: JobRecord,

@@ -43,6 +43,7 @@ class JobRecord:
         self.result: Optional[Dict[str, Any]] = None
         self.error: Optional[str] = None
         self.cancel_requested: bool = False
+        self.memory_protection: Dict[str, Any] = {}
         self._lock = threading.Lock()
         self.log(f"En cola: {title}", emit_console=False)
 
@@ -127,6 +128,8 @@ class JobRecord:
     def check_cancelled(self) -> None:
         if self.cancel_requested:
             raise JobCancelledError("Cancelado manualmente por el usuario.")
+        from studio.memory_manager import checkpoint_current_operation
+        checkpoint_current_operation(job=self)
 
     def to_dict(
         self,
@@ -167,6 +170,7 @@ class JobRecord:
                     else None
                 ),
                 "cancel_requested": self.cancel_requested,
+                "memory_protection": dict(self.memory_protection),
                 "result": self.result,
                 "error": self.error,
                 "log_count": len(self.logs),
@@ -242,9 +246,14 @@ class JobManager:
                 job.error = str(exc)
                 job.speed_text = ""
                 tb_last = traceback.format_exc().strip().splitlines()[-4:]
-                job.log(f"Error en «{title}»: {exc}", level="error", step="Error")
+                step = "Protección de memoria" if job.memory_protection.get("action") == "safety_stop" else "Error"
+                job.log(f"Error en «{title}»: {exc}", level="error", step=step)
                 for ln in tb_last:
                     job.log(ln, level="error")
+            finally:
+                if job.status in ("failed", "cancelled"):
+                    from studio.memory_manager import flush_ram_and_vram
+                    flush_ram_and_vram()
 
         self._executor.submit(_runner)
         return job

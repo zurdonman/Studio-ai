@@ -453,7 +453,7 @@ def test_oracle_reuses_equivalent_weights_but_does_not_sacrifice_semantic_scope(
     from studio.model_oracle import recommend_pipeline
     # Already downloaded LTX beats a request to download another generative stack.
     catalog.downloaded.add("ltx-video-13b-distilled")
-    video = recommend_pipeline("video_flf2v", "max_quality_14b", catalog=catalog, context=context())
+    video = recommend_pipeline("video_flf2v", "max_quality_14b", catalog=catalog, context=context(ram=64, ram_free=56))
     assert video["model_id"] == "ltx-video-13b-distilled" and video["automatic_weight_downloads"] is False
     assert video["recommended_arguments"]["video_submode"] == "flf2v" and video["recommended_arguments"]["wait"] is False
     # A builtin CV comparator must not eclipse an eligible semantic audit by being
@@ -745,7 +745,8 @@ def test_corrupt_cached_record_fields_are_dropped_not_rendered(tmp_path, catalog
     restored.search("example", "image", context=context())
 
 
-def test_kokoro_uses_its_local_model_and_voice_without_generic_tts_fallback(tmp_path, catalog, monkeypatch):
+def test_kokoro_uses_its_local_model_and_voice_without_generic_tts_fallback(tmp_path, catalog, monkeypatch, colab_memory):
+    colab_memory(ram=8, available=6, gpu=False)
     import sys
     import studio.engines.tts_engine as tts
     calls = []
@@ -754,7 +755,14 @@ def test_kokoro_uses_its_local_model_and_voice_without_generic_tts_fallback(tmp_
     catalog.downloaded.add(model_id)
     catalog.model_dir = lambda _mid: tmp_path
     monkeypatch.setattr(tts, "catalog_manager", catalog)
-    monkeypatch.setattr(tts, "memory_manager", SimpleNamespace(get_slot=lambda _slot: None, register_loaded=lambda **kw: registered.update(kw)))
+    from studio.memory_manager import RuntimeMemoryManager
+    manager = RuntimeMemoryManager()
+    register = manager.register_loaded
+    def register_and_capture(**kw):
+        registered.update(kw)
+        return register(**kw)
+    monkeypatch.setattr(manager, "register_loaded", register_and_capture)
+    monkeypatch.setattr(tts, "memory_manager", manager)
     monkeypatch.setattr(tts, "run_with_live_memory_progress", lambda **kw: kw["fn"]())
 
     class KModel:
