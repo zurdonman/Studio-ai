@@ -1183,27 +1183,7 @@ def _instantiate_video_pipeline(
             "active_mode": "i2v",
         }
 
-    # Fallback genérico para modelos Diffusers importados desde el Buscador HF en vivo
-    pipe = diffusers.DiffusionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
-    call_params = inspect.signature(pipe.__call__).parameters
-    sup: List[str] = []
-    if "image" in call_params or "conditions" in call_params or "video" in call_params:
-        sup.append("i2v")
-    if "last_image" in call_params or "conditions" in call_params:
-        sup.append("flf2v")
-    img_p = call_params.get("image")
-    if img_p is None or img_p.default is not inspect.Parameter.empty:
-        sup.append("t2v")
-    return {
-        "pipe": pipe,
-        "all_components": dict(getattr(pipe, "components", {}) or {}),
-        "extra_init_kwargs": {},
-        "i2v_cls": type(pipe) if "i2v" in sup else None,
-        "t2v_cls": type(pipe) if "t2v" in sup else None,
-        "flf2v_cls": type(pipe) if "flf2v" in sup else None,
-        "supported_submodes": sup or ["t2v", "i2v"],
-        "active_mode": "unified",
-    }
+    raise ValueError(f"MODEL_ENGINE_UNSUPPORTED: sin receta revisada de vídeo para {engine!r}. No se deducen submodos por el nombre o la firma de una clase.")
 
 
 @serialized_gpu_operation
@@ -1238,6 +1218,8 @@ def _load_video_model_into_memory_locked(
     if not defn:
         raise ValueError(f"Modelo de vídeo desconocido: {model_id}")
 
+    if defn.get("validation_state") == "candidate":
+        raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato sin receta de vídeo revisada; no se descargan ni cargan pesos.")
     if defn.get("builtin_no_download") or defn.get("engine") == "ffmpeg_motion":
         if job:
             job.log(
@@ -1675,6 +1657,8 @@ def generate_video_clip(
         )
 
     target_defn = catalog_manager.get_definition(target_model_id)
+    if target_defn and target_defn.get("validation_state") == "candidate":
+        raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato de vídeo sin receta revisada.")
     if target_defn:
         declared_modes = target_defn.get("video_modes") or ["i2v", "t2v"]
         if submode not in declared_modes:

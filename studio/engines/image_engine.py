@@ -20,6 +20,7 @@ from studio.engines.ffmpeg_utils import (
 )
 from studio.hardware import query_gpu_info
 from studio.jobs import JobRecord
+from studio.model_recipes import REVIEWED_IMAGE_ENGINES
 from studio.memory_manager import (
     flush_ram_and_vram,
     memory_manager,
@@ -35,7 +36,7 @@ def _safe_load_lora(pipe: Any, lora_dir: Path, filename: Optional[str], adapter_
     pipe.load_lora_weights(str(lora_dir), adapter_name=adapter_name)
 
 
-def _instantiate_image_pipeline(engine: str, base_dir: Path) -> Any:
+def _instantiate_image_pipeline(engine: str, base_dir: Path, definition: Optional[Dict[str, Any]] = None) -> Any:
     apply_runtime_compatibility_patches()
     import torch  # type: ignore
     import diffusers  # type: ignore
@@ -59,10 +60,45 @@ def _instantiate_image_pipeline(engine: str, base_dir: Path) -> Any:
         except Exception:
             return AutoPipelineForText2Image.from_pretrained(bdir, torch_dtype=torch.float16)
 
-    return diffusers.DiffusionPipeline.from_pretrained(bdir, torch_dtype=torch.bfloat16)
+    if engine in REVIEWED_IMAGE_ENGINES:
+        contract = REVIEWED_IMAGE_ENGINES[engine]
+        class_name = contract["classes"][0]
+        manifest_path = base_dir / "model_index.json"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("_class_name") != class_name:
+                raise ValueError("La clase local no coincide con la receta revisada; detenerse y revisar el manifiesto.")
+            for component, spec in manifest.items():
+                if not component.startswith("_") and isinstance(spec, list) and len(spec) == 2 and spec[0] not in (None, "diffusers", "transformers"):
+                    raise ValueError("Componente de código externo no autorizado en la receta local.")
+        pipeline_cls = getattr(diffusers, class_name, None)
+        if pipeline_cls is None:
+            raise RuntimeError(f"Falta {class_name}. Requiere diffusers>={contract['diffusers']}; actualizar dependencias y reiniciar, no descargar alternativas.")
+        if contract.get("native_bf16"):
+            props = torch.cuda.get_device_properties(0)
+            if getattr(props, "major", 0) < 8:
+                raise RuntimeError("Esta receta necesita BF16 nativo (GPU Ampere/Ada/Hopper). No hay conversión automática a FP16/4-bit para T4.")
+        kwargs = {"torch_dtype": getattr(torch, contract["dtype"]), "local_files_only": True, "use_safetensors": True}
+        if engine == "sdxl_base":
+            kwargs["variant"] = "fp16"
+        pipe = pipeline_cls.from_pretrained(bdir, **kwargs)
+        component_dtypes = ((definition or {}).get("official_spec") or {}).get("component_dtypes", {})
+        for component, dtype in component_dtypes.items():
+            module = getattr(pipe, component, None)
+            if module is not None:
+                module.to(getattr(torch, dtype))
+        # SANA explicitly requires a BF16/FP32 text encoder and a BF16/FP32 VAE;
+        # keep the decode in FP32 rather than downcasting every component to FP16.
+        if engine in ("sana_image", "sana_sprint") and getattr(pipe, "vae", None) is not None:
+            pipe.vae.to(torch.float32)
+        return pipe
+
+    raise ValueError(f"MODEL_ENGINE_UNSUPPORTED: no existe cargador revisado de imagen para {engine!r}. No se ejecutará código remoto.")
 
 
 def _is_image_lora_compatible(ldef: Dict[str, Any], model_id: str, engine: Optional[str] = None) -> bool:
+    if ldef.get("validation_state") == "candidate":
+        return False
     if ldef.get("category") != "lora" or ldef.get("lora_target", "image") != "image":
         return False
     compat = ldef.get("compatible_models")
@@ -77,7 +113,7 @@ def _is_image_lora_compatible(ldef: Dict[str, Any], model_id: str, engine: Optio
         return "sdxl" in parent or "sdxl" in l_eng
     if engine in ("qwen_image_edit", "qwen_image_t2i"):
         return "sdxl" not in l_eng and ("qwen" in parent or "qwen" in l_eng or not parent)
-    return True
+    return False
 
 
 @serialized_gpu_operation
@@ -108,6 +144,8 @@ def _load_image_model_into_memory_locked(
     defn = catalog_manager.get_definition(model_id)
     if not defn:
         raise ValueError(f"Modelo de imagen no encontrado: {model_id}")
+    if defn.get("category") != "image" or defn.get("validation_state") == "candidate":
+        raise ValueError("MODEL_RECIPE_UNVALIDATED: se necesita una receta revisada de imagen; no se descargan ni cargan pesos.")
     target_engine = defn.get("engine", "qwen_image_edit")
     dl_job = job or JobRecord("download", f"Auto-descarga {model_id}")
 
@@ -156,6 +194,10 @@ def _load_image_model_into_memory_locked(
             "No se detectó GPU NVIDIA activa en este entorno (estás en modo CPU). "
             "Activa una GPU en Google Colab (T4, L4 o A100) para cargar el modelo de imagen."
         )
+
+    if target_engine in REVIEWED_IMAGE_ENGINES and REVIEWED_IMAGE_ENGINES[target_engine].get("native_bf16"):
+        if getattr(torch.cuda.get_device_properties(0), "major", 0) < 8:
+            raise RuntimeError("La receta seleccionada exige BF16 nativo; no descargues pesos para una T4/V100 con esta receta.")
 
     was_downloaded = catalog_manager.is_downloaded(model_id)
     if not was_downloaded:
@@ -237,7 +279,7 @@ def _load_image_model_into_memory_locked(
             start_pct=p_pre_start,
             end_pct=p_pre_end,
             step_label=f"Cargando tensores {defn['name']}",
-            fn=lambda: _instantiate_image_pipeline(engine, base_dir),
+            fn=lambda: _instantiate_image_pipeline(engine, base_dir, defn),
             expected_seconds=45.0,
         )
 
@@ -312,6 +354,11 @@ def _load_image_model_into_memory_locked(
         else:
             pipe.to("cuda")
 
+        if engine in REVIEWED_IMAGE_ENGINES and getattr(pipe, "vae", None) is not None:
+            for method in ("enable_tiling", "enable_slicing"):
+                if hasattr(pipe.vae, method):
+                    getattr(pipe.vae, method)()
+
         gpu_now = query_gpu_info()
         vram_gb = gpu_now["vram_used_gb"]
         memory_manager.register_loaded(
@@ -373,6 +420,10 @@ def generate_or_edit_image(
     slot = memory_manager.get_slot("image")
     target_mid = str(model_id or (slot.get("model_id") if slot else None) or "qwen-image-edit-2511-pack").strip()
     target_def = catalog_manager.get_definition(target_mid) or {}
+    if not target_def or target_def.get("category") != "image" or target_def.get("validation_state") == "candidate":
+        raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato sin receta revisada; conserva los archivos y consulta el inspector.")
+    if (base_image_path or reference_paths) and "i2i" not in target_def.get("capabilities", []):
+        raise ValueError("El modelo elegido solo crea imágenes desde texto. No descargues ni cargues esta receta para una edición/referencia.")
     requested_loras = []
     for lid in dict.fromkeys(str(x).strip() for x in (custom_lora_ids or []) if str(x).strip()):
         ld = catalog_manager.get_definition(lid)
@@ -578,7 +629,7 @@ def generate_or_edit_image(
         "height": height,
         "width": width,
     }
-    if "image" in call_sig:
+    if "image" in call_sig and (has_base or refs_pil or engine == "qwen_image_edit"):
         call_kwargs["image"] = pipe_images
     if "true_cfg_scale" in call_sig:
         call_kwargs["true_cfg_scale"] = effective_true_cfg

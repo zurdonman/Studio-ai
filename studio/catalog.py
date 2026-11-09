@@ -16,6 +16,7 @@ from tqdm.std import tqdm as std_tqdm
 from studio.config import MODELS_DIR, STATE_DIR
 from studio.hardware import colab_console_log, query_gpu_info
 from studio.jobs import JobRecord
+from studio.model_recipes import EXTRA_IMAGE_MODELS, ENGINE_CONTRACTS, image_recipe_files_complete
 
 CUSTOM_MODELS_FILE = STATE_DIR / "custom_models.json"
 DISK_SAFETY_MARGIN_GB = 1.0
@@ -185,7 +186,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "category": "image",
         "is_default": False,
         "badge": "Ultraligero · 1–4 pasos",
-        "capabilities": ["t2i", "i2i"],
+        "capabilities": ["t2i"],
         "description": (
             "Generador y bocetador instantáneo de Stability AI en media precisión (FP16 limpio sin archivos ONNX). "
             "Ideal cuando usas una GPU T4 gratuita o buscas bocetos en 2 segundos."
@@ -2376,7 +2377,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "Modelo VITS oficial de Meta AI para síntesis de voz en español 100% local en GPU o CPU."
         ),
         "estimated_gb": 0.14,
-        "min_vram_gb": 0.0,
+        "min_vram_gb": 1.0,
         "recommended_vram_gb": 1.0,
         "l4_seconds_hint": "1–2 s",
         "engine": "mms_tts",
@@ -2411,7 +2412,8 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "repo_id": "hexgrad/Kokoro-82M",
                 "subdir": "base",
                 "filename": None,
-                "verify_file": "config.json",
+                "verify_file": "kokoro-v1_0.pth",
+                "allow_patterns": ["config.json", "kokoro-v1_0.pth", "voices/ef_dora.pt"],
                 "ignore_patterns": ["samples/*", "eval/*"],
             }
         ],
@@ -2557,7 +2559,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "badge": "★ Música IA · Jazz / Cine / Lo-Fi · 2.0 GB",
         "description": (
             "Generador oficial de música instrumental de Meta AI (MusicGen 300M integrado en Transformers). "
-            "Crea bandas sonoras personalizadas (jazz suave de restaurante, piano emotivo, tensión cinematográfica) sin derechos de autor."
+            "Crea bandas sonoras instrumentales (jazz, piano, ambiente cinematográfico). Revisar licencia del modelo y derechos aplicables a cada uso; no se garantiza libertad comercial."
         ),
         "estimated_gb": 2.0,
         "min_vram_gb": 2.3,
@@ -2622,6 +2624,12 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
 ]
 
 
+DEFAULT_CATALOG.extend(EXTRA_IMAGE_MODELS)
+for _definition in DEFAULT_CATALOG:
+    if _definition.get("category") == "lora":
+        _definition["vram_budget_scope"] = "incremental_adapter_requires_base"
+
+
 def _dir_size_bytes(path: Path) -> int:
     if not path.exists():
         return 0
@@ -2655,6 +2663,7 @@ def resolve_gpu_profile(
                 return {
                     "id": prof["id"],
                     "profile_id": prof["id"],
+                    "tier": prof["id"].split("_", 1)[0],
                     "short": prof["short"],
                     "gpu_name": prof["short"],
                     "vram_gb": vram_val,
@@ -2699,6 +2708,17 @@ def evaluate_gpu_tier(
     rec_v = float(defn.get("recommended_vram_gb") or min_v)
     l4_hint = defn.get("l4_seconds_hint") or ""
 
+    if defn.get("validation_state") == "candidate":
+        return {"status": "candidate", "tier": "candidate", "tier_rank": 4, "compatible": False,
+                "sticker": "🧪 Candidato sin receta", "short_sticker": "Sin validar",
+                "label": "🧪 Candidato guardado: no se ha validado el motor ni los recursos", "gpu_target": gname,
+                "detail": "El tamaño declarado no demuestra compatibilidad ni habilita descargas."}
+
+    if ENGINE_CONTRACTS.get(str(defn.get("engine")), {}).get("native_bf16") and target.get("tier") in ("T4", "V100"):
+        return {"status": "dtype_unsupported", "tier": "incompatible", "tier_rank": 3, "compatible": False,
+                "sticker": "🔴 Requiere BF16 nativo", "short_sticker": "BF16 no nativo", "gpu_target": gname,
+                "label": "Esta receta BF16 no está autorizada para T4/V100", "detail": "Sin conversión de precisión ni cuantización automática."}
+
     # Modelos integrados o que corren en CPU sin exigir VRAM
     if defn.get("builtin_no_download") or min_v <= 0.0:
         return {
@@ -2709,35 +2729,25 @@ def evaluate_gpu_tier(
             "sticker": "🟢 Excelente",
             "short_sticker": "Excelente",
             "gpu_target": gname,
-            "label": f"🟢 Excelente en {gname} · Instantáneo sin consumir VRAM",
-            "detail": f"Funciona en CPU y cualquier GPU ({l4_hint or 'instantáneo'})",
+            "label": f"🟢 CPU / sin requisito de VRAM en {gname}",
+            "detail": "Procesamiento CPU o servicio de red; duración y RAM dependen de la tarea.",
         }
 
-    # Complementos LoRA ligeros: dependen del modelo base pero apenas suman VRAM
+    # A LoRA fits only with a declared base, not because its own file is small.
     if defn.get("category") == "lora":
-        if not target["has_gpu"] or vram < 12.0:
-            return {
-                "status": "tight",
-                "tier": "slow" if vram >= 10.0 else "incompatible",
-                "tier_rank": 2 if vram >= 10.0 else 3,
-                "compatible": vram >= 10.0,
-                "sticker": "🟠 Lento" if vram >= 10.0 else "🔴 Requiere GPU ≥14 GB",
-                "short_sticker": "Lento" if vram >= 10.0 else "No cabe",
-                "gpu_target": gname,
-                "label": f"El modelo base Qwen requiere ≥14 GB VRAM ({gname})",
-                "detail": "Complemento ligero (+0.3 GB sobre Qwen 4-bit)",
-            }
-        return {
-            "status": "ok",
-            "tier": "excellent",
-            "tier_rank": 0,
-            "compatible": True,
-            "sticker": "🟢 Excelente",
-            "short_sticker": "Excelente",
-            "gpu_target": gname,
-            "label": f"🟢 Excelente en {gname} · Se fusiona con Qwen sin coste extra apreciable",
-            "detail": f"Suma <0.5 GB VRAM ({l4_hint})",
-        }
+        base_ids = list(defn.get("compatible_models") or [])
+        if not base_ids and defn.get("parent_model"):
+            base_ids = [defn["parent_model"]]
+        bases = [d for d in DEFAULT_CATALOG if d["id"] in base_ids and d["category"] != "lora"]
+        if bases:
+            evaluations = [(d, evaluate_gpu_tier(d, target, ginfo)) for d in bases]
+            base, best = min(evaluations, key=lambda pair: (pair[1]["tier_rank"], pair[0].get("min_vram_gb", 0)))
+            return {**best, "requires_base": base_ids, "assessed_base_model_id": base["id"],
+                    "label": f"{best['sticker']} · requiere base {base['id']} + adaptador (estimación)",
+                    "detail": "Comprobar arquitectura, submodo, VRAM de la base, RAM y disco del conjunto."}
+        return {"status": "candidate", "tier": "candidate", "tier_rank": 4, "compatible": False,
+                "sticker": "🧪 Base desconocida", "short_sticker": "Sin base",
+                "label": "LoRA sin modelo base exacto revisado", "detail": "No se infiere la base por el nombre.", "gpu_target": gname}
 
     if not target["has_gpu"] or vram <= 0.1:
         return {
@@ -2899,7 +2909,11 @@ class CatalogManager:
     def _load_custom_models(self) -> List[Dict[str, Any]]:
         if CUSTOM_MODELS_FILE.exists():
             try:
-                return json.loads(CUSTOM_MODELS_FILE.read_text(encoding="utf-8"))
+                rows = json.loads(CUSTOM_MODELS_FILE.read_text(encoding="utf-8"))
+                if not isinstance(rows, list):
+                    return []
+                return [{**row, "validation_state": row.get("validation_state", "candidate")}
+                        for row in rows if isinstance(row, dict) and row.get("id")]
             except Exception:
                 return []
         return []
@@ -2944,6 +2958,8 @@ class CatalogManager:
                     return False
             elif not sub.exists():
                 return False
+        if defn.get("category") == "image" and not image_recipe_files_complete(defn, m_dir / "base"):
+            return False
         return True
 
     def disk_usage_gb(self, model_id: str) -> float:
@@ -2964,6 +2980,7 @@ class CatalogManager:
         gpu_profile: str = "auto",
         only_compatible: bool = False,
         detected_gpu: Optional[Dict[str, Any]] = None,
+        assessment_context_value: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         loaded_set = set(loaded_ids or [])
         gpu_info = detected_gpu or query_gpu_info()
@@ -2977,12 +2994,14 @@ class CatalogManager:
             ("A100_80", "A100/H100 80G"),
         ]
 
+        from studio.model_compatibility import assessment_context, assess_definition
+        context = assessment_context_value or assessment_context(gpu_profile=gpu_profile, detected_gpu=gpu_info)
         items: List[Dict[str, Any]] = []
         for defn in self.get_all_definitions():
             mid = defn["id"]
             downloaded = self.is_downloaded(mid)
             actual_gb = self.disk_usage_gb(mid) if downloaded and not defn.get("builtin_no_download") else 0.0
-            compat = self.compatibility_badge(defn, gpu_info, gpu_profile=gpu_profile)
+            compat = assess_definition(defn, context, catalog=self)
             if only_compatible and not compat.get("compatible", True) and not downloaded and mid not in loaded_set:
                 continue
             per_gpu_summary = []
@@ -3033,178 +3052,11 @@ class CatalogManager:
         Consulta en tiempo real la API pública de Hugging Face (sin requerir token)
         para explorar modelos compatibles con Diffusers/Transformers y calcular su sticker de GPU.
         """
-        gpu_info = detected_gpu or query_gpu_info()
-        resolved = resolve_gpu_profile(gpu_profile, gpu_info)
-        existing_repos = {
-            art["repo_id"].lower()
-            for d in self.get_all_definitions()
-            for art in d.get("artifacts", [])
-            if art.get("repo_id")
-        }
-
-        task_map = {
-            "video": ["image-to-video", "text-to-video"],
-            "image": ["image-to-image", "text-to-image"],
-            "lora": ["image-to-image", "text-to-image"],
-            "tts": ["text-to-speech"],
-        }
-        tasks = task_map.get(category, ["image-to-video"])
-        tok = self.get_hf_token()
-        api = HfApi(token=tok)
-        raw_models: List[Any] = []
-        try:
-            for t_tag in tasks:
-                lib_filter = "transformers" if category == "tts" else ("diffusers" if category != "lora" else None)
-                search_q = query.strip() or None
-                if category == "lora" and not search_q:
-                    search_q = "Qwen-Image-Edit lora"
-                found = list(
-                    api.list_models(
-                        search=search_q,
-                        pipeline_tag=t_tag if category != "lora" else None,
-                        library=lib_filter,
-                        sort="downloads",
-                        direction=-1,
-                        limit=limit,
-                        expand=["safetensors", "gated", "tags", "downloads", "likes"],
-                    )
-                )
-                raw_models.extend(found)
-        except Exception as e:
-            # Fallback local verificando el catálogo integrado si el entorno actual no llega a huggingface.co
-            q_low = query.strip().lower()
-            fallback_items: List[Dict[str, Any]] = []
-            for d in self.get_all_definitions():
-                if d.get("category") != category or not d.get("artifacts"):
-                    continue
-                rid = d["artifacts"][0]["repo_id"]
-                if q_low and q_low not in rid.lower() and q_low not in d["name"].lower():
-                    continue
-                comp = evaluate_gpu_tier(d, gpu_profile_id=gpu_profile, gpu_info=gpu_info)
-                if only_compatible and not comp["compatible"]:
-                    continue
-                fallback_items.append(
-                    {
-                        "repo_id": rid,
-                        "name": d["name"],
-                        "author": rid.split("/")[0],
-                        "category": category,
-                        "downloads": 25000,
-                        "likes": 400,
-                        "estimated_gb": d["estimated_gb"],
-                        "min_vram_gb": d["min_vram_gb"],
-                        "recommended_vram_gb": d["recommended_vram_gb"],
-                        "compatibility": comp,
-                        "already_in_catalog": True,
-                        "pipeline_tag": category,
-                    }
-                )
-            return {
-                "ok": True,
-                "online": False,
-                "gpu_target": resolved["gpu_name"],
-                "items": fallback_items[:limit],
-                "warning": f"Modo sin salida directa a huggingface.co ({e}); mostrando coincidencias verificadas. En Google Colab consulta Hugging Face en directo.",
-            }
-
-        seen: set[str] = set()
-        results: List[Dict[str, Any]] = []
-        for m in raw_models:
-            repo_id = getattr(m, "id", "") or ""
-            if not repo_id or repo_id.lower() in seen:
-                continue
-            seen.add(repo_id.lower())
-
-            gated_raw = getattr(m, "gated", False)
-            is_gated = bool(gated_raw)
-            gated_locked = is_gated and not bool(tok)
-
-            tags = [str(t).lower() for t in (getattr(m, "tags", None) or [])]
-            if category in ("video", "image") and "gguf" in tags and "diffusers" not in tags:
-                continue
-
-            # Estimar tamaño y VRAM a partir de metadatos safetensors o heurística prudente por nombre
-            st = getattr(m, "safetensors", None)
-            params_total = 0
-            bytes_est = 0.0
-            if st and isinstance(st, dict):
-                params_total = int(st.get("total") or 0)
-                p_dict = st.get("parameters") or {}
-                for dtype_k, cnt in p_dict.items():
-                    c_val = int(cnt or 0)
-                    dk = str(dtype_k).upper()
-                    if "F32" in dk:
-                        bytes_est += c_val * 4
-                    elif "BF16" in dk or "F16" in dk:
-                        bytes_est += c_val * 2
-                    elif "U8" in dk or "I8" in dk or "F8" in dk:
-                        bytes_est += c_val * 1
-                    else:
-                        bytes_est += c_val * 1
-            elif st and hasattr(st, "total"):
-                params_total = int(getattr(st, "total", 0) or 0)
-                bytes_est = params_total * 2.0
-
-            low_id = repo_id.lower()
-            if bytes_est > 0:
-                est_disk_gb = round(max(0.2, bytes_est / (1024**3)), 1)
-                # En ejecución bfloat16 los tensores F32 ocupan la mitad en VRAM + ~3.5 GB de codificador de texto/VAE
-                est_vram_min = round(max(1.0, (params_total * 2.0) / (1024**3) + (0.3 if category == "lora" else 3.0)), 1)
-                if "4bit" in low_id or "nf4" in low_id:
-                    est_vram_min = round(max(4.0, (params_total * 0.65) / (1024**3) + 3.0), 1)
-            else:
-                if category == "lora" or "lora" in low_id:
-                    est_disk_gb, est_vram_min = 0.6, 0.4
-                elif "14b" in low_id:
-                    est_disk_gb, est_vram_min = 32.0, 22.0
-                elif "19b" in low_id or "22b" in low_id or "27b" in low_id:
-                    est_disk_gb, est_vram_min = 48.0, 26.0
-                elif "5b" in low_id:
-                    est_disk_gb, est_vram_min = 18.0, 13.5
-                elif "1.3b" in low_id or "2b" in low_id:
-                    est_disk_gb, est_vram_min = 12.0, 8.5
-                elif category == "tts":
-                    est_disk_gb, est_vram_min = 1.2, 1.5
-                else:
-                    est_disk_gb, est_vram_min = 14.0, 12.0
-
-            pseudo_defn = {
-                "category": category,
-                "estimated_gb": est_disk_gb,
-                "min_vram_gb": est_vram_min,
-                "recommended_vram_gb": round(est_vram_min * 1.45, 1),
-            }
-            compat = evaluate_gpu_tier(pseudo_defn, gpu_profile_id=gpu_profile, gpu_info=gpu_info)
-            if only_compatible and not compat["compatible"]:
-                continue
-
-            results.append(
-                {
-                    "repo_id": repo_id,
-                    "name": repo_id.split("/")[-1],
-                    "author": repo_id.split("/")[0],
-                    "category": category,
-                    "downloads": int(getattr(m, "downloads", 0) or 0),
-                    "likes": int(getattr(m, "likes", 0) or 0),
-                    "estimated_gb": est_disk_gb,
-                    "min_vram_gb": est_vram_min,
-                    "recommended_vram_gb": pseudo_defn["recommended_vram_gb"],
-                    "compatibility": compat,
-                    "already_in_catalog": repo_id.lower() in existing_repos,
-                    "pipeline_tag": getattr(m, "pipeline_tag", "") or category,
-                    "gated": is_gated,
-                    "gated_locked": gated_locked,
-                }
-            )
-
-        results.sort(key=lambda r: (r["compatibility"]["tier_rank"], -r["downloads"]))
-        return {
-            "ok": True,
-            "online": True,
-            "gpu_target": resolved["gpu_name"],
-            "items": results[:limit],
-            "message": f"{len(results[:limit])} modelo(s) encontrados en Hugging Face para {resolved['gpu_name']}.",
-        }
+        from studio.model_discovery import model_discovery
+        return model_discovery.search(
+            query=query, category=category, gpu_profile=gpu_profile,
+            only_compatible=only_compatible, detected_gpu=detected_gpu, limit=limit,
+        )
 
     def add_custom_hf_model(
         self,
@@ -3216,104 +3068,48 @@ class CatalogManager:
         min_vram_gb: Optional[float] = None,
         adapter_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        repo_id = repo_id.strip()
-        if "/" not in repo_id:
-            raise ValueError("El repositorio de Hugging Face debe tener formato 'autor/modelo'.")
+        # User-entered names/GB and remote tags are NOT a loader contract. Preserve
+        # manual imports as visible, non-executable candidates, not guessed Qwen/Wan.
+        from studio.model_discovery import clean_repo_id, clean_filename, CATEGORIES
+        import math
+        repo_id = clean_repo_id(repo_id)
+        clean_fn = clean_filename(filename)
+        if category not in CATEGORIES or category == "all":
+            raise ValueError("Categoría de candidato no válida.")
+        if not math.isfinite(float(estimated_gb)) or not 0 <= float(estimated_gb) <= 1000:
+            raise ValueError("El tamaño declarado debe estar entre 0 y 1000 GB.")
+        import hashlib
         slug = repo_id.lower().replace("/", "-").replace("_", "-").replace(".", "-")
-        if filename:
-            slug += "-" + Path(filename).stem.lower()[:24]
+        identity = json.dumps([repo_id.lower(), category, clean_fn], separators=(",", ":"))
+        slug += "-" + hashlib.sha256(identity.encode()).hexdigest()[:10]
+        for saved in self._custom_models:
+            artifacts = saved.get("artifacts") or []
+            if (saved.get("category") == category and len(artifacts) == 1
+                    and str(artifacts[0].get("repo_id", "")).lower() == repo_id.lower()
+                    and artifacts[0].get("filename") == clean_fn):
+                return saved
+        # Reuse an exact reviewed recipe, never substitute a single component for
+        # a multi-repository pipeline or silently download another model.
+        for definition in self.get_all_definitions():
+            arts = definition.get("artifacts", [])
+            if (len(arts) == 1 and definition["category"] == category
+                    and arts[0].get("repo_id", "").lower() == repo_id.lower()
+                    and arts[0].get("filename") == clean_fn
+                    and not definition.get("is_custom")):
+                return definition
         existing = self.get_definition(slug)
         if existing:
             return existing
-
-        clean_fn = filename.strip() if filename and filename.strip() else None
-        low_repo = repo_id.lower()
-        if category == "video":
-            if "ltx-2" in low_repo or "ltx2" in low_repo:
-                eng = "ltx2_av"
-            elif "ltx" in low_repo:
-                eng = "ltx_video"
-            elif "cogvideo" in low_repo:
-                eng = "cogvideox_i2v"
-            elif "sana" in low_repo:
-                eng = "sana_video"
-            elif "skyreels" in low_repo:
-                eng = "skyreels_v2"
-            elif "vace" in low_repo:
-                eng = "wan_vace"
-            else:
-                eng = "generic_diffusers_video"
-        elif category == "image":
-            eng = "qwen_image_edit" if "qwen" in low_repo and "edit" in low_repo else "generic_diffusers_image"
-        elif category == "lora":
-            is_vid_lora = any(
-                k in low_repo or k in (clean_fn or "").lower()
-                for k in ("wan", "ti2v", "vace", "ltx", "skyreels", "video", "cogvideo")
-            )
-            eng = "video_lora" if is_vid_lora else "qwen_lora"
-        else:
-            eng = "mms_tts" if "mms" in low_repo else ("bark_tts" if "bark" in low_repo else "kokoro_tts")
-
-        est_vram = (
-            float(min_vram_gb)
-            if min_vram_gb is not None
-            else (0.4 if category == "lora" else max(4.0, round(float(estimated_gb) * 0.65, 1)))
-        )
-
-        is_vid_l = category == "lora" and eng == "video_lora"
-        custom_compat: Optional[List[str]] = None
-        if category == "lora":
-            if is_vid_l:
-                if "ltx-2" in low_repo or "ltx2" in low_repo:
-                    custom_compat = ["ltx-2-19b-av"]
-                elif "ltx" in low_repo:
-                    custom_compat = ["ltx-video-13b-distilled", "ltx-video-2b"]
-                elif "14b" in low_repo:
-                    custom_compat = [
-                        "wan21-vace-14b-fp8",
-                        "wan21-flf2v-14b-fp8",
-                        "wan21-fun-inp-14b-fp8",
-                        "wan21-i2v-14b-480p",
-                        "wan21-flf2v-14b-720p",
-                        "wan22-i2v-a14b",
-                    ]
-                else:
-                    custom_compat = ["wan22-ti2v-5b", "wan21-vace-1.3b", "wan21-t2v-1.3b", "ltx-video-2b"]
-            elif "sdxl" in low_repo:
-                custom_compat = ["sdxl-turbo-fp16"]
-            else:
-                custom_compat = ["qwen-image-edit-2511-pack", "qwen-image-2512-pack"]
-
-        entry: Dict[str, Any] = {
-            "id": slug,
-            "name": name.strip() or repo_id,
-            "category": category,
-            "lora_target": "video" if is_vid_l else ("image" if category == "lora" else None),
-            "lora_group": "quality" if category == "lora" else None,
-            "stackable_creative": True if is_vid_l else None,
-            "default_lora_scale": 0.85 if category == "lora" else None,
-            "compatible_models": custom_compat,
-            "is_default": False,
-            "is_custom": True,
-            "parent_model": "wan22-ti2v-5b" if is_vid_l else ("qwen-image-edit-2511-pack" if category == "lora" else None),
-            "adapter_name": adapter_name or slug[:24],
-            "badge": "Importado de HF",
-            "video_modes": ["i2v", "t2v"] if category == "video" else None,
-            "description": f"Repositorio Hugging Face: {repo_id}" + (f" ({clean_fn})" if clean_fn else ""),
-            "estimated_gb": round(max(0.05, float(estimated_gb)), 2),
-            "min_vram_gb": est_vram,
-            "recommended_vram_gb": round(est_vram * 1.45, 1),
-            "engine": eng,
-            "artifacts": [
-                {
-                    "role": "lora" if category == "lora" else "base",
-                    "repo_id": repo_id,
-                    "subdir": "base" if category != "lora" else "custom",
-                    "filename": clean_fn,
-                    "verify_file": clean_fn or ("model_index.json" if category in ("image", "video") else "config.json"),
-                    "allow_patterns": _DIFFUSERS_VIDEO_ALLOW if (category == "video" and not clean_fn) else None,
-                }
-            ],
+        entry = {
+            "id": slug, "name": name.strip()[:160] or repo_id, "repo_id": repo_id,
+            "category": category, "engine": "unvalidated", "is_custom": True, "is_default": False,
+            "validation_state": "candidate", "gpu_tested": False,
+            "badge": "Candidato guardado · no ejecutable", "compatible_models": [],
+            "description": "Importación manual pendiente de inspección y receta revisada. Los GB declarados no demuestran compatibilidad.",
+            "estimated_gb": round(float(estimated_gb), 2), "declared_min_vram_gb": min_vram_gb,
+            "min_vram_gb": None, "recommended_vram_gb": None,
+            "artifacts": [{"role": "candidate", "repo_id": repo_id, "subdir": "candidate",
+                           "filename": clean_fn, "verify_file": clean_fn or "model_index.json"}],
         }
         self._custom_models.append(entry)
         self._save_custom_models()
@@ -3421,6 +3217,8 @@ class CatalogManager:
         defn = self.get_definition(model_id)
         if not defn:
             raise ValueError(f"Modelo desconocido: {model_id}")
+        if defn.get("validation_state") == "candidate":
+            raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato sin receta revisada. Inspecciona metadatos; no se descargarán pesos ni código remoto.")
         if defn.get("builtin_no_download"):
             job.log("Este motor no requiere descargar archivos.", progress=_scale_pct(100.0), step="Listo")
             return {"model_id": model_id, "downloaded_gb": 0.0}
@@ -3691,19 +3489,6 @@ class CatalogManager:
             ),
             encoding="utf-8",
         )
-
-        # Ajustar verificación flexible para modelos custom que tengan config.json o model_index.json
-        if not self.is_downloaded(model_id):
-            for art in defn.get("artifacts", []):
-                sub = m_dir / art["subdir"]
-                if (sub / "model_index.json").exists():
-                    art["verify_file"] = "model_index.json"
-                elif (sub / "config.json").exists():
-                    art["verify_file"] = "config.json"
-                else:
-                    any_st = list(sub.rglob("*.safetensors"))
-                    if any_st:
-                        art["verify_file"] = str(any_st[0].relative_to(sub))
 
         if not self.is_downloaded(model_id):
             raise RuntimeError("Faltan archivos clave tras la descarga; no se marca como válido.")

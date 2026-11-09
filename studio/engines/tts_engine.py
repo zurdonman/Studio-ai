@@ -51,6 +51,8 @@ def load_tts_model_into_memory(
     if not defn:
         raise ValueError(f"Modelo TTS desconocido: {model_id}")
 
+    if defn.get("category") != "tts" or defn.get("validation_state") == "candidate":
+        raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato TTS sin backend revisado.")
     if defn.get("builtin_no_download"):
         if job:
             job.log("Edge-TTS está listo al instante sin ocupar RAM ni VRAM.", progress=100.0, step="Listo")
@@ -79,7 +81,7 @@ def load_tts_model_into_memory(
 
     if defn.get("engine") == "kokoro_tts":
         try:
-            from kokoro import KPipeline  # type: ignore
+            from kokoro import KModel, KPipeline  # type: ignore
 
             if job:
                 job.log("Inicializando Kokoro-82M...", progress=p_start, step="Cargando Kokoro-82M...")
@@ -88,18 +90,20 @@ def load_tts_model_into_memory(
                 start_pct=p_start,
                 end_pct=96.0,
                 step_label="Cargando Kokoro-82M",
-                fn=lambda: KPipeline(lang_code="e"),
+                fn=lambda: KPipeline(lang_code="e", repo_id=art["repo_id"],
+                    model=KModel(repo_id=art["repo_id"], config=str(base_dir / "config.json"),
+                                 model=str(base_dir / "kokoro-v1_0.pth")).to("cpu").eval()),
                 expected_seconds=10.0,
             )
             memory_manager.register_loaded(
                 slot="tts",
                 model_id=model_id,
                 name=defn["name"],
-                handle={"type": "kokoro", "pipe": kpipe},
+                handle={"type": "kokoro", "pipe": kpipe, "voice": str(base_dir / "voices" / "ef_dora.pt")},
             )
             return {"model_id": model_id}
-        except ImportError:
-            pass
+        except ImportError as exc:
+            raise RuntimeError("Kokoro requiere su backend opcional `kokoro` y espeak-ng; no se sustituye por un pipeline TTS genérico.") from exc
 
     try:
         import torch  # type: ignore
@@ -193,6 +197,9 @@ def synthesize_voice(
         )
         return meta
 
+    definition = catalog_manager.get_definition(engine_id)
+    if not definition or definition.get("category") != "tts" or definition.get("validation_state") == "candidate":
+        raise ValueError("MODEL_RECIPE_UNVALIDATED: se necesita una receta TTS exacta, no un candidato.")
     slot = memory_manager.get_slot("tts")
     if not slot or slot["model_id"] != engine_id:
         if job:
@@ -213,7 +220,7 @@ def synthesize_voice(
         import numpy as np  # type: ignore
 
         chunks = []
-        for _, _, audio in handle["pipe"](clean_text, voice="ef_dora", speed=1.0 + (rate_pct / 100.0)):
+        for _, _, audio in handle["pipe"](clean_text, voice=handle["voice"], speed=1.0 + (rate_pct / 100.0)):
             chunks.append(audio)
         if not chunks:
             raise RuntimeError("Kokoro no devolvió muestras de audio.")

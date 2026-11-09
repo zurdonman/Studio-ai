@@ -10,17 +10,6 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
 
-@pytest.fixture(scope="module")
-def temp_studio_env(tmp_path_factory: pytest.TempPathFactory):
-    tmp_root = tmp_path_factory.mktemp("studio_test_data")
-    os.environ["STUDIO_DATA_DIR"] = str(tmp_root)
-    os.environ["STUDIO_FORCE_LOCAL"] = "1"
-    from app import app
-
-    client = TestClient(app)
-    return client, tmp_root
-
-
 def _make_png_bytes(color: tuple[int, int, int], size: tuple[int, int] = (640, 360), label: str = "A") -> bytes:
     im = Image.new("RGB", size, color=color)
     draw = ImageDraw.Draw(im)
@@ -300,7 +289,7 @@ def test_monotonic_progress_and_colab_torchao_cleanup():
     launch_colab._remove_incompatible_preinstalled_packages()
 
 
-def test_gpu_filter_stickers_artifact_patterns_and_hf_search(temp_studio_env):
+def test_gpu_filter_stickers_artifact_patterns_and_hf_search(temp_studio_env, monkeypatch):
     client, _ = temp_studio_env
     from studio.catalog import (
         DEFAULT_CATALOG,
@@ -352,6 +341,20 @@ def test_gpu_filter_stickers_artifact_patterns_and_hf_search(temp_studio_env):
     assert c_wan27_a100["compatible"] is True
     assert c_wan27_a100["tier"] == "excellent"
 
+    # This regression isolates GPU filtering. A GPU simulation deliberately keeps
+    # real RAM/disk constraints, so supply an explicit complete hardware snapshot
+    # instead of depending on whichever small CPU CI machine runs the suite.
+    from studio.hardware import hardware_tracker
+    from studio.model_discovery import MetadataError, model_discovery
+    snapshot = hardware_tracker.get_snapshot()
+    snapshot["ram"].update(total_gb=192.0, available_gb=180.0)
+    snapshot["disk"].update(free_gb=512.0)
+    monkeypatch.setattr(hardware_tracker, "get_snapshot", lambda **_kw: snapshot)
+
+    def offline_provider(*_a, **_kw):
+        raise MetadataError("offline", "Proveedor desconectado para esta prueba determinista.")
+
+    monkeypatch.setattr(model_discovery.provider, "search_page", offline_provider)
     r_l4 = client.get("/api/catalog?gpu_profile=L4&only_compatible=true")
     assert r_l4.status_code == 200
     data_l4 = r_l4.json()
@@ -2234,7 +2237,10 @@ def test_lora_catalog_multi_model_compatibility_and_stacking(temp_studio_env) ->
 
     client, _ = temp_studio_env
     all_defs = catalog_manager.get_all_definitions()
-    loras = [d for d in all_defs if d.get("category") == "lora"]
+    loras = [d for d in all_defs if d.get("category") == "lora" and d.get("validation_state") != "candidate"]
+    candidates = [d for d in all_defs if d.get("category") == "lora" and d.get("validation_state") == "candidate"]
+    assert all(not d.get("compatible_models") for d in candidates)
+    assert all(d.get("engine") == "unvalidated" for d in candidates)
     assert len(loras) >= 35
 
     valid_groups = {"character", "environment", "quality", "camera", "style", "speed"}
@@ -2259,7 +2265,10 @@ def test_lora_catalog_multi_model_compatibility_and_stacking(temp_studio_env) ->
         compat_img = [
             d for d in loras if d.get("lora_target") == "image" and _is_image_lora_compatible(d, img_mid)
         ]
-        assert len(compat_img) >= 2, f"Faltan LoRAs compatibles para {img_mid}"
+        # T2I has one exact reviewed adapter. A saved custom candidate must not
+        # count as a second compatible Qwen adapter just to satisfy coverage.
+        minimum_reviewed = 1 if img_mid == "qwen-image-2512-pack" else 2
+        assert len(compat_img) >= minimum_reviewed, f"Faltan LoRAs revisados para {img_mid}"
 
     for vid_mid in (
         "wan21-vace-14b-fp8",
@@ -3181,6 +3190,13 @@ def test_mcp_sanitizes_raw_image_and_video_prompts_before_inference(temp_studio_
     monkeypatch.setattr(mcp, "generate_or_edit_image", generate)
     monkeypatch.setattr(mcp, "generate_video_clip", generate)
     monkeypatch.setattr(mcp.catalog_manager, "check_disk_space", lambda *a, **k: {"ok": True})
+    # This test replaces inference to inspect prompts; give that fake runtime a
+    # complete fitting device instead of bypassing the real resource guard.
+    from studio.model_compatibility import assessment_context
+    snapshot = {"gpu": {"has_gpu": True, "gpu_tier": "L4", "gpu_name": "L4 (test)",
+                         "vram_total_gb": 22.0, "vram_free_gb": 21.0, "bf16_supported": True},
+                "ram": {"total_gb": 64.0, "available_gb": 60.0}, "disk": {"free_gb": 256.0}}
+    monkeypatch.setattr(mcp, "assessment_context", lambda **_kw: assessment_context(snapshot=snapshot))
     raw = "Two friends walk down a tree-lined avenue. Crear los diálogos, un clip de 60s, utiliza LoRAs rápido, con lipsync."
     try:
         for tool, args in (

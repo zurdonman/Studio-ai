@@ -9,3 +9,4 @@ numpy>=1.26.0
 opencv-python-headless>=4.9.0
 imageio-ffmpeg>=0.5.1
 edge-tts>=6.1.12
+packaging>=23.0

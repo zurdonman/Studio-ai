@@ -9,12 +9,13 @@ import time
 import uuid
 import zipfile
 from datetime import datetime
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -84,13 +85,27 @@ from studio.hardware import (
 from studio.jobs import job_manager, model_prepare_job_key
 from studio.mcp_server import mcp_router
 from studio.memory_manager import memory_manager
+from studio.model_discovery import model_discovery
+from studio.model_compatibility import assessment_context, assess_definition
+from studio.model_recipes import image_defaults
+from studio.model_oracle import recommend_pipeline
 
 apply_runtime_compatibility_patches()
 ensure_directories()
 
 STATIC_DIR = Path(__file__).resolve().parent / "studio" / "static"
 
+@asynccontextmanager
+async def studio_lifespan(_app: FastAPI):
+    model_discovery.start()
+    try:
+        yield
+    finally:
+        model_discovery.stop()
+
+
 app = FastAPI(
+    lifespan=studio_lifespan,
     title="Studio IA",
     description="Estudio generativo personal de Imagen, Vídeo, Voz y Montaje para Google Colab",
     version="1.0.0",
@@ -137,6 +152,17 @@ class CustomModelReq(BaseModel):
     adapter_name: Optional[str] = None
 
 
+class DiscoverySettingsReq(BaseModel):
+    auto_refresh: bool
+    interval_minutes: int = Field(default=360, ge=15, le=1440)
+
+
+class DiscoveryRefreshReq(BaseModel):
+    query: str = Field(default="", max_length=160)
+    category: str = "all"
+    sort: str = "downloads"
+
+
 class MemoryLoadReq(BaseModel):
     model_id: str
     auto_download: bool = False
@@ -171,6 +197,7 @@ class ImageGenReq(BaseModel):
     use_ffmpeg_bt709: bool = True
     mask_feather_px: int = 8
     cpu_bt709_only: bool = False
+    use_official_defaults: bool = False
 
 
 class VideoGenReq(BaseModel):
@@ -397,38 +424,92 @@ def api_update_credits(req: CreditsConfigReq) -> Dict[str, Any]:
 @app.get("/api/catalog")
 def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) -> Dict[str, Any]:
     loaded_ids = memory_manager.loaded_model_ids()
-    hw_gpu = query_gpu_info()
+    hw = hardware_tracker.get_snapshot(active_jobs_count=job_manager.active_count())
+    hw_gpu = hw["gpu"]
     resolved_prof = resolve_gpu_profile(gpu_profile, detected_gpu=hw_gpu)
-    return {
-        "models": catalog_manager.list_catalog(
-            loaded_ids=loaded_ids,
-            gpu_profile=gpu_profile,
-            only_compatible=only_compatible,
-            detected_gpu=hw_gpu,
-        ),
-        "gpu_profiles": COLAB_GPU_PROFILES,
-        "active_gpu_profile": resolved_prof,
-        "loaded_slots": memory_manager.status_summary(),
-    }
+    try:
+        context = assessment_context(snapshot=hw, gpu_profile=gpu_profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    models = catalog_manager.list_catalog(loaded_ids=loaded_ids, gpu_profile=gpu_profile,
+        only_compatible=only_compatible, detected_gpu=hw_gpu, assessment_context_value=context)
+    for model in models:
+        model["hardware_assessment"] = model["compatibility"]
+        if model["category"] == "image":
+            model["image_defaults"] = image_defaults(model)
+    if only_compatible:
+        models = [m for m in models if m["hardware_assessment"]["compatible"] or m["downloaded"] or m["loaded_in_memory"]]
+    return {"models": models, "gpu_profiles": COLAB_GPU_PROFILES, "active_gpu_profile": resolved_prof,
+            "loaded_slots": memory_manager.status_summary(), "discovery_status": model_discovery.status()}
 
 
 @app.get("/api/catalog/hf-search")
 def api_hf_live_search(
-    query: str = "",
-    category: str = "video",
-    gpu_profile: str = "auto",
-    only_compatible: bool = False,
-    limit: int = 12,
+    query: str = Query(default="", max_length=160), category: str = "video", gpu_profile: str = "auto",
+    only_compatible: bool = False, limit: int = Query(default=12, ge=1, le=50),
+    offset: int = Query(default=0, ge=0, le=5000), refresh: bool = False, sort: str = "downloads",
 ) -> Dict[str, Any]:
-    hw_gpu = query_gpu_info()
-    return search_huggingface_live(
-        query=query,
-        category=category,
-        gpu_profile=gpu_profile,
-        only_compatible=only_compatible,
-        detected_gpu=hw_gpu,
-        limit=max(1, min(24, limit)),
-    )
+    try:
+        return model_discovery.search(query=query, category=category, gpu_profile=gpu_profile,
+            only_compatible=only_compatible, limit=limit, offset=offset, refresh=refresh, sort=sort)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/models/discovery/status")
+def api_model_discovery_status() -> Dict[str, Any]:
+    return model_discovery.status()
+
+
+@app.post("/api/models/discovery/settings")
+def api_model_discovery_settings(req: DiscoverySettingsReq) -> Dict[str, Any]:
+    return model_discovery.configure(auto_refresh=req.auto_refresh, interval_minutes=req.interval_minutes)
+
+
+@app.post("/api/models/discovery/refresh")
+def api_refresh_model_discovery(req: DiscoveryRefreshReq) -> Dict[str, Any]:
+    try:
+        return model_discovery.queue_refresh(query=req.query, category=req.category, sort=req.sort)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/models/discovery/inspect")
+def api_inspect_discovered_model(repo_id: str, gpu_profile: str = "auto", refresh: bool = False) -> Dict[str, Any]:
+    try:
+        return model_discovery.inspect(repo_id, gpu_profile=gpu_profile, refresh=refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/models/manual")
+def api_model_manual(guide: str = "operations") -> PlainTextResponse:
+    documents = {"operations": "MCP_MODEL_ORACLE.md", "research": "MODEL_RESEARCH.md"}
+    if guide not in documents:
+        raise HTTPException(status_code=400, detail="Guía permitida: operations o research.")
+    text = (Path(__file__).resolve().parent / "docs" / documents[guide]).read_text(encoding="utf-8")
+    return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
+
+
+@app.get("/api/models/recommend")
+def api_recommend_model_recipe(task: str = "image_create", priority: str = "balanced_fast") -> Dict[str, Any]:
+    try:
+        return {"ok": True, **recommend_pipeline(task, priority, catalog=catalog_manager,
+            snapshot=hardware_tracker.get_snapshot(active_jobs_count=job_manager.active_count()))}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/models/{model_id}/assessment")
+def api_assess_catalog_model(model_id: str, gpu_profile: str = "auto") -> Dict[str, Any]:
+    definition = catalog_manager.get_definition(model_id)
+    if not definition:
+        raise HTTPException(status_code=404, detail="ID de catálogo no encontrado. Un repo HF no es un model_id.")
+    try:
+        assessment = assess_definition(definition, assessment_context(gpu_profile=gpu_profile), catalog=catalog_manager)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "model_id": model_id, "assessment": assessment}
 
 
 @app.post("/api/catalog/custom")
@@ -444,7 +525,9 @@ def api_add_custom_model(req: CustomModelReq) -> Dict[str, Any]:
             adapter_name=req.adapter_name,
         )
         colab_console_log(f"Añadido al catálogo desde HF: {entry['name']} ({req.repo_id})", icon="➕")
-        return {"ok": True, "model": entry}
+        candidate = entry.get("validation_state") == "candidate"
+        return {"ok": True, "model": entry, "candidate_only": candidate, "download_allowed": not candidate,
+                "message": "Candidato guardado; falta receta revisada, no se descargarán pesos." if candidate else "Receta existente reutilizada."}
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve)) from ve
 
@@ -462,6 +545,9 @@ def api_download_model(model_id: str) -> Dict[str, Any]:
     defn = catalog_manager.get_definition(model_id)
     if not defn:
         raise HTTPException(status_code=404, detail=f"Modelo desconocido: {model_id}")
+    if defn.get("validation_state") == "candidate":
+        raise HTTPException(status_code=400, detail="MODEL_RECIPE_UNVALIDATED: candidato guardado sin receta de ejecución revisada. Inspecciona metadatos, no descargues pesos.")
+
 
     if not catalog_manager.is_downloaded(model_id):
         space = catalog_manager.check_disk_space(model_id)
@@ -494,6 +580,9 @@ def api_load_model(req: MemoryLoadReq) -> Dict[str, Any]:
     defn = catalog_manager.get_definition(req.model_id)
     if not defn:
         raise HTTPException(status_code=404, detail=f"Modelo desconocido: {req.model_id}")
+    if defn.get("validation_state") == "candidate":
+        raise HTTPException(status_code=400, detail="MODEL_RECIPE_UNVALIDATED: candidato guardado sin receta de ejecución revisada. Inspecciona metadatos, no descargues pesos.")
+
 
     if req.auto_download and not catalog_manager.is_downloaded(req.model_id):
         space = catalog_manager.check_disk_space(req.model_id)
@@ -768,9 +857,15 @@ def api_generate_image(req: ImageGenReq) -> Dict[str, Any]:
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Escribe un prompt para indicar qué quieres hacer en la imagen.")
 
+    definition = catalog_manager.get_definition(req.model_id or "qwen-image-edit-2511-pack") or {}
+    if not definition or definition.get("category") != "image" or definition.get("validation_state") == "candidate":
+        raise HTTPException(status_code=400, detail="MODEL_RECIPE_UNVALIDATED: se requiere un ID de receta revisada de imagen.")
+    if (base_p or refs_p) and "i2i" not in definition.get("capabilities", []):
+        raise HTTPException(status_code=400, detail="IMAGE_MODEL_NO_REFERENCE_CONDITIONING: la receta solo admite texto, no edición/referencias.")
+    defaults = image_defaults(definition, req.use_lightning_lora) if req.use_official_defaults else {}
     job = job_manager.submit(
         kind="image",
-        title=f"Imagen Qwen: {req.prompt.strip()[:42]}",
+        title=f"Imagen: {req.prompt.strip()[:42]}",
         fn=lambda j: generate_or_edit_image(
             prompt=req.prompt,
             model_id=req.model_id,
@@ -780,8 +875,8 @@ def api_generate_image(req: ImageGenReq) -> Dict[str, Any]:
             negative_prompt=req.negative_prompt,
             width=req.width,
             height=req.height,
-            steps=req.steps,
-            guidance_scale=req.guidance_scale,
+            steps=defaults.get("steps", req.steps),
+            guidance_scale=defaults.get("guidance_scale", req.guidance_scale),
             seed=req.seed,
             use_lightning_lora=req.use_lightning_lora,
             use_nsfw_lora=req.use_nsfw_lora,
@@ -821,6 +916,8 @@ def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
 
     if req.mode == "ai" and req.model_id:
         m_defn = catalog_manager.get_definition(req.model_id)
+        if not m_defn or m_defn.get("category") != "video" or m_defn.get("validation_state") == "candidate":
+            raise HTTPException(status_code=400, detail="MODEL_RECIPE_UNVALIDATED: se requiere un ID de receta revisada de vídeo.")
         if m_defn and sub in ("t2v", "i2v", "flf2v"):
             allowed_modes = m_defn.get("video_modes") or ["i2v", "t2v"]
             if sub not in allowed_modes:

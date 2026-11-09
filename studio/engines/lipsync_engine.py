@@ -445,6 +445,9 @@ class LipSyncEngine:
             pass
 
     def _ensure_loaded(self, model_id: str, job: Optional[JobRecord] = None) -> Dict[str, Any]:
+        definition = self.catalog.get_definition(model_id)
+        if definition and definition.get("validation_state") == "candidate":
+            raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato LipSync sin receta revisada.")
         with self._lock:
             if self.loaded_model_id == model_id and self._sessions.get("edtalk") is not None:
                 return self._sessions

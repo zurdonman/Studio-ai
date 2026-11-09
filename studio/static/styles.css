@@ -2250,3 +2250,35 @@ select:focus {
 
 
 
+
+
+/* Explainable metadata discovery (shared assessment with MCP). */
+.gpu-sticker.candidate { color: #c4b5fd; background: rgba(139, 92, 246, .13); border-color: rgba(139, 92, 246, .3); }
+.discovery-actions { flex-wrap: wrap; }
+.discovery-tags { flex-wrap: wrap; margin: 8px 0; }
+.hf-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.hf-card-heading strong { overflow-wrap: anywhere; font-size: 12.5px; }
+.hf-card-heading .muted { flex-shrink: 0; font-size: 10px; }
+.hf-live-card p { font-size: 11px; line-height: 1.5; margin: 7px 0; overflow-wrap: anywhere; }
+.discovery-updater { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 0; }
+.discovery-updater .check-row { margin: 0; }
+.discovery-updater select, .discovery-oracle select { width: auto; max-width: 100%; }
+.discovery-status { padding: 9px 11px; background: rgba(148, 163, 184, .06); border-radius: 6px; line-height: 1.6; }
+.discovery-pagination { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 14px; }
+.discovery-empty { padding: 14px 0; grid-column: 1 / -1; }
+.model-inspect-panel { border: 1px solid #425478; border-radius: 8px; padding: 16px; margin-top: 16px; scroll-margin-top: 80px; }
+.model-inspect-panel h4 { overflow-wrap: anywhere; margin: 14px 0; }
+.model-inspect-panel li, #hf-oracle-result li { color: var(--text-muted); line-height: 1.6; font-size: 12px; }
+.discovery-json { margin: 14px 0 0; }
+.discovery-json summary, .discovery-oracle > summary { cursor: pointer; color: #a5b4fc; padding: 7px 0; }
+.discovery-json pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; font-size: 11px; background: #0d1422; border-radius: 6px; }
+.discovery-oracle { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 8px; }
+.discovery-manuals { flex-wrap: wrap; margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.hf-search-bar #hf-sort { width: auto; }
+@media (max-width: 720px) {
+  .hf-search-bar { flex-wrap: wrap; }
+  .hf-search-bar input { min-width: 180px; }
+  .discovery-updater { align-items: flex-start; gap: 9px; }
+  .hf-card-heading { flex-wrap: wrap; }
+  .hf-live-results { grid-template-columns: minmax(0, 1fr); }
+}

@@ -23,15 +23,15 @@ import os, subprocess; subprocess.run("rm -rf /content/studio && (git clone -b a
 1. **Imagen (Predeterminado: `Qwen-Image-Edit-2511 4-bit` + `LoRA Lightning 4 pasos`):**
    - Descarga y carga conjunta en un solo clic.
    - **Edición simple**, **Multi-Referencia (hasta 3 imágenes)**, **Inpainting pintando máscara con pincel** (con borde suavizado respetando el exterior al 100 %) y creación sobre lienzo limpio.
-   - Soporte para **LoRA Extra / NSFW** opcional con interruptor y cualquier LoRA adicional de Hugging Face.
+   - Soporte para **LoRA Extra / NSFW** opcional con interruptor y LoRAs con arquitectura/base revisadas. Las importaciones desconocidas son candidatos, no ejecutables.
    - Procesamiento **FFmpeg BT.709** automático a la entrada y a la salida (`-map_metadata -1`, `yuvj444p`, `bt709`).
    - Registro automático de **procedencia** en cada imagen (modelo, LoRAs, semilla, pasos, tiempo, resolución).
 
 2. **Catálogo Bajo Demanda + Control Separado de Disco y RAM/VRAM:**
-   - Nada se descarga solo al iniciar.
+   - No se descargan pesos al iniciar. El índice puede refrescar metadatos públicos en segundo plano.
    - **Imagen:** Qwen-Image-Edit 2511 (4-bit) + Lightning 4 pasos ★, LoRA Extra Qwen Edit Plus, + repositorios propios de Hugging Face.
-   - **Vídeo:** `Wan 2.2 TI2V-5B` ★, `Wan 2.2 S2V-14B` (guiado por voz/diálogo), `LTX-Video 2B` (rápido para T4/L4) + **Animación FFmpeg en CPU (0 VRAM)**.
-   - **Voz (TTS):** `Edge-TTS` instantáneo sin descarga (`Álvaro`, `Elvira`, etc.), `Kokoro-82M` y `Qwen3-TTS 1.7B`.
+   - **Vídeo:** `Wan 2.2 TI2V-5B` ★, Wan 2.1 VACE/FLF2V FP8, LTX 13B destilado/LTX-2 AV según hardware y receta, `LTX-Video 2B` (rápido para T4/L4) + **Animación FFmpeg en CPU (0 VRAM)**.
+   - **Voz (TTS):** `Edge-TTS` instantáneo sin descarga (`Álvaro`, `Elvira`, etc.), MMS español, `Kokoro-82M` (backend opcional) y Bark pequeño. Qwen3-TTS es un candidato investigado, no un motor integrado.
    - Tres acciones independientes por modelo:
      - **Descargar de HF** con porcentaje real `0–100 %` y velocidad `MB/s` (comprueba antes si cabe en disco; si falta espacio te dice cuántos GB faltan y qué modelo puedes borrar).
      - **Cargar / Liberar de RAM y VRAM** sin borrar los archivos del disco.
@@ -43,6 +43,21 @@ import os, subprocess; subprocess.run("rm -rf /content/studio && (git clone -b a
 4. **Control Total del Proceso y de tus Créditos:**
    - Consola en vivo paso a paso con hora exacta y **detector de posible cuelgue (>30 s sin actividad)**.
    - **Contador de créditos de Colab** ajustable en vivo según la GPU detectada + aviso de inactividad + descarga completa en `.zip` antes de apagar la sesión.
+
+---
+
+## Descubridor vivo y oráculo de modelos (2026-11-05)
+
+- **Investigación trazable:** 73 familias/proyectos y 243 referencias a repositorios/componentes, con fuentes oficiales fijadas; no son 243 modelos garantizados. [Informe completo](docs/MODEL_RESEARCH.md) e [inventario JSON](studio/data/upstream_models.json).
+- **74 recetas/complementos** en el catálogo, incluidas **8 recetas nuevas de imagen**: SDXL Base, FLUX Schnell, FLUX.2 Klein 4B, Z-Image Turbo, PixArt Sigma, SANA 600M/1600M y SANA Sprint. Lumina 2 queda como candidato: requiere integrar explícitamente su transformer/formato, no un cargador genérico. Se han implementado clases explícitas/defaults propios; **inferencia GPU de las nuevas recetas aún no validada**.
+- **Buscador al escribir**, paginación, orden por descargas/actualización, inspector de clase/licencia/base/revisión y etiqueta de red/caché/offline. El mismo evaluador comprueba **motor, VRAM, RAM, disco, precisión y dependencias**, sin calcular compatibilidad solo por nombre/parámetros.
+- **Actualización manual o automática** (6 h por defecto, configurable/desactivable). Solo metadatos públicos en `STUDIO_DATA_DIR/state/model_discovery.json`, con límites, caché, reintentos y reemplazo atómico. No instala librerías ni baja pesos/código remoto.
+- **Receta revisada / candidato / backend no soportado**, sin promoción automática. Las importaciones manuales se conservan como candidatos no ejecutables. «Compatible» es encaje estimado; `runnable_now` es más estricto y una GPU simulada nunca es ejecutable.
+- **Oráculo web y MCP** con motivos, alternativas, plantillas y entradas necesarias. Puede contestar «sin receta apta». No descarga modelos alternativos por timeout ni promete tiempos de generación.
+
+Herramientas MCP: `studio_search_models`, `studio_inspect_model`, `studio_refresh_model_index`, `studio_model_index_status`, `studio_get_model_guide`, además de `studio_recommend_pipeline`. [Manual detallado, esquemas y ejemplos](docs/MCP_MODEL_ORACLE.md). En la web: **5. Catálogo → Descubridor / Oráculo**. La investigación/recetas se actualizan con código revisado; el refresco automático actualiza metadatos, no añade cargadores.
+
+> En esta vista previa local no hay CUDA y la salida a Hugging Face está restringida: se muestran referencias locales/caché con su estado real. Buscar en línea y medir inferencia se debe comprobar en Colab con su GPU/RAM/disco detectados. Simular una L4 aquí no aumenta la RAM real.
 
 ---
 

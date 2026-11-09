@@ -84,6 +84,10 @@ from studio.hardware import (
 )
 from studio.jobs import job_manager
 from studio.memory_manager import memory_manager
+from studio.model_discovery import model_discovery, CATEGORIES
+from studio.model_compatibility import assessment_context, assess_definition, get_runtime_capabilities
+from studio.model_recipes import ENGINE_CONTRACTS, image_defaults
+from studio.model_oracle import recommend_pipeline
 
 apply_runtime_compatibility_patches()
 
@@ -303,7 +307,7 @@ MANUAL_RESOURCES: Dict[str, Dict[str, str]] = {
             "- Soporta creación desde cero (`base_image_rel` vacío), edición de 1 foto + `reference_rels`, e Inpainting con máscara (`mask_image_rel`, blanco=editar, negro=intacto).\n\n"
             "## 2. Voz TTS (`studio_generate_speech`)\n"
             "- Motor instantáneo 0 GB: `engine_id='edge-tts-cloud'` (ej. `es-ES-AlvaroNeural`, `es-ES-ElviraNeural`, `es-MX-DaliaNeural`).\n"
-            "- Motores GPU locales: `kokoro-82m-tts`, `mms-tts-es`, `bark-voice-Cloning`.\n\n"
+            "- Motores locales (según runtime y RAM/GPU): `kokoro-82m-tts`, `mms-tts-spa`, `bark-small-tts`.\n\n"
             "## 3. Montaje Final (`studio_render_montage`)\n"
             "- Combina planos (`images` y/o `videos`) con su `audio_rel` individual (`fit_to_audio=true` ajusta la duración del plano a la locución), `global_audio_rel` (música de fondo) y `fade_seconds`.\n"
         ),
@@ -342,6 +346,38 @@ MANUAL_RESOURCES: Dict[str, Dict[str, str]] = {
         ),
     },
 }
+
+
+MODEL_GUIDE_PATH = ROOT_REPO_DIR / "docs" / "MCP_MODEL_ORACLE.md"
+MODEL_RESEARCH_PATH = ROOT_REPO_DIR / "docs" / "MODEL_RESEARCH.md"
+MANUAL_RESOURCES["studio://manual/model-oracle"] = {
+    "name": "Manual detallado de descubrimiento, hardware, recetas y oráculo",
+    "mimeType": "text/markdown", "content": MODEL_GUIDE_PATH.read_text(encoding="utf-8"),
+}
+MANUAL_RESOURCES["studio://manual/model-research"] = {
+    "name": "Investigación de familias/modelos y fuentes oficiales fijadas",
+    "mimeType": "text/markdown", "content": MODEL_RESEARCH_PATH.read_text(encoding="utf-8"),
+}
+MCP_SERVER_INSTRUCTIONS += """
+
+7. DESCUBRIMIENTO Y ORÁCULO DE MODELOS (REGLAS PRIORITARIAS SOBRE TABLAS HISTÓRICAS):
+   - Lee `studio://manual/model-oracle` o `studio_get_model_guide(guide='operations')`.
+   - `studio_search_models` busca metadatos públicos con cache/fecha y filtro de recursos; `studio_inspect_model` explica receta, formato y límites. Un repo HF NO es un model_id de ejecución.
+   - `reviewed_recipe` = receta implementada, NO GPU validada. `candidate` = sin receta; `unsupported` = backend/formato/código remoto no autorizado. Nunca promover un candidato ni inventar un cargador por el nombre o número de parámetros.
+   - `compatible` es encaje ESTIMADO de VRAM/RAM/disco; `runnable_now` exige preparación actual y GPU real. Simular L4 no convierte la CPU real en una L4. No sumar VRAM de varias GPU.
+   - El oráculo actual comprueba capacidad, RAM, disco, precisión y dependencias; puede devolver `no_compatible_recipe`. Sus diagnósticos prevalecen sobre tablas de tiempos/minutos orientativas, que NO son benchmarks.
+   - `studio_refresh_model_index` actualiza SOLO metadatos, manualmente o cada intervalo configurado. NO descarga pesos, instala paquetes, actualiza recetas ni ejecuta Python remoto. Las importaciones manuales sin receta se conservan como candidatos no ejecutables.
+   - Una caché offline no se llama búsqueda en vivo. License/gated desconocido permanece desconocido; token presente no acredita acceso a pesos. Si faltan librerías/clases, reparar/reiniciar; no bajar modelos alternativos en cascada.
+"""
+
+# Static recipes are documentation of contracts, not GPU certification or timings.
+for _uri in ("studio://manual/video-recipes", "studio://manual/image-tts-montage", "studio://manual/lipsync-and-sound"):
+    MANUAL_RESOURCES[_uri]["content"] = (
+        "> **Aviso:** recetas implementadas y cifras orientativas NO medidas en esta revisión. "
+        "Consultar primero el diagnóstico actual de `studio_recommend_pipeline` y `studio://manual/model-oracle`; "
+        "comprobar RAM/disco/dependencias además de VRAM. No hay garantía de tiempos ni de ausencia de OOM.\n\n"
+        + MANUAL_RESOURCES[_uri]["content"]
+    )
 
 
 # ==================== UTILIDADES INTERNAS MCP ====================
@@ -516,8 +552,103 @@ def _ok_result(payload: Dict[str, Any]) -> Dict[str, Any]:
 # ==================== DEFINICIÓN DINÁMICA DE HERRAMIENTAS CON ENUMS CERRADOS ====================
 
 
+def _model_discovery_tools_schema() -> List[Dict[str, Any]]:
+    profiles = ["auto", "CPU", "T4", "L4", "A100_40", "A100_80", "H100"]
+    def tool(name: str, description: str, properties: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str, Any]:
+        schema: Dict[str, Any] = {"type": "object", "properties": properties, "additionalProperties": False}
+        if required:
+            schema["required"] = required
+        return {"name": name, "description": description, "inputSchema": schema}
+    tools = [
+        tool("studio_search_models", "Descubre metadatos públicos HF + recetas/referencias locales. Cache/fecha/offline explícitos. Sin pesos ni código. Compatible = receta con encaje estimado, no benchmark; candidatos no ejecutables.", {
+            "query": {"type": "string", "default": "", "maxLength": 160},
+            "category": {"type": "string", "enum": list(CATEGORIES), "default": "video"},
+            "gpu_profile": {"type": "string", "enum": profiles, "default": "auto", "description": "Auto usa hardware real; los demás simulan SOLO la GPU, no RAM/disco ni ejecución."},
+            "only_compatible": {"type": "boolean", "default": False},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 12},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0},
+            "refresh": {"type": "boolean", "default": False},
+            "sort": {"type": "string", "enum": ["downloads", "lastModified"], "default": "downloads"},
+        }),
+        tool("studio_inspect_model", "Explica un model_id exacto del catálogo o inspecciona pequeños JSON/inventario de un repo_id HF. Pasar exactamente uno. Sin pesos, sin trust_remote_code, sin suponer licencia/acceso.", {
+            "model_id": {"type": "string", "description": "ID real obtenido de studio_list_models/recipes."},
+            "repo_id": {"type": "string", "description": "Repositorio exacto autor/modelo, no URL ni archivo de pesos."},
+            "gpu_profile": {"type": "string", "enum": profiles, "default": "auto"},
+            "refresh": {"type": "boolean", "default": False},
+        }),
+        tool("studio_refresh_model_index", "Actualiza SOLO metadatos en un job deduplicado. Configura refresco periódico opcional; no instala librerías ni habilita modelos descubiertos. Esperar el mismo job_id.", {
+            "query": {"type": "string", "maxLength": 160, "default": ""},
+            "category": {"type": "string", "enum": list(CATEGORIES), "default": "all"},
+            "sort": {"type": "string", "enum": ["downloads", "lastModified"], "default": "downloads"},
+            "refresh_now": {"type": "boolean", "default": True},
+            "auto_refresh": {"type": "boolean", "description": "Si se omite no cambia la configuración."},
+            "interval_minutes": {"type": "integer", "minimum": 15, "maximum": 1440, "default": 360},
+        }),
+        tool("studio_model_index_status", "Estado ligero de frescura, último éxito/error, límites, cooldown y actualizador. No genera consultas a HF ni importa GPU.", {}),
+        tool("studio_get_model_guide", "Manual detallado para CLI: hardware/VRAM/RAM/disco, fuentes, formatos, LoRA, recipes/candidates, oráculo y recuperación. No es una promesa de GPU validada.", {
+            "guide": {"type": "string", "enum": ["operations", "research"], "default": "operations"},
+        }),
+    ]
+    tools[1]["inputSchema"]["oneOf"] = [{"required": ["model_id"]}, {"required": ["repo_id"]}]
+    return tools
+
+
+def _execute_model_discovery_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def boolean(key: str, default: bool = False) -> bool:
+        value = args.get(key, default)
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} debe ser booleano, no un texto.")
+        return value
+    def integer(key: str, default: int) -> int:
+        value = args.get(key, default)
+        if type(value) is not int:
+            raise ValueError(f"{key} debe ser un entero JSON.")
+        return value
+    if name == "studio_model_index_status":
+        return model_discovery.status()
+    if name == "studio_get_model_guide":
+        guide = str(args.get("guide", "operations"))
+        if guide not in ("operations", "research"):
+            raise ValueError("guide debe ser operations o research.")
+        uri = "studio://manual/model-oracle" if guide == "operations" else "studio://manual/model-research"
+        return {"ok": True, "uri": uri, "markdown": MANUAL_RESOURCES[uri]["content"]}
+    if name == "studio_search_models":
+        return model_discovery.search(query=str(args.get("query", "")), category=str(args.get("category", "video")),
+            gpu_profile=str(args.get("gpu_profile", "auto")), only_compatible=boolean("only_compatible"),
+            limit=integer("limit", 12), offset=integer("offset", 0), refresh=boolean("refresh"), sort=str(args.get("sort", "downloads")))
+    if name == "studio_inspect_model":
+        mid, repo = str(args.get("model_id") or "").strip(), str(args.get("repo_id") or "").strip()
+        if bool(mid) == bool(repo):
+            raise ValueError("Pasa exactamente uno: model_id del catálogo O repo_id autor/modelo.")
+        profile = str(args.get("gpu_profile", "auto"))
+        refresh = boolean("refresh")
+        if repo:
+            return model_discovery.inspect(repo, gpu_profile=profile, refresh=refresh)
+        definition = catalog_manager.get_definition(mid)
+        if not definition:
+            raise ValueError("Model_id desconocido. Usar studio_list_models; no confundirlo con un repo HF.")
+        result = {"ok": True, "model_id": mid, "definition": definition,
+                  "assessment": assess_definition(definition, assessment_context(gpu_profile=profile), catalog=catalog_manager),
+                  "loader_contract": ENGINE_CONTRACTS.get(definition.get("engine"), {}),
+                  "metadata_only": True, "automatic_weight_downloads": False}
+        if definition["category"] == "image":
+            result["image_defaults"] = image_defaults(definition)
+        if refresh and definition.get("artifacts"):
+            result["repository_inspection"] = model_discovery.inspect(definition["artifacts"][0]["repo_id"], gpu_profile=profile, refresh=True)
+        return result
+    if name == "studio_refresh_model_index":
+        if "auto_refresh" in args or "interval_minutes" in args:
+            settings = model_discovery.status()["settings"]
+            model_discovery.configure(auto_refresh=boolean("auto_refresh", settings["auto_refresh"]),
+                interval_minutes=integer("interval_minutes", settings["interval_minutes"]))
+        if not boolean("refresh_now", True):
+            return model_discovery.status()
+        return model_discovery.queue_refresh(query=str(args.get("query", "")), category=str(args.get("category", "all")), sort=str(args.get("sort", "downloads")))
+    raise ValueError("Herramienta de descubrimiento desconocida.")
+
+
 def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
-    all_defs = catalog_manager.get_all_definitions()
+    all_defs = [d for d in catalog_manager.get_all_definitions() if d.get("validation_state") != "candidate"]
     all_model_ids = [m["id"] for m in all_defs]
     image_model_ids = [m["id"] for m in all_defs if m["category"] == "image"]
     video_model_ids = [m["id"] for m in all_defs if m["category"] == "video"]
@@ -528,7 +659,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
     audio_gen_ids = ["auto"] + [m["id"] for m in all_defs if m["category"] == "audio"]
     voice_ids = [v["id"] for v in EDGE_TTS_VOICES]
 
-    return [
+    return _model_discovery_tools_schema() + [
         {
             "name": "studio_get_state_and_manual",
             "description": (
@@ -539,6 +670,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "include_model_manual": {"type": "boolean", "default": False, "description": "Incluir el manual detallado completo de modelos/oráculo."},
                     "include_recent_assets": {
                         "type": "boolean",
                         "default": True,
@@ -552,7 +684,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
             "description": (
                 "ORÁCULO ANTI-INVENCIÓN. Indícale la tarea (`video_flf2v`, `video_i2v`, `video_t2v`, `image_create`, "
                 "`image_edit`, `tts`, `montage`) y la prioridad (`max_quality_14b`, `balanced_fast`, `ultra_fast_draft`, "
-                "`zero_vram_cpu`), y te devuelve los IDs y parámetros oficiales exactos para la GPU y disco actuales."
+                "`zero_vram_cpu`), y devuelve plantillas de recetas revisadas con diagnósticos de VRAM/RAM/disco/dependencias actuales; puede no haber receta apta. No descarga pesos ni garantiza tiempos."
             ),
             "inputSchema": {
                 "type": "object",
@@ -765,7 +897,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
         {
             "name": "studio_generate_or_edit_image",
             "description": (
-                "Genera una imagen desde cero, edita una foto existente con referencias múltiples o aplica Inpainting "
+                "Genera imagen con la receta exacta del catálogo o edita con un motor que admita referencias; aplica composición de máscara "
                 "con máscara usando Qwen Image Edit 2511 + LoRA Lightning 4 pasos + normalización de color BT.709."
             ),
             "inputSchema": {
@@ -808,7 +940,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                     "use_official_defaults": {
                         "type": "boolean",
                         "default": True,
-                        "description": "Mantenlo en `true` para aplicar automáticamente 4 pasos con LoRA Lightning y CFG 4.0.",
+                        "description": "Aplica pasos/CFG de la familia exacta: Qwen Lightning 4/4, SDXL Base 30/5, Turbo 4/0, Z-Image 9/0, Klein 4/1, SANA Sprint 2/0. Consultar studio_inspect_model; no impone Lightning a otras familias.",
                     },
                     "steps": {"type": "integer", "default": 4, "minimum": 1, "maximum": 50},
                     "guidance_scale": {"type": "number", "default": 4.0},
@@ -831,7 +963,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
         {
             "name": "studio_generate_video",
             "description": (
-                "Genera un clip de vídeo MP4 en cualquiera de los 4 modos verificados: "
+                "Genera un clip de vídeo MP4 en los modos admitidos por su receta (sin garantía de validación GPU): "
                 "`flf2v` (Frame a Frame: Inicio → Fin con 2 imágenes), `i2v` (1 Imagen → Vídeo), "
                 "`t2v` (Texto → Vídeo) o `ffmpeg_motion` (cámara/transición CPU en 2 s). "
                 "Con `use_official_defaults=true` (por defecto) calcula automáticamente pasos, CFG, escala LoRA y resolución oficial."
@@ -1036,7 +1168,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
         {
             "name": "studio_analyze_coherence",
             "description": (
-                "Inspector híbrido de coherencia visual y consistencia de personajes (`OpenCV` fotométrico 0.1s + "
+                "Inspector de coherencia (`OpenCV` fotométrico CPU + "
                 "`Qwen2.5-VL-3B-Instruct` 4-bit NF4 semántico). Compara el Fotograma Ancla (`anchor_image_rel`) frente a "
                 "uno o varios fotogramas candidatos (`candidate_image_rels`) verificando si las personas, rostros, pelo, "
                 "ropa, escenario e iluminación siguen siendo idénticos, y devuelve `recommended_repair_tool_call` listo "
@@ -1094,7 +1226,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
             "name": "studio_generate_music_or_sfx",
             "description": (
                 "Genera música instrumental de fondo (`musicgen-small-bgm`), efectos Foley/paisajes sonoros IA (`audioldm2-sfx`) "
-                "o ambiente estéreo instantáneo en 0.2s sin VRAM (`procedural-ambience-cpu` con presets como `restaurant_warm_murmur`, "
+                "o ambiente estéreo DSP en CPU sin VRAM (`procedural-ambience-cpu` con presets como `restaurant_warm_murmur`, "
                 "`rain_cozy`, `cinematic_warm_pad`, `wind_nature`, `room_tone_clean`)."
             ),
             "inputSchema": {
@@ -1404,242 +1536,10 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
 
 
 def _compute_recommendation(task: str, priority: str) -> Dict[str, Any]:
-    gpu_info = query_gpu_info()
-    vram = float(gpu_info.get("vram_total_gb") or 0.0)
-    has_gpu = bool(gpu_info.get("has_gpu"))
-    snap = hardware_tracker.get_snapshot(active_jobs_count=job_manager.active_count())
-    free_disk = float((snap.get("disk") or {}).get("free_gb") or 0.0)
-
-    if priority == "zero_vram_cpu" or (not has_gpu and task.startswith("video_")):
-        return {
-            "task": task,
-            "detected_gpu": gpu_info.get("gpu_name", "CPU"),
-            "free_disk_gb": free_disk,
-            "recommended_tool": "studio_generate_video",
-            "recommended_arguments": {
-                "mode": "ffmpeg_motion",
-                "video_submode": "flf2v" if task == "video_flf2v" else "i2v",
-                "model_id": "ffmpeg-motion-cpu",
-                "motion_style": "zoom_in",
-                "duration_sec": 4.5,
-            },
-            "why_this_choice": "Ejecución instantánea CPU con FFmpeg (0 GB VRAM, ~2 segundos).",
-        }
-
-    if task == "video_flf2v":
-        if vram >= 18.0 and priority == "max_quality_14b":
-            return {
-                "task": task,
-                "detected_gpu": gpu_info.get("gpu_name"),
-                "vram_total_gb": vram,
-                "free_disk_gb": free_disk,
-                "recommended_tool": "studio_generate_video",
-                "recommended_arguments": {
-                    "mode": "ai",
-                    "video_submode": "flf2v",
-                    "model_id": "wan21-vace-14b-fp8",
-                    "video_lora_id": "lora-wan21-14b-fusionx-phantom",
-                    "use_official_defaults": True,
-                },
-                "alternative_hd_specialist": {
-                    "model_id": "wan21-flf2v-14b-fp8",
-                    "video_lora_id": "lora-wan21-14b-fusionx-i2v",
-                    "note": "Especialista puro 14B 720P con doble CLIP 514 tokens (~30.7 GB disco).",
-                },
-                "why_this_choice": (
-                    "GPU >=18 GB detectada: Wan 2.1 VACE 14B Quantized FP8 (29.1 GB) + LoRA FusionX Phantom (6 pasos @ CFG 1.0) "
-                    "ofrece calidad de textura y anatomía 14B en ~1.6 min en L4 con atención bidireccional completa."
-                ),
-            }
-        if vram >= 18.0 and priority == "balanced_fast":
-            return {
-                "task": task,
-                "detected_gpu": gpu_info.get("gpu_name"),
-                "vram_total_gb": vram,
-                "free_disk_gb": free_disk,
-                "recommended_tool": "studio_generate_video",
-                "recommended_arguments": {
-                    "mode": "ai",
-                    "video_submode": "flf2v",
-                    "model_id": "ltx-video-13b-distilled" if free_disk >= 50.0 else "wan21-vace-14b-fp8",
-                    "video_lora_id": "" if free_disk >= 50.0 else "lora-wan21-14b-fusionx-phantom",
-                    "use_official_defaults": True,
-                },
-                "why_this_choice": "Velocidad rápida en 13B/14B destilado (6–8 pasos @ CFG 1.0).",
-            }
-        return {
-            "task": task,
-            "detected_gpu": gpu_info.get("gpu_name"),
-            "vram_total_gb": vram,
-            "free_disk_gb": free_disk,
-            "recommended_tool": "studio_generate_video",
-            "recommended_arguments": {
-                "mode": "ai",
-                "video_submode": "flf2v",
-                "model_id": "wan21-vace-1.3b",
-                "video_lora_id": "lora-wan21-1.3b-bidirect2",
-                "use_official_defaults": True,
-            },
-            "why_this_choice": (
-                "Wan 2.1 VACE 1.3B (17.7 GB) + LoRA Bidireccional v2 (91 MB, 8 pasos, escala 0.65, CFG 1.5): "
-                "cabe incluso en T4 (15 GB) y genera transiciones Frame a Frame en ~25 s en L4."
-            ),
-        }
-
-    if task in ("video_i2v", "video_t2v"):
-        sub = "i2v" if task == "video_i2v" else "t2v"
-        if vram >= 18.0 and priority == "max_quality_14b":
-            return {
-                "task": task,
-                "detected_gpu": gpu_info.get("gpu_name"),
-                "recommended_tool": "studio_generate_video",
-                "recommended_arguments": {
-                    "mode": "ai",
-                    "video_submode": sub,
-                    "model_id": "wan22-ti2v-5b",
-                    "video_lora_id": "lora-wan22-ti2v-5b-turbo",
-                    "use_official_defaults": True,
-                },
-                "alternative_14b": {
-                    "model_id": "wan21-vace-14b-fp8",
-                    "video_lora_id": "lora-wan21-14b-fusionx-phantom",
-                },
-                "why_this_choice": "Wan 2.2 TI2V-5B HD 720P @ 24fps con LoRA Turbo (6 pasos @ CFG 1.0, ~1.2 min en L4).",
-            }
-        return {
-            "task": task,
-            "detected_gpu": gpu_info.get("gpu_name"),
-            "recommended_tool": "studio_generate_video",
-            "recommended_arguments": {
-                "mode": "ai",
-                "video_submode": sub,
-                "model_id": "wan21-vace-1.3b" if sub == "i2v" else "wan21-t2v-1.3b",
-                "video_lora_id": "lora-wan21-1.3b-bidirect2",
-                "use_official_defaults": True,
-            },
-            "why_this_choice": "Modelo ligero 1.3B con LoRA rápido (6 pasos @ CFG 1.0, ~22 s en L4, compatible con T4).",
-        }
-
-    if task == "consistent_keyframes":
-        return {
-            "task": task,
-            "detected_gpu": gpu_info.get("gpu_name", "CPU"),
-            "free_disk_gb": free_disk,
-            "workflow_steps": [
-                {
-                    "step": 1,
-                    "action": "Generar Fotograma 1 (ANCLA) con `studio_generate_or_edit_image` (`model_id='qwen-image-edit-2511-pack'`).",
-                },
-                {
-                    "step": 2,
-                    "action": (
-                        "Generar Fotogramas 2..N llamando a `studio_generate_or_edit_image` con `model_id='qwen-image-edit-2511-pack'`, "
-                        "`base_image_rel=<rel_del_ancla>` y `reference_rels=[<rel_del_ancla>]`, cambiando SOLO la acción en el `prompt`."
-                    ),
-                },
-                {
-                    "step": 3,
-                    "action": "Auditar todos los fotogramas con `studio_analyze_coherence(mode='hybrid_auto')` y ejecutar `recommended_repair_tool_call` si alguno falla.",
-                },
-            ],
-            "recommended_tool": "studio_generate_or_edit_image",
-            "recommended_arguments": {
-                "model_id": "qwen-image-edit-2511-pack",
-                "use_official_defaults": True,
-                "use_lightning_lora": True,
-            },
-            "why_this_choice": "Anclar cada fotograma a la Imagen #1 en Qwen-Image-Edit 2511 + auditar con Qwen2.5-VL-3B evita que cambien caras o ropa.",
-        }
-
-    if task == "lipsync_talking_scene":
-        return {
-            "task": task,
-            "detected_gpu": gpu_info.get("gpu_name", "CPU"),
-            "free_disk_gb": free_disk,
-            "workflow_steps": [
-                {"step": 1, "action": "Descargar una vez `edtalk-256-lipsync-hd` (0.65 GB) con `studio_prepare_model(model_id='edtalk-256-lipsync-hd')`."},
-                {"step": 2, "action": "Generar las voces en español con `studio_generate_speech` y el ambiente con `studio_generate_music_or_sfx(model_id='procedural-ambience-cpu', preset='restaurant_warm_murmur')`."},
-                {"step": 3, "action": "Aplicar LipSync por personaje (`target_face='leftmost'` / `'rightmost'` en `dialogue_turns`) + `ambient_rel` + `music_rel` llamando a `studio_lipsync_character`."},
-            ],
-            "recommended_tool": "studio_lipsync_character",
-            "recommended_arguments": {
-                "model_id": "edtalk-256-lipsync-hd",
-                "target_face": "largest",
-                "lip_weight": 0.85,
-                "enhance_face": True,
-                "extend_video_to_audio": True,
-            },
-            "why_this_choice": "EDTalk-256 + YuNet + XSeg + GFPGAN 1.4 ocupa solo 0.65 GB (~1.5 GB VRAM) y sincroniza labios de 1 o varios personajes con Auto-Ducking integrado.",
-        }
-
-    if task == "music_and_ambience":
-        use_ai_bgm = has_gpu and priority != "zero_vram_cpu" and catalog_manager.is_downloaded("musicgen-small-bgm")
-        return {
-            "task": task,
-            "detected_gpu": gpu_info.get("gpu_name", "CPU"),
-            "recommended_tool": "studio_generate_music_or_sfx",
-            "recommended_arguments": {
-                "model_id": "musicgen-small-bgm" if use_ai_bgm else "procedural-ambience-cpu",
-                "preset": "restaurant_warm_murmur",
-                "duration_seconds": 12.0,
-            },
-            "why_this_choice": (
-                "Usa `procedural-ambience-cpu` (0 GB, 0.2s) para ambiente inmediato o descarga `musicgen-small-bgm` (2 GB) para música instrumental IA original."
-            ),
-        }
-
-    if task == "coherence_check":
-        return {
-            "task": task,
-            "detected_gpu": gpu_info.get("gpu_name", "CPU"),
-            "free_disk_gb": free_disk,
-            "recommended_tool": "studio_analyze_coherence",
-            "recommended_arguments": {
-                "mode": "hybrid_auto" if has_gpu else "fast_cv",
-                "strictness_threshold": 78.0,
-            },
-            "why_this_choice": (
-                "Combina filtro fotométrico instantáneo OpenCV (0.12s, color/luz/aspecto) + auditoría semántica de identidad "
-                "con Qwen2.5-VL-3B-Instruct en 4-bit (~2.8 GB VRAM, puede convivir en L4 junto a Qwen-Image-Edit)."
-            ),
-        }
-
-    if task in ("image_create", "image_edit"):
-        return {
-            "task": task,
-            "recommended_tool": "studio_generate_or_edit_image",
-            "recommended_arguments": {
-                "aspect_ratio": "1:1",
-                "use_official_defaults": True,
-                "use_lightning_lora": True,
-            },
-            "why_this_choice": "Qwen Image Edit 2511 4-bit NF4 + Lightning 4 pasos + normalización BT.709 (~20 s en L4).",
-        }
-
-    if task == "tts":
-        return {
-            "task": task,
-            "recommended_tool": "studio_generate_speech",
-            "recommended_arguments": {
-                "engine_id": "edge-tts-cloud",
-                "voice_id": "es-ES-AlvaroNeural",
-                "rate_pct": 0,
-            },
-            "why_this_choice": "Síntesis neuronal instantánea en español sin consumir VRAM ni disco (0 GB).",
-        }
-
-    return {
-        "task": "montage",
-        "recommended_tool": "studio_render_montage",
-        "recommended_arguments": {
-            "width": 1280,
-            "height": 720,
-            "fps": 24,
-            "fade_seconds": 0.2,
-            "global_audio_volume": 0.25,
-        },
-        "why_this_choice": "Renderizado multipista H.264 BT.709 con ajuste automático de duración a la locución.",
-    }
+    snapshot = hardware_tracker.get_snapshot(active_jobs_count=job_manager.active_count())
+    result = recommend_pipeline(task, priority, catalog=catalog_manager, snapshot=snapshot)
+    result["discovery_status"] = model_discovery.status()
+    return result
 
 
 def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1651,6 +1551,12 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         f"[MCP → Studio IA] Agente ejecutó «{name}» · args={json.dumps(compact_args, ensure_ascii=False)[:650]}",
         icon="🤖",
     )
+
+    if name in {"studio_search_models", "studio_inspect_model", "studio_refresh_model_index", "studio_model_index_status", "studio_get_model_guide"}:
+        try:
+            return _ok_result(_execute_model_discovery_tool(name, args))
+        except (ValueError, TypeError, OverflowError) as exc:
+            return _guided_error("INVALID_MODEL_QUERY", str(exc), "Lee studio_get_model_guide y usa IDs/valores devueltos por Studio; un candidato no habilita ejecución.")
 
     # 1. Diagnóstico y manual
     if name == "studio_get_state_and_manual":
@@ -1673,6 +1579,10 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "downloaded_on_disk": downloaded_models,
             "active_jobs": job_manager.list_jobs(limit=5, include_logs=False),
             "available_workflow_presets": list_agent_workflow_presets(),
+            "runtime": get_runtime_capabilities(),
+            "model_discovery": model_discovery.status(),
+            "manual_index": [{"uri": uri, "name": meta["name"]} for uri, meta in MANUAL_RESOURCES.items()],
+            "model_policy": "Receta revisada ≠ GPU validada. Compatible = encaje estimado; candidato no ejecutable. Buscar/inspeccionar/refrescar nunca descarga pesos ni ejecuta código remoto.",
             "golden_rules": [
                 "ANTES de generar escenas de personajes caminando/hablando, secuencias coherentes o cortos, llama SIEMPRE a `studio_get_workflow_preset` (ej. `preset_id='coherencia_personajes_entorno_avance'`).",
                 "En escenas donde los personajes avanzan (ej. andando por la calle), NUNCA congeles el fondo entre fotogramas: usa `qwen-lora-next-scene` + zancada alterna + `expect_spatial_progression=true` en `studio_analyze_coherence`.",
@@ -1681,6 +1591,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "Un job running/queued requiere esperar el mismo job_id, no volver a preparar. Ante un fallo no descargues modelos alternativos en cascada.",
             ],
         }
+        if bool(args.get("include_model_manual", False)):
+            payload["model_manual"] = MANUAL_RESOURCES["studio://manual/model-oracle"]["content"]
         if bool(args.get("include_recent_assets", True)):
             payload["recent_assets"] = _list_assets_summary(bucket_filter="all", limit_per_bucket=8)
         return _ok_result(payload)
@@ -1708,7 +1620,10 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "studio_recommend_pipeline":
         task = str(args.get("task") or "video_flf2v")
         priority = str(args.get("priority") or "max_quality_14b")
-        return _ok_result({"ok": True, **_compute_recommendation(task=task, priority=priority)})
+        try:
+            return _ok_result({"ok": True, **_compute_recommendation(task=task, priority=priority)})
+        except ValueError as exc:
+            return _guided_error("INVALID_TASK_OR_PRIORITY", str(exc), "Consulta el enum de studio_recommend_pipeline; no se descargan pesos.")
 
     # 3. Listar modelos del catálogo
     if name == "studio_list_models":
@@ -1718,11 +1633,15 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         items = catalog_manager.list_catalog(
             loaded_ids=memory_manager.loaded_model_ids(),
             gpu_profile="auto",
-            only_compatible=only_compat,
+            only_compatible=False,
             detected_gpu=query_gpu_info(),
         )
+        context = assessment_context()
         filtered: List[Dict[str, Any]] = []
         for m in items:
+            assessment = assess_definition(m, context, catalog=catalog_manager)
+            if only_compat and not assessment["compatible"]:
+                continue
             if cat != "all" and m["category"] != cat:
                 continue
             if req_sub != "any":
@@ -1747,6 +1666,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     "downloaded": m.get("downloaded"),
                     "loaded_in_memory": m.get("loaded_in_memory"),
                     "gpu_compatibility": m.get("compatibility"),
+                    "assessment": assessment,
+                    "validation_state": m.get("validation_state", "reviewed_recipe"),
                     "l4_seconds_hint": m.get("l4_seconds_hint"),
                     "official_spec": m.get("official_spec"),
                 }
@@ -1767,6 +1688,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "Llama a `studio_list_models` para obtener los `id` exactos permitidos.",
             )
 
+        if defn.get("validation_state") == "candidate":
+            return _guided_error("MODEL_RECIPE_UNVALIDATED", "Este ID es un candidato, no una receta ejecutable.", "Usa studio_inspect_model y studio_search_models; no se descargarán pesos hasta existir receta revisada.")
         if not catalog_manager.is_downloaded(mid):
             space = catalog_manager.check_disk_space(mid)
             if not space["ok"]:
@@ -1996,7 +1919,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         use_defaults = bool(args.get("use_official_defaults", True))
         use_l_lora = bool(args.get("use_lightning_lora", True))
         steps = (4 if use_l_lora else 28) if use_defaults else int(args.get("steps") or 4)
-        cfg = 4.0 if use_defaults else float(args.get("guidance_scale") or 4.0)
+        cfg = 4.0 if use_defaults else float(args.get("guidance_scale", 4.0))
         seed = int(args.get("seed") or 0)
         custom_loras = list(args.get("custom_lora_ids") or [])
         raw_lora_scales = args.get("lora_scales") if isinstance(args.get("lora_scales"), dict) else {}
@@ -2004,14 +1927,14 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         wait_flag = bool(args.get("wait", True))
 
         req_img_model = str(args.get("model_id") or "qwen-image-edit-2511-pack").strip()
-        # Protección anti-deriva: si hay imagen base o referencias ancla, forzar un modelo capaz de condicionar por imagen
-        if (base_p is not None or refs_p) and req_img_model == "qwen-image-2512-pack":
-            colab_console_log(
-                "[MCP Guardia] Se detectaron imágenes de referencia/ancla con `qwen-image-2512-pack` (solo T2I); "
-                "cambiando automáticamente a `qwen-image-edit-2511-pack` para preservar identidad de personajes.",
-                icon="🛡️",
-            )
-            req_img_model = "qwen-image-edit-2511-pack"
+        image_definition = catalog_manager.get_definition(req_img_model)
+        if not image_definition or image_definition.get("category") != "image" or image_definition.get("validation_state") == "candidate":
+            return _guided_error("MODEL_RECIPE_UNVALIDATED", "No hay receta revisada de imagen para ese ID.", "Usa studio_list_models y studio_inspect_model para obtener un ID de imagen revisado.")
+        if (base_p is not None or refs_p) and "i2i" not in image_definition.get("capabilities", []):
+            return _guided_error("IMAGE_MODEL_NO_REFERENCE_CONDITIONING", "El modelo elegido solo admite creación desde texto, no edición anclada.", "Consulta studio_recommend_pipeline(task='image_edit') y elige una receta adecuada con autorización; no se cambia el modelo silenciosamente.")
+        if use_defaults:
+            defaults = image_defaults(image_definition, use_l_lora)
+            steps, cfg = defaults["steps"], defaults["guidance_scale"]
 
         def _run_mcp_image(j: Any) -> Dict[str, Any]:
             return generate_or_edit_image(
@@ -2091,7 +2014,14 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             model_id = "ffmpeg-motion-cpu"
         elif not model_id:
             rec = _compute_recommendation(task=f"video_{sub}", priority="max_quality_14b")
-            model_id = str((rec.get("recommended_arguments") or {}).get("model_id") or "wan21-vace-1.3b")
+            model_id = str((rec.get("recommended_arguments") or {}).get("model_id") or "")
+            if not model_id:
+                return _guided_error(
+                    "NO_COMPATIBLE_VIDEO_RECIPE",
+                    "El oráculo no encuentra una receta apta para esta tarea y los recursos reales.",
+                    "Leer alternatives/assessment, revisar hardware y pedir autorización antes de cambiar la tarea o preparar otra receta. No hay descarga de fallback.",
+                    extra={"recommendation": rec},
+                )
 
         m_defn = catalog_manager.get_definition(model_id)
         if not m_defn:
@@ -2101,8 +2031,10 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "Usa `studio_list_models(category='video', required_video_submode=...)` para ver IDs válidos.",
             )
 
+        if m_defn.get("category") != "video" or m_defn.get("validation_state") == "candidate":
+            return _guided_error("MODEL_RECIPE_UNVALIDATED", "No es una receta de vídeo revisada.", "Usa studio_inspect_model; no se descargan ni cargan candidatos.")
         if mode == "ai":
-            allowed_modes = m_defn.get("video_modes") or ["i2v", "t2v"]
+            allowed_modes = m_defn.get("video_modes") or []
             if sub not in allowed_modes:
                 compat_ids = [
                     x["id"]
@@ -2116,13 +2048,13 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     extra={"compatible_model_ids": compat_ids},
                 )
 
-            gpu_info = query_gpu_info()
-            tier = evaluate_gpu_tier(m_defn, resolve_gpu_profile("auto", detected_gpu=gpu_info), gpu_info=gpu_info)
-            if gpu_info.get("has_gpu") and not tier["compatible"]:
+            assessment = assess_definition(m_defn, assessment_context(), catalog=catalog_manager)
+            if not assessment["compatible"]:
                 return _guided_error(
-                    "GPU_VRAM_TOO_SMALL",
-                    f"«{m_defn['name']}» pide ~{m_defn.get('min_vram_gb')} GB VRAM y tu GPU actual tiene {gpu_info.get('vram_total_gb')} GB.",
-                    "Usa `wan21-vace-1.3b` (cabe en T4 15 GB) o llama a `studio_recommend_pipeline`.",
+                    "MODEL_RESOURCE_CONSTRAINT",
+                    "La receta no encaja en los recursos/precisión conocidos de esta sesión.",
+                    "Leer assessment.resources/reasons, liberar memoria sin borrar pesos o consultar el oráculo. No se descarga una variante de fallback.",
+                    extra={"assessment": assessment},
                 )
 
             if not catalog_manager.is_downloaded(model_id):
@@ -2978,11 +2910,24 @@ def _dispatch_single_jsonrpc(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "description": "Telemetría instantánea del entorno Google Colab.",
             }
         )
+        resources.extend([
+            {"uri": "studio://models/discovery-status", "name": "Estado de índice y actualización de metadatos", "mimeType": "application/json"},
+            {"uri": "studio://models/recipes", "name": "Recetas y evaluaciones del hardware real", "mimeType": "application/json"},
+        ])
         return {"jsonrpc": "2.0", "id": req_id, "result": {"resources": resources}}
 
     if method == "resources/read":
         uri = str(params.get("uri") or "")
         colab_console_log(f"[MCP] Agente leyó el recurso «{uri}».", icon="📖")
+        if uri in ("studio://models/discovery-status", "studio://models/recipes"):
+            if uri.endswith("discovery-status"):
+                data = model_discovery.status()
+            else:
+                context = assessment_context()
+                data = {"recipes": [{"model_id": d["id"], "category": d["category"], "engine": d.get("engine"), "validation_state": d.get("validation_state", "reviewed_recipe"),
+                    "assessment": assess_definition(d, context, catalog=catalog_manager)}
+                    for d in catalog_manager.get_all_definitions()], "metadata_only": True}
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"contents": [{"uri": uri, "mimeType": "application/json", "text": json.dumps(data, ensure_ascii=False)}]}}
         if uri in MANUAL_RESOURCES:
             meta = MANUAL_RESOURCES[uri]
             return {
@@ -3046,7 +2991,7 @@ def _dispatch_single_jsonrpc(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     },
                     {
                         "name": "flf2v_production_workflow",
-                        "description": "Flujo guiado paso a paso para generar un vídeo Frame a Frame (Inicio → Fin) perfecto sin saltos.",
+                        "description": "Flujo guiado paso a paso para generar un vídeo Frame a Frame (Inicio → Fin) con anclas y comprobaciones de coherencia.",
                         "arguments": [
                             {"name": "start_image", "description": "Ruta local o rel_path del fotograma inicial", "required": True},
                             {"name": "end_image", "description": "Ruta local o rel_path del fotograma final", "required": True},
@@ -3266,7 +3211,7 @@ def mcp_agent_guide_markdown(
     guide = f"""# MANUAL OFICIAL DE CONEXIÓN Y CONTROL — STUDIO IA (GOOGLE COLAB)
 
 Estás conectado a una instancia real de **Studio IA** corriendo sobre GPU en Google Colab:
-- **GPU detectada ahora mismo:** `{gpu.get('gpu_name', 'CPU')}` ({gpu.get('total_vram_gb', 0)} GB VRAM total · {gpu.get('free_vram_gb', 0)} GB libres)
+- **GPU detectada ahora mismo:** `{gpu.get('gpu_name', 'CPU')}` ({gpu.get('vram_total_gb', 0)} GB VRAM total · {gpu.get('vram_free_gb', 0)} GB libres)
 - **Disco libre en Colab:** `{disk.get('free_gb', '?')} GB`
 - **URL Base:** `{details['base_url']}`
 - **Endpoint MCP HTTP directo (con token incluido):** `{details['mcp_url_with_token']}`
@@ -3283,6 +3228,12 @@ python3 studio_mcp.py --cli studio_get_state_and_manual '{{"include_recent_asset
 ```
 
 *(Si tu harness usa protocolo MCP nativo en vez de Bash CLI, puedes registrar `python3 studio_mcp.py` por `stdio` o conectar por HTTP Streamable directamente a `{details['mcp_url_with_token']}`).*
+
+---
+
+## MANUAL DETALLADO DE MODELOS, HARDWARE Y ORÁCULO (PRIORITARIO)
+
+{MANUAL_RESOURCES['studio://manual/model-oracle']['content']}
 
 ---
 
@@ -3372,7 +3323,7 @@ python3 studio_mcp.py --cli studio_generate_video '{{
 ```
 *(Después añade voces con `studio_generate_speech`, ambiente urbano con `studio_generate_music_or_sfx` `preset="city_street_walk"` y sincroniza labios por turnos con `studio_lipsync_character`).*
 
-### 4) Crear Secuencia de Fotogramas con PERSONAJES 100% CONSISTENTES + Auditar con `studio_analyze_coherence`
+### 4) Crear Secuencia de Fotogramas con PERSONAJES CON REFERENCIAS COHERENTES + Auditar con `studio_analyze_coherence`
 **¡REGLA CRÍTICA!** Nunca generes el Fotograma 2, 3, 4 desde cero si deben aparecer las mismas personas:
 1. Genera el Fotograma 1 (Ancla):
 ```bash

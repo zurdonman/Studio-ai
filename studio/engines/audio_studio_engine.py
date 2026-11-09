@@ -319,6 +319,8 @@ class AudioStudioEngine:
         if not defn:
             raise ValueError(f"Modelo de audio/música desconocido: {chosen_id}")
 
+        if defn.get("validation_state") == "candidate":
+            raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato de audio sin backend revisado.")
         AUDIO_OUT_DIR.mkdir(parents=True, exist_ok=True)
         out_name = f"bgm_{job.id[:8]}.wav"
         out_path = AUDIO_OUT_DIR / out_name

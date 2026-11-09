@@ -198,6 +198,8 @@ def load_coherence_vlm_into_memory(
     if not defn:
         raise ValueError(f"Modelo de visión no encontrado en el catálogo: {model_id}")
 
+    if defn.get("validation_state") == "candidate":
+        raise ValueError("MODEL_RECIPE_UNVALIDATED: candidato de visión sin receta revisada.")
     cur = memory_manager.get_slot("vision")
     if cur and cur.get("model_id") == model_id:
         vram_now = query_gpu_info()["vram_used_gb"]

@@ -10,8 +10,11 @@
     vidOnlyCompat: true,
     catOnlyCompat: false,
     hfSearchResults: [],
+    hfOffset: 0,
+    hfNextOffset: null,
+    hfSearching: false,
+    modelDiscovery: null,
     hfAuth: { has_token: false, masked_token: null, username: null },
-    sessionHfToken: "",
     assets: { uploads: [], images: [], videos: [], audio: [], montages: [] },
     voices: [],
     jobs: [],
@@ -108,6 +111,7 @@
     document.querySelectorAll(".view-panel").forEach((p) => {
       p.classList.toggle("active", p.id === tabId);
     });
+    if (tabId === "tab-catalog" && !state.hfSearchResults.length) runHfLiveSearch();
   }
 
   function showSpaceErrorBanner(spaceDetail) {
@@ -453,6 +457,10 @@
       toast(`Montaje MP4 completado (${res.duration_seconds}s).`, "success");
     } else if (job.kind === "download") {
       toast("Descarga completada y verificada en disco.", "success");
+    } else if (job.kind === "model_discovery") {
+      renderDiscoveryStatus((res || {}).status);
+      runHfLiveSearch();
+      toast(res.updated ? "Índice de metadatos actualizado; sin pesos." : "Sin actualización remota; consulta caché/estado de red.", "info");
     } else if (job.kind === "load_model") {
       toast("Modelo cargado en RAM/VRAM correctamente.", "success");
     }
@@ -531,6 +539,8 @@
     );
     state.catalog = data.models || [];
     state.activeGpuProfile = data.active_gpu_profile || null;
+    renderDiscoveryStatus(data.discovery_status);
+    populateImageModelSelect();
     syncGpuPillsUI();
     renderCatalog();
     populateVideoModelSelect();
@@ -542,11 +552,33 @@
     }
   }
 
+  function populateImageModelSelect() {
+    const select = $("select-image-model");
+    if (!select) return;
+    const previous = select.value || state.selectedImageModel;
+    const models = state.catalog.filter((m) => m.category === "image" && m.validation_state !== "candidate");
+    select.innerHTML = models.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}</option>`).join("");
+    if (models.some((m) => m.id === previous)) select.value = previous;
+    state.selectedImageModel = select.value;
+  }
+
+  function applyImageModelDefaults(modelId) {
+    const model = state.catalog.find((m) => m.id === modelId);
+    if (!model) return;
+    state.selectedImageModel = modelId;
+    const isQwen = ["qwen_image_edit", "qwen_image_t2i"].includes(model.engine);
+    const defaults = model.image_defaults || {};
+    $("img-steps").value = isQwen && !$("chk-lightning").checked ? 28 : (defaults.steps == null ? 4 : defaults.steps);
+    $("img-cfg").value = defaults.guidance_scale == null ? 4.0 : defaults.guidance_scale;
+    $("chk-lightning").disabled = !isQwen;
+    $("chk-nsfw-lora").disabled = !isQwen;
+  }
+
   function populateTtsEngineSelect() {
     const sel = $("tts-engine-select");
     if (!sel) return;
     const prev = sel.value;
-    const ttsModels = state.catalog.filter((m) => m.category === "tts");
+    const ttsModels = state.catalog.filter((m) => m.category === "tts" && m.validation_state !== "candidate");
     if (ttsModels.length === 0) return;
     sel.innerHTML = ttsModels
       .map((m) => {
@@ -1318,7 +1350,7 @@
     const sel = $("select-video-model");
     const cardsBox = $("video-model-cards");
     const prev = sel.value;
-    let vModels = state.catalog.filter((m) => m.category === "video");
+    let vModels = state.catalog.filter((m) => m.category === "video" && m.validation_state !== "candidate");
     if (state.vidOnlyCompat) {
       const runnable = vModels.filter((m) => m.compatibility && m.compatibility.compatible);
       if (runnable.length > 0) vModels = runnable;
@@ -1400,7 +1432,7 @@
   function renderCatalog() {
     const grid = $("catalog-grid");
     const filtered = state.catalog.filter((m) => {
-      if (state.catOnlyCompat && m.compatibility && !m.compatibility.compatible) return false;
+      if (state.catOnlyCompat && !(m.hardware_assessment || m.compatibility || {}).compatible) return false;
       if (state.catalogFilter === "all") return true;
       if (state.catalogFilter === "image") {
         return m.category === "image" || (m.category === "lora" && (m.lora_target || "image") === "image");
@@ -1418,7 +1450,7 @@
 
     grid.innerHTML = filtered
       .map((m) => {
-        const comp = m.compatibility || {};
+        const comp = m.hardware_assessment || m.compatibility || {};
         const tier = comp.tier || "good";
         const diskLabel = m.builtin_no_download
           ? "Integrado (0 GB)"
@@ -1442,7 +1474,9 @@
           : "";
 
         let btns = "";
-        if (m.category === "lora") {
+        if (m.validation_state === "candidate") {
+          btns = `<span class="mc-tag">Candidato sin receta · descarga/carga bloqueadas</span>`;
+        } else if (m.category === "lora") {
           if (!m.downloaded) {
             btns += `<button class="btn btn-primary btn-sm" data-dl="${escapeHtml(m.id)}">⬇ Descargar LoRA (${m.estimated_gb} GB)</button>`;
           } else {
@@ -1462,9 +1496,10 @@
             btns += `<button class="btn btn-danger btn-sm" data-del="${escapeHtml(m.id)}">🗑 Borrar de disco</button>`;
           }
         } else {
-          btns += `<span class="mc-tag ok">Siempre activo sin ocupar RAM/VRAM</span>`;
+          btns += `<span class="mc-tag ok">Integrado · comprobar runtime/red y RAM</span>`;
         }
 
+        btns += `<button type="button" class="btn btn-secondary btn-sm" data-model-inspect="${escapeHtml(m.id)}">Ver diagnóstico</button>`;
         return `
           <div class="model-card ${m.is_default ? "is-default" : ""}">
             <div>
@@ -1477,7 +1512,8 @@
               </div>
               <h4 class="mc-title">${escapeHtml(m.name)}</h4>
               <p class="mc-desc">${escapeHtml(m.description || "")}</p>
-              ${matrixHtml}
+              <p class="muted">${escapeHtml(modelResourceSummary(comp))}</p>
+              ${matrixHtml ? `<span class="muted">Matriz orientativa de VRAM (no rendimiento ni RAM/disco)</span>${matrixHtml}` : ""}
             </div>
             <div>
               <div class="mc-stats">
@@ -1491,6 +1527,10 @@
       })
       .join("");
 
+    grid.querySelectorAll("[data-model-inspect]").forEach((button) => button.addEventListener("click", () => {
+      showModelInspection(null, button.dataset.modelInspect);
+      $("hf-inspection").scrollIntoView({ behavior: "smooth", block: "start" });
+    }));
     grid.querySelectorAll("[data-dl]").forEach((b) =>
       b.addEventListener("click", () => downloadModel(b.dataset.dl))
     );
@@ -1530,146 +1570,120 @@
     }
   }
 
-  function evaluateClientGpuSticker(estVramMin, category) {
-    const prof = state.activeGpuProfile || { gpu_name: "L4 (22.5 GB)", vram_gb: 22.5, has_gpu: true };
-    const vram = Number(prof.vram_gb || 0);
-    const gname = prof.gpu_name || "GPU";
-    const recV = estVramMin * 1.45;
-    if (category === "lora") {
-      if (!prof.has_gpu || vram < 12) {
-        return { tier: "incompatible", compatible: false, sticker: "🔴 Requiere GPU ≥14 GB", label: `🔴 Requiere GPU ≥14 GB (${gname})` };
-      }
-      return { tier: "excellent", compatible: true, sticker: "🟢 Excelente", label: `🟢 Excelente en ${gname}` };
-    }
-    if (!prof.has_gpu || vram <= 0.1) {
-      return { tier: "incompatible", compatible: false, sticker: "🔴 Requiere GPU", label: `🔴 Requiere GPU (~${Math.round(estVramMin)} GB VRAM)` };
-    }
-    if (vram >= recV) {
-      return { tier: "excellent", compatible: true, sticker: "🟢 Excelente", label: `🟢 Excelente en ${gname}` };
-    }
-    if (vram >= estVramMin * 1.12) {
-      return { tier: "normal", compatible: true, sticker: "🟡 Normal", label: `🟡 Normal en ${gname} (con CPU Offload)` };
-    }
-    if (vram >= estVramMin * 0.95) {
-      return { tier: "slow", compatible: true, sticker: "🟠 Lento", label: `🟠 Lento en ${gname}` };
-    }
-    return { tier: "incompatible", compatible: false, sticker: "🔴 No cabe", label: `🔴 No cabe en ${gname} (pide ~${Math.round(estVramMin)} GB)` };
+  function formatModelNumber(value, suffix = " GiB") {
+    return value == null || !Number.isFinite(Number(value)) ? "desconocido" : `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}${suffix}`;
   }
 
-  async function browserDirectHfSearch(query, category, signal) {
-    const taskMap = {
-      video: ["image-to-video", "text-to-video"],
-      image: ["image-to-image", "text-to-image"],
-      lora: [null],
-      tts: ["text-to-speech"],
-    };
-    const tasks = taskMap[category] || ["image-to-video"];
-    const headers = {};
-    if (state.sessionHfToken) {
-      headers["Authorization"] = `Bearer ${state.sessionHfToken}`;
+  function modelResourceSummary(comp) {
+    const resources = (comp && comp.resources) || {};
+    return [
+      `VRAM ≥ ${formatModelNumber((resources.vram || {}).required_gb)}`,
+      `RAM ≥ ${formatModelNumber((resources.ram || {}).required_gb)}`,
+      `Descarga + margen: ${formatModelNumber((resources.disk || {}).download_budget_gb)}`,
+    ].join(" · ");
+  }
+
+  function renderDiscoveryStatus(status) {
+    if (!status) return;
+    state.modelDiscovery = status;
+    const auto = $("hf-auto-refresh");
+    const interval = $("hf-refresh-interval");
+    if (auto) auto.checked = Boolean((status.settings || {}).auto_refresh);
+    if (interval && document.activeElement !== interval) {
+      const minutes = String((status.settings || {}).interval_minutes || 360);
+      if (!Array.from(interval.options).some((option) => option.value === minutes)) interval.add(new Option(`Cada ${minutes} minutos`, minutes));
+      interval.value = minutes;
     }
+    const box = $("hf-index-status");
+    if (!box) return;
+    const date = status.last_success_at ? new Date(status.last_success_at).toLocaleString() : "sin consulta HF confirmada";
+    const error = status.last_error ? ` · ${status.last_error.message}` : "";
+    const retry = status.retry_after_seconds > 0 ? ` · Reintento en ${status.retry_after_seconds} s` : "";
+    const running = status.refresh_running ? " · Actualizando metadatos…" : "";
+    box.textContent = `${status.indexed_repositories || 0} repos indexados · ${status.research_repositories || 0} referencias documentales · Último éxito: ${date}${running}${retry}${error}`;
+  }
 
-    const raw = [];
-    for (const t of tasks) {
-      const params = new URLSearchParams();
-      const sq = query || (category === "lora" ? "Qwen-Image-Edit lora" : "");
-      if (sq) params.set("search", sq);
-      if (t) params.set("pipeline_tag", t);
-      if (category === "tts") params.set("library", "transformers");
-      else if (category !== "lora") params.set("library", "diffusers");
-      params.set("sort", "downloads");
-      params.set("direction", "-1");
-      params.set("limit", "14");
-      ["safetensors", "gated", "tags", "downloads", "likes", "pipeline_tag"].forEach((ex) =>
-        params.append("expand[]", ex)
-      );
-      const r = await fetch(`https://huggingface.co/api/models?${params.toString()}`, {
-        headers,
-        signal,
-      });
-      if (r.ok) {
-        const arr = await r.json();
-        if (Array.isArray(arr)) raw.push(...arr);
+  async function refreshDiscoveryStatus() {
+    try {
+      const previousSuccess = state.modelDiscovery && state.modelDiscovery.last_success_at;
+      const status = await api("/api/models/discovery/status");
+      renderDiscoveryStatus(status);
+      if (previousSuccess && status.last_success_at !== previousSuccess && state.hfSearchResults.length && !state.hfSearching && $("tab-catalog").classList.contains("active")) {
+        runHfLiveSearch(null, null, state.hfOffset);
       }
+    } catch (_error) {
+      if ($("hf-index-status")) $("hf-index-status").textContent = "No se pudo consultar el estado del índice. Se conservan los resultados visibles.";
     }
+  }
 
-    const seen = new Set();
-    const out = [];
-    for (const m of raw) {
-      const repoId = m.id || "";
-      if (!repoId || seen.has(repoId.toLowerCase())) continue;
-      seen.add(repoId.toLowerCase());
-
-      const tags = (m.tags || []).map((x) => String(x).toLowerCase());
-      if ((category === "video" || category === "image") && tags.includes("gguf") && !tags.includes("diffusers")) {
-        continue;
+  function selectRecipeInUI(modelId) {
+    const model = state.catalog.find((m) => m.id === modelId);
+    if (!model || model.validation_state === "candidate") return;
+    if (model.category === "image") {
+      $("select-image-model").value = modelId;
+      applyImageModelDefaults(modelId);
+      renderImageLoraRack();
+      switchTab("tab-image");
+    } else if (model.category === "video") {
+      const sel = $("select-video-model");
+      // Selection is NOT preparation. A hidden-by-filter recipe is not loaded.
+      if (!Array.from(sel.options).some((option) => option.value === modelId)) {
+        state.vidOnlyCompat = false;
+        populateVideoModelSelect();
+        syncGpuPillsUI();
       }
-
-      const st = m.safetensors || null;
-      let paramsTotal = 0;
-      let bytesEst = 0;
-      if (st && st.parameters) {
-        paramsTotal = Number(st.total || 0);
-        for (const [dk, cnt] of Object.entries(st.parameters)) {
-          const c = Number(cnt || 0);
-          const up = String(dk).toUpperCase();
-          if (up.includes("F32")) bytesEst += c * 4;
-          else if (up.includes("BF16") || up.includes("F16")) bytesEst += c * 2;
-          else bytesEst += c * 1;
-        }
-      }
-
-      const lowId = repoId.toLowerCase();
-      let estDiskGb = 14.0;
-      let estVramMin = 12.0;
-      if (bytesEst > 0) {
-        estDiskGb = Math.max(0.2, Math.round((bytesEst / 1073741824) * 10) / 10);
-        estVramMin = Math.max(
-          1.0,
-          Math.round(((paramsTotal * 2.0) / 1073741824 + (category === "lora" ? 0.3 : 3.0)) * 10) / 10
-        );
-        if (lowId.includes("4bit") || lowId.includes("nf4")) {
-          estVramMin = Math.max(4.0, Math.round(((paramsTotal * 0.65) / 1073741824 + 3.0) * 10) / 10);
-        }
-      } else if (category === "lora" || lowId.includes("lora")) {
-        estDiskGb = 0.6;
-        estVramMin = 0.4;
-      } else if (lowId.includes("14b")) {
-        estDiskGb = 32.0;
-        estVramMin = 22.0;
-      } else if (lowId.includes("19b") || lowId.includes("27b")) {
-        estDiskGb = 48.0;
-        estVramMin = 26.0;
-      } else if (lowId.includes("5b")) {
-        estDiskGb = 18.0;
-        estVramMin = 13.5;
-      } else if (lowId.includes("1.3b") || lowId.includes("2b")) {
-        estDiskGb = 12.0;
-        estVramMin = 8.5;
-      } else if (category === "tts") {
-        estDiskGb = 1.2;
-        estVramMin = 1.5;
-      }
-
-      const compat = evaluateClientGpuSticker(estVramMin, category);
-      if (state.catOnlyCompat && !compat.compatible) continue;
-
-      const isGated = Boolean(m.gated);
-      out.push({
-        repo_id: repoId,
-        name: repoId.split("/").pop(),
-        author: repoId.split("/")[0],
-        category,
-        downloads: Number(m.downloads || 0),
-        likes: Number(m.likes || 0),
-        estimated_gb: estDiskGb,
-        min_vram_gb: estVramMin,
-        compatibility: compat,
-        gated: isGated,
-        gated_locked: isGated && !(state.hfAuth.has_token || Boolean(state.sessionHfToken)),
-      });
+      sel.value = modelId;
+      applyVideoModelDefaults(modelId);
+      switchTab("tab-video");
+    } else if (model.category === "tts") {
+      $("tts-engine-select").value = modelId;
+      switchTab("tab-tts");
+    } else {
+      switchTab("tab-catalog");
     }
-    return out.slice(0, 14);
+    toast(`Receta «${modelId}» seleccionada; no se han descargado ni cargado pesos. Revisa su diagnóstico.`, "info");
+  }
+
+  async function showModelInspection(repoId, localModelId = null) {
+    const panel = $("hf-inspection");
+    if (!panel) return;
+    panel.hidden = false;
+    const body = $("hf-inspection-body");
+    body.textContent = "Consultando diagnóstico y pequeños metadatos; sin pesos…";
+    try {
+      let item;
+      let response;
+      if (localModelId) {
+        response = await api(`/api/models/${encodeURIComponent(localModelId)}/assessment?gpu_profile=${encodeURIComponent(state.gpuProfile)}`);
+        const definition = state.catalog.find((m) => m.id === localModelId) || {};
+        item = { repo_id: repoId || localModelId, compatibility: response.assessment, source: "studio_catalog", license: definition.license,
+          recipes: [{ model_id: localModelId, engine: definition.engine }], source_urls: definition.source_url ? [definition.source_url] : [] };
+      } else {
+        response = await api(`/api/models/discovery/inspect?repo_id=${encodeURIComponent(repoId)}&gpu_profile=${encodeURIComponent(state.gpuProfile)}`);
+        item = response.item || {};
+        renderDiscoveryStatus(response.discovery_status);
+      }
+      const comp = item.compatibility || {};
+      const reasons = [...(comp.reasons || []), ...(comp.warnings || [])];
+      const source = item.source_urls && item.source_urls[0];
+      const safeSource = source && /^https:\/\/(github\.com|huggingface\.co)\//.test(source) ? source : null;
+      body.innerHTML = `
+        <h4>${escapeHtml(item.repo_id || localModelId || repoId)}</h4>
+        <p><span class="gpu-sticker ${escapeHtml(comp.tier || "candidate")}">${escapeHtml(comp.label || comp.sticker || "Sin validar")}</span></p>
+        <p class="muted">${escapeHtml(modelResourceSummary(comp))}</p>
+        <p class="muted">Pipeline: ${escapeHtml(item.pipeline_class || "ver receta / aún no inspeccionado")} · Licencia: ${escapeHtml(item.license || "desconocida")} · Revisión: ${escapeHtml(item.revision || "no consultada")}</p>
+        <p class="muted">Fuente: ${escapeHtml(item.source || "sin datos")} · Metadatos: ${escapeHtml(item.metadata_checked_at || "sin consulta HF confirmada")} · Acceso a pesos no verificado.</p>
+        ${reasons.length ? `<ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : ""}
+        <p class="muted">Encaje estimado, no inferencia GPU validada. Archivo/tensores ≠ VRAM de ejecución. Las importaciones sin receta no son ejecutables.</p>
+        <div class="row-gap discovery-actions">
+          ${(item.recipes || []).map((recipe) => `<button type="button" class="btn btn-secondary btn-sm" data-pick-recipe="${escapeHtml(recipe.model_id)}">Elegir ${escapeHtml(recipe.model_id)}</button>`).join("")}
+          ${safeSource ? `<a class="btn btn-secondary btn-sm" href="${escapeHtml(safeSource)}" target="_blank" rel="noopener noreferrer">Fuente oficial ↗</a>` : ""}
+        </div>
+        <details class="discovery-json"><summary>Diagnóstico completo (JSON)</summary><pre>${escapeHtml(JSON.stringify(response, null, 2))}</pre></details>`;
+      body.querySelectorAll("[data-pick-recipe]").forEach((button) => button.addEventListener("click", () => selectRecipeInUI(button.dataset.pickRecipe)));
+    } catch (error) {
+      body.textContent = `No se pudo inspeccionar: ${error.message}. No se han descargado pesos.`;
+    }
   }
 
   let _hfDebounceTimer = null;
@@ -1677,166 +1691,125 @@
 
   function scheduleRealtimeHfSearch() {
     if (_hfDebounceTimer) clearTimeout(_hfDebounceTimer);
-    _hfDebounceTimer = setTimeout(() => {
-      runHfLiveSearch();
-    }, 280);
+    _hfDebounceTimer = setTimeout(() => runHfLiveSearch(), 280);
   }
 
-  async function runHfLiveSearch(customQuery = null, customCat = null) {
+  async function runHfLiveSearch(customQuery = null, customCat = null, offset = 0, refresh = false) {
     const qInput = $("hf-live-query");
     const cSelect = $("hf-live-cat");
     const box = $("hf-live-results");
     const btn = $("btn-hf-live-search");
     const ind = $("hf-live-indicator");
     if (!box) return;
-
-    if (customQuery !== null && qInput) qInput.value = customQuery;
-    if (customCat !== null && cSelect) cSelect.value = customCat;
-
+    if (customQuery != null && qInput) qInput.value = customQuery;
+    if (customCat != null && cSelect) cSelect.value = customCat;
     const q = (qInput && qInput.value.trim()) || "";
     const cat = (cSelect && cSelect.value) || "video";
-
-    if (_hfAbortCtrl) {
-      _hfAbortCtrl.abort();
-    }
+    if (_hfAbortCtrl) _hfAbortCtrl.abort();
     const ctrl = new AbortController();
     _hfAbortCtrl = ctrl;
-
+    state.hfSearching = true;
     if (ind) {
       ind.classList.add("searching");
-      ind.textContent = "⏳ Buscando en tiempo real...";
+      ind.textContent = "Consultando metadatos…";
     }
     if (btn) btn.disabled = true;
-
     try {
-      const resp = await fetch(
-        `/api/catalog/hf-search?query=${encodeURIComponent(q)}&category=${encodeURIComponent(cat)}&gpu_profile=${encodeURIComponent(state.gpuProfile)}&only_compatible=${state.catOnlyCompat}`,
-        { signal: ctrl.signal }
-      );
+      const sort = ($("hf-sort") && $("hf-sort").value) || "downloads";
+      const params = new URLSearchParams({ query: q, category: cat, gpu_profile: state.gpuProfile, only_compatible: String(state.catOnlyCompat), limit: "12", offset: String(offset), sort, refresh: String(refresh) });
+      const resp = await fetch(`/api/catalog/hf-search?${params}`, { signal: ctrl.signal });
       const data = await resp.json();
-      let items = data.items || [];
-
-      // Si el contenedor actual no sale directo a huggingface.co, consultar desde el navegador en tiempo real
-      if (data.online === false) {
-        try {
-          const browserItems = await browserDirectHfSearch(q, cat, ctrl.signal);
-          if (browserItems.length > 0) {
-            items = browserItems;
-          }
-        } catch (_be) {
-          // Mantiene resultados locales verificados si tampoco hubiera red en el navegador
-        }
-      }
-
+      if (!resp.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Consulta no válida");
       if (ctrl.signal.aborted) return;
+      const items = data.items || [];
       state.hfSearchResults = items;
-
+      state.hfOffset = offset;
+      state.hfNextOffset = data.next_offset;
+      renderDiscoveryStatus(data.discovery_status);
+      if (data.source_mode === "refreshing") {
+        setTimeout(() => {
+          if (_hfAbortCtrl === ctrl && !ctrl.signal.aborted) runHfLiveSearch(null, null, offset);
+        }, 1500);
+      }
+      const modes = { network: "HF consultado ahora", cache: "Caché", offline: "Sin conexión · local/caché", refreshing: "Consulta ya en curso" };
       if (ind) {
         ind.classList.remove("searching");
-        ind.textContent = `⚡ ${items.length} resultado(s) en vivo`;
+        ind.textContent = `${modes[data.source_mode] || "Metadatos"}${data.stale ? " · sin consulta reciente" : ""}`;
       }
-
-      if (items.length === 0) {
-        box.innerHTML = `<div class="muted">Sin coincidencias para «${escapeHtml(q)}» con el filtro de GPU actual. Prueba otro término o cambia la GPU arriba.</div>`;
-        return;
+      if ($("hf-search-meta")) {
+        const date = data.metadata_checked_at ? new Date(data.metadata_checked_at).toLocaleString() : "sin consulta HF confirmada";
+        $("hf-search-meta").textContent = `${data.total_local_matches || 0} coincidencias locales/indexadas · Fecha de consulta: ${date}${data.active_gpu_profile && data.active_gpu_profile.is_simulated ? " · SIMULACIÓN SOLO DE GPU; RAM/disco reales" : ""}${data.query_limit_reached ? " · Límite de cobertura alcanzado; concreta la búsqueda" : ""}`;
       }
-
-      box.innerHTML = items
-        .map((it, idx) => {
-          const comp = it.compatibility || {};
-          const already = state.catalog.some((m) =>
-            (m.artifacts || []).some((a) => a.repo_id.toLowerCase() === it.repo_id.toLowerCase())
-          );
-          const gatedHtml = it.gated
-            ? it.gated_locked
-              ? `<span class="gated-pill locked" title="Requiere aceptar licencia en HF y activar tu Token HF">🔒 Pide Token HF</span>`
-              : `<span class="gated-pill unlocked">🔓 Token HF listo</span>`
-            : `<span class="gated-pill">🔓 Público</span>`;
-
-          let actionHtml = "";
-          if (already) {
-            actionHtml = `<span class="mc-tag ok">✓ Ya en tu catálogo</span>`;
-          } else if (it.gated_locked) {
-            actionHtml = `<button type="button" class="btn btn-secondary btn-sm" data-hf-unlock="1">🔑 Poner Token HF para usar</button>`;
-          } else {
-            actionHtml = `
-              <div class="row-gap" style="flex-wrap:wrap;">
-                <button type="button" class="btn btn-secondary btn-sm" data-hf-import="${idx}">➕ Añadir</button>
-                <button type="button" class="btn btn-primary btn-sm" data-hf-import-load="${idx}">⬇⚡ Añadir y Cargar</button>
-              </div>
-            `;
-          }
-
-          return `
-            <div class="hf-live-card">
-              <div>
-                <div style="display:flex;justify-content:space-between;gap:6px;align-items:flex-start;">
-                  <strong style="font-size:12.5px;word-break:break-word;">${escapeHtml(it.repo_id)}</strong>
-                  <span class="muted" style="white-space:nowrap;">⬇ ${(it.downloads || 0).toLocaleString()}</span>
-                </div>
-                <div style="margin-top:6px;display:flex;gap:5px;flex-wrap:wrap;align-items:center;">
-                  <span class="gpu-sticker ${escapeHtml(comp.tier || "normal")}">${escapeHtml(comp.label || comp.sticker || "")}</span>
-                  ${gatedHtml}
-                </div>
-                <div class="muted" style="margin-top:5px;">
-                  Peso aprox.: ~${it.estimated_gb} GB · VRAM mín.: ~${it.min_vram_gb} GB
-                </div>
-              </div>
-              <div>${actionHtml}</div>
-            </div>
-          `;
-        })
-        .join("");
-
-      box.querySelectorAll("[data-hf-unlock]").forEach((b) => {
-        b.addEventListener("click", () => {
-          $("hf-token-modal").hidden = false;
-        });
-      });
-
-      const importItem = async (idx, andLoad) => {
-        const item = state.hfSearchResults[idx];
-        if (!item) return;
+      if ($("btn-hf-prev")) $("btn-hf-prev").disabled = offset <= 0;
+      if ($("btn-hf-next")) $("btn-hf-next").disabled = data.next_offset == null;
+      if ($("hf-page-label")) $("hf-page-label").textContent = `Página ${Math.floor(offset / 12) + 1}`;
+      box.innerHTML = items.length ? items.map((item, index) => {
+        const comp = item.compatibility || {};
+        const support = (item.support || {}).status || "candidate";
+        const supportLabels = { reviewed_recipe: "Receta revisada · no benchmark", candidate: "Candidato sin receta", unsupported: "Backend/formato no soportado" };
+        const access = (item.access || {}).status;
+        const gate = access === "requires_acceptance" ? "🔒 Aceptar licencia / comprobar permiso" : access === "public_metadata" ? "Metadatos públicos; permiso de pesos no verificado" : "Acceso/licencia sin confirmar";
+        const popularity = item.downloads == null ? "Descargas: desconocidas" : `⬇ ${Number(item.downloads).toLocaleString()}`;
+        const issue = (comp.reasons || [])[0] || (comp.warnings || [])[0] || "Receta con estimaciones; revisar valores predeterminados y memoria actual.";
+        const known = (item.recipes || [])[0];
+        return `<article class="hf-live-card">
+          <div><div class="hf-card-heading"><strong>${escapeHtml(item.repo_id)}</strong><span class="muted">${escapeHtml(popularity)}</span></div>
+          <div class="row-gap discovery-tags"><span class="mc-tag">${escapeHtml(supportLabels[support] || support)}</span><span class="gpu-sticker ${escapeHtml(comp.tier || "candidate")}">${escapeHtml(comp.sticker || "Sin validar")}</span></div>
+          <p class="muted">${escapeHtml(modelResourceSummary(comp))}</p>
+          <p class="muted">${escapeHtml(issue)}</p>
+          <p class="muted">${escapeHtml(gate)} · Licencia: ${escapeHtml(item.license || "desconocida")}</p>
+          <p class="muted">Fuente: ${escapeHtml(item.source || "local")} · ${escapeHtml(item.metadata_checked_at || "referencia sin consulta HF actual")}</p></div>
+          <div class="row-gap discovery-actions">
+            <button type="button" class="btn btn-secondary btn-sm" data-hf-inspect="${index}">Inspeccionar</button>
+            ${known ? `<button type="button" class="btn btn-secondary btn-sm" data-pick-recipe="${escapeHtml(known.model_id)}">Elegir receta</button>` : item.category === "unknown" ? `<span class="muted">Tarea sin clasificar; inspeccionar antes de guardar</span>` : `<button type="button" class="btn btn-secondary btn-sm" data-save-candidate="${index}">Guardar candidato</button>`}
+          </div></article>`;
+      }).join("") : `<div class="muted discovery-empty">Sin coincidencias para estos filtros. «Solo recetas compatibles» también comprueba RAM/disco: simular una L4 no aumenta la RAM real. Desmarca el filtro para investigar candidatos sin receta.</div>`;
+      box.querySelectorAll("[data-hf-inspect]").forEach((button) => button.addEventListener("click", () => showModelInspection(items[Number(button.dataset.hfInspect)].repo_id)));
+      box.querySelectorAll("[data-pick-recipe]").forEach((button) => button.addEventListener("click", () => selectRecipeInUI(button.dataset.pickRecipe)));
+      box.querySelectorAll("[data-save-candidate]").forEach((button) => button.addEventListener("click", async () => {
+        const item = items[Number(button.dataset.saveCandidate)];
         try {
-          const res = await api("/api/catalog/custom", {
-            method: "POST",
-            body: JSON.stringify({
-              name: item.name || item.repo_id,
-              repo_id: item.repo_id,
-              category: item.category,
-              estimated_gb: item.estimated_gb,
-              min_vram_gb: item.min_vram_gb,
-            }),
-          });
+          const saved = await api("/api/catalog/custom", { method: "POST", body: JSON.stringify({ name: item.name || item.repo_id, repo_id: item.repo_id, category: item.category, estimated_gb: 0 }) });
+          toast(saved.message || "Candidato guardado; sin descarga ni carga de pesos.", "info");
           await loadCatalog();
-          if (andLoad && res.model && res.model.id) {
-            toast(`Descargando y cargando «${item.repo_id}»...`, "info");
-            await loadModelIntoMemory(res.model.id, true);
-          } else {
-            toast(`«${item.repo_id}» añadido a tu catálogo.`, "success");
-          }
-          runHfLiveSearch();
-        } catch (e) {
-          toast(e.message, "error");
-        }
-      };
-
-      box.querySelectorAll("[data-hf-import]").forEach((b) => {
-        b.addEventListener("click", () => importItem(Number(b.dataset.hfImport), false));
-      });
-      box.querySelectorAll("[data-hf-import-load]").forEach((b) => {
-        b.addEventListener("click", () => importItem(Number(b.dataset.hfImportLoad), true));
-      });
-    } catch (e) {
-      if (e && e.name === "AbortError") return;
+        } catch (error) { toast(error.message, "error"); }
+      }));
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
       if (ind) {
         ind.classList.remove("searching");
-        ind.textContent = "⚡ En vivo al escribir";
+        ind.textContent = "Error de consulta · no en vivo";
       }
-      box.innerHTML = `<div class="muted">Error consultando Hugging Face (${escapeHtml(e.message)}).</div>`;
+      box.textContent = `No se pudo consultar el índice: ${error.message}`;
     } finally {
-      if (btn) btn.disabled = false;
+      if (_hfAbortCtrl === ctrl) {
+        state.hfSearching = false;
+        if (btn) btn.disabled = false;
+      }
     }
+  }
+
+  async function updateDiscoverySettings() {
+    try {
+      renderDiscoveryStatus(await api("/api/models/discovery/settings", { method: "POST", body: JSON.stringify({ auto_refresh: $("hf-auto-refresh").checked, interval_minutes: Number($("hf-refresh-interval").value) }) }));
+      toast("Actualizador de metadatos configurado. No descarga pesos.", "success");
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function runHardwareOracle() {
+    const box = $("hf-oracle-result");
+    box.textContent = "Evaluando el hardware real, sin pesos…";
+    try {
+      const params = new URLSearchParams({ task: $("hf-oracle-task").value, priority: $("hf-oracle-priority").value });
+      const result = await api(`/api/models/recommend?${params}`);
+      box.innerHTML = `<p><strong>${escapeHtml(result.model_id || "Sin receta apta")}</strong> · ${escapeHtml(result.status)}</p>
+        <p>${escapeHtml(result.why_this_choice || "")}</p>
+        <p class="muted">${escapeHtml(result.detected_gpu || "")} · ${escapeHtml(modelResourceSummary(result.assessment))}</p>
+        <ul>${(result.next_actions || []).map((action) => `<li>${escapeHtml(action)}</li>`).join("")}</ul>
+        ${result.model_id ? `<button type="button" class="btn btn-secondary btn-sm" id="hf-oracle-pick">Elegir receta (sin cargar)</button>` : ""}
+        <details class="discovery-json"><summary>Plantilla MCP y diagnóstico completo</summary><pre>${escapeHtml(JSON.stringify(result, null, 2))}</pre></details>`;
+      if ($("hf-oracle-pick")) $("hf-oracle-pick").addEventListener("click", () => selectRecipeInUI(result.model_id));
+    } catch (error) { box.textContent = error.message; }
   }
 
   async function downloadModel(modelId) {
@@ -2163,8 +2136,8 @@
         steps: Number($("img-steps").value || 4),
         guidance_scale: Number($("img-cfg").value || 4.0),
         seed: Number($("img-seed").value || 0),
-        use_lightning_lora: $("chk-lightning").checked,
-        use_nsfw_lora: $("chk-nsfw-lora").checked,
+        use_lightning_lora: !$("chk-lightning").disabled && $("chk-lightning").checked,
+        use_nsfw_lora: !$("chk-nsfw-lora").disabled && $("chk-nsfw-lora").checked,
         nsfw_lora_weight: 1.0,
         custom_lora_ids: customLoraIds,
         lora_scales: { ...state.activeImgLoras },
@@ -2751,13 +2724,7 @@
       $("select-image-model").addEventListener("change", () => {
         const mid = $("select-image-model").value;
         state.selectedImageModel = mid;
-        if (mid === "sdxl-turbo-fp16") {
-          $("img-steps").value = 2;
-          $("img-cfg").value = 0.0;
-        } else {
-          $("img-steps").value = $("chk-lightning").checked ? 4 : 20;
-          $("img-cfg").value = 4.0;
-        }
+        applyImageModelDefaults(mid);
         renderImageLoraRack();
         if (state.lastHardware) updateEngineBars(state.lastHardware.loaded_slots || []);
       });
@@ -3490,7 +3457,6 @@
             method: "POST",
             body: JSON.stringify({ token: val }),
           });
-          state.sessionHfToken = val;
           $("inp-hf-token").value = "";
           renderHfAuthStatus(res.hf_auth);
           $("hf-token-modal").hidden = true;
@@ -3505,7 +3471,6 @@
       $("btn-clear-hf-token").addEventListener("click", async () => {
         try {
           const res = await api("/api/hf/token", { method: "DELETE" });
-          state.sessionHfToken = "";
           $("inp-hf-token").value = "";
           renderHfAuthStatus(res.hf_auth);
           toast("Token de Hugging Face eliminado.", "success");
@@ -3536,8 +3501,25 @@
     });
 
     if ($("btn-hf-live-search")) {
-      $("btn-hf-live-search").addEventListener("click", () => runHfLiveSearch());
+      $("btn-hf-live-search").addEventListener("click", () => runHfLiveSearch(null, null, 0, true));
     }
+    if ($("hf-sort")) $("hf-sort").addEventListener("change", () => runHfLiveSearch());
+    if ($("hf-auto-refresh")) $("hf-auto-refresh").addEventListener("change", updateDiscoverySettings);
+    if ($("hf-refresh-interval")) $("hf-refresh-interval").addEventListener("change", updateDiscoverySettings);
+    if ($("btn-hf-prev")) $("btn-hf-prev").addEventListener("click", () => runHfLiveSearch(null, null, Math.max(0, state.hfOffset - 12)));
+    if ($("btn-hf-next")) $("btn-hf-next").addEventListener("click", () => {
+      if (state.hfNextOffset != null) runHfLiveSearch(null, null, state.hfNextOffset);
+    });
+    if ($("btn-hf-close-inspection")) $("btn-hf-close-inspection").addEventListener("click", () => { $("hf-inspection").hidden = true; });
+    if ($("btn-hf-oracle")) $("btn-hf-oracle").addEventListener("click", runHardwareOracle);
+    if ($("btn-hf-refresh-index")) $("btn-hf-refresh-index").addEventListener("click", async () => {
+      try {
+        const result = await api("/api/models/discovery/refresh", { method: "POST", body: JSON.stringify({ category: "all" }) });
+        watchJob(result.job);
+        toast("Actualización de metadatos en cola. No se descargan pesos.", "info");
+        refreshDiscoveryStatus();
+      } catch (error) { toast(error.message, "error"); }
+    });
     if ($("hf-live-query")) {
       // Búsqueda instantánea en tiempo real mientras escribes (debounce 280 ms)
       $("hf-live-query").addEventListener("input", () => scheduleRealtimeHfSearch());
@@ -3570,7 +3552,7 @@
         $("custom-hf-name").value = "";
         $("custom-hf-repo").value = "";
         $("custom-hf-file").value = "";
-        toast("Repositorio de Hugging Face añadido al catálogo.", "success");
+        toast("Candidato guardado. Falta receta revisada; no se han descargado pesos.", "info");
         await loadCatalog();
       } catch (e) {
         toast(e.message, "error");
@@ -3976,6 +3958,10 @@
     bindHiggsfieldEvents();
     await Promise.all([loadCatalog(), loadVoices(), loadAssets()]);
     await loadHiggsfieldCatalog();
+    if ($("select-image-model")) applyImageModelDefaults($("select-image-model").value);
+    setInterval(() => {
+      if (document.visibilityState !== "hidden" && $("tab-catalog").classList.contains("active")) refreshDiscoveryStatus();
+    }, 30000);
     if ($("select-video-model") && $("select-video-model").value) {
       applyVideoModelDefaults($("select-video-model").value);
     }

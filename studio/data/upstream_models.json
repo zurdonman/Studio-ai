@@ -1,0 +1,1155 @@
+{
+  "schema_version": 1,
+  "researched_at": "2026-11-05",
+  "upstream": "huggingface/diffusers",
+  "upstream_revision": "v0.42.1",
+  "release_published_at": "2026-10-27T07:41:43Z",
+  "release_url": "https://github.com/huggingface/diffusers/releases/tag/v0.42.1",
+  "scope": "Official upstream documentation, not GPU validation or a claim of Studio engine support. Repository references can include companion components. Hugging Face metadata is refreshed separately at runtime.",
+  "families": [
+    {
+      "family": "flux",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/flux.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "FluxControlImg2ImgPipeline",
+        "FluxControlNetImg2ImgPipeline",
+        "FluxControlNetInpaintPipeline",
+        "FluxControlPipeline",
+        "FluxFillPipeline",
+        "FluxImg2ImgPipeline",
+        "FluxInpaintPipeline",
+        "FluxKontextInpaintPipeline",
+        "FluxKontextPipeline",
+        "FluxPipeline",
+        "FluxPriorReduxPipeline"
+      ],
+      "repo_ids": [
+        "Kijai/flux-fp8",
+        "LiheYoung/depth-anything-large-hf",
+        "black-forest-labs/FLUX.1-Canny-dev",
+        "black-forest-labs/FLUX.1-Canny-dev-lora",
+        "black-forest-labs/FLUX.1-Depth-dev",
+        "black-forest-labs/FLUX.1-Depth-dev-lora",
+        "black-forest-labs/FLUX.1-Fill-dev",
+        "black-forest-labs/FLUX.1-Kontext-dev",
+        "black-forest-labs/FLUX.1-Redux-dev",
+        "black-forest-labs/FLUX.1-dev",
+        "black-forest-labs/FLUX.1-schnell"
+      ]
+    },
+    {
+      "family": "flux2",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/flux2.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Flux2KleinKVPipeline",
+        "Flux2KleinPipeline",
+        "Flux2Pipeline"
+      ],
+      "repo_ids": []
+    },
+    {
+      "family": "flux3",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/flux3.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Flux3DistilledModularPipeline",
+        "Flux3ModularPipeline"
+      ],
+      "repo_ids": [
+        "black-forest-labs/flux-3-image-klein",
+        "black-forest-labs/flux-3-image-klein-base",
+        "black-forest-labs/flux-3-image-klein-pup"
+      ]
+    },
+    {
+      "family": "z_image",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/z_image.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "ZImageImg2ImgPipeline",
+        "ZImageInpaintPipeline",
+        "ZImagePipeline"
+      ],
+      "repo_ids": [
+        "Tongyi-MAI/Z-Image-Turbo"
+      ]
+    },
+    {
+      "family": "qwenimage",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/qwenimage.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "QwenImageControlNetPipeline",
+        "QwenImageEditInpaintPipeline",
+        "QwenImageEditPipeline",
+        "QwenImageEditPlusPipeline",
+        "QwenImageImg2ImgPipeline",
+        "QwenImageInpaintPipeline",
+        "QwenImageLayeredPipeline",
+        "QwenImagePipeline"
+      ],
+      "repo_ids": [
+        "Qwen/Qwen-Image",
+        "Qwen/Qwen-Image-Edit",
+        "Qwen/Qwen-Image-Edit-2509"
+      ]
+    },
+    {
+      "family": "qwenimage21",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/qwenimage21.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "QwenImage21ModularPipeline",
+        "QwenImage21Pipeline",
+        "QwenImage21TurboModularPipeline"
+      ],
+      "repo_ids": [
+        "Comfy-Org/Qwen-Image-2.1",
+        "Qwen/Qwen-Image-2.1",
+        "Qwen/Qwen-Image-2.1-Turbo"
+      ]
+    },
+    {
+      "family": "sana",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/sana.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "SanaPAGPipeline",
+        "SanaPipeline"
+      ],
+      "repo_ids": [
+        "Efficient-Large-Model/Sana_1600M_1024px_BF16_diffusers",
+        "Efficient-Large-Model/Sana_1600M_1024px_MultiLing_diffusers",
+        "Efficient-Large-Model/Sana_1600M_1024px_diffusers",
+        "Efficient-Large-Model/Sana_1600M_512px_MultiLing_diffusers",
+        "Efficient-Large-Model/Sana_1600M_512px_diffusers",
+        "Efficient-Large-Model/Sana_600M_1024px_diffusers",
+        "Efficient-Large-Model/Sana_600M_512px_diffusers"
+      ]
+    },
+    {
+      "family": "sana_sprint",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/sana_sprint.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "SanaSprintImg2ImgPipeline",
+        "SanaSprintPipeline"
+      ],
+      "repo_ids": [
+        "Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
+        "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers"
+      ]
+    },
+    {
+      "family": "pixart",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/pixart.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "PixArtAlphaPipeline"
+      ],
+      "repo_ids": [
+        "PixArt-alpha/PixArt-XL-2-1024-MS"
+      ]
+    },
+    {
+      "family": "pixart_sigma",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/pixart_sigma.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "PixArtSigmaPipeline"
+      ],
+      "repo_ids": [
+        "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS"
+      ]
+    },
+    {
+      "family": "lumina2",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/lumina2.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Lumina2Pipeline"
+      ],
+      "repo_ids": [
+        "Alpha-VLLM/Lumina-Image-2.0",
+        "calcuis/lumina-gguf"
+      ]
+    },
+    {
+      "family": "hunyuandit",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/hunyuandit.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "HungyuanDiTPipeline",
+        "HunyuanDiTPipeline"
+      ],
+      "repo_ids": [
+        "Tencent-Hunyuan/HunyuanDiT",
+        "Tencent-Hunyuan/HunyuanDiT-Diffusers"
+      ]
+    },
+    {
+      "family": "hunyuanimage21",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/hunyuanimage21.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "HunyuanImagePipeline",
+        "HunyuanImageRefinerPipeline"
+      ],
+      "repo_ids": [
+        "hunyuanvideo-community/HunyuanImage-2.1-Diffusers",
+        "hunyuanvideo-community/HunyuanImage-2.1-Distilled-Diffusers",
+        "hunyuanvideo-community/HunyuanImage-2.1-Refiner-Diffusers"
+      ]
+    },
+    {
+      "family": "omnigen",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/omnigen.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "OmniGenPipeline"
+      ],
+      "repo_ids": [
+        "Shitao/OmniGen-v1",
+        "Shitao/OmniGen-v1-diffusers"
+      ]
+    },
+    {
+      "family": "ovis_image",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/ovis_image.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "OvisImagePipeline"
+      ],
+      "repo_ids": [
+        "AIDC-AI/Ovis-Image-7B"
+      ]
+    },
+    {
+      "family": "hidream",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/hidream.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "HiDreamImagePipeline"
+      ],
+      "repo_ids": [
+        "HiDream-ai/HiDream-I1-Dev",
+        "HiDream-ai/HiDream-I1-Fast",
+        "HiDream-ai/HiDream-I1-Full"
+      ]
+    },
+    {
+      "family": "glm_image",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/glm_image.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "GlmImagePipeline"
+      ],
+      "repo_ids": [
+        "zai-org/GLM-4-9B-0414",
+        "zai-org/GLM-Image"
+      ]
+    },
+    {
+      "family": "longcat_image",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/longcat_image.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "LongCatImagePipeline"
+      ],
+      "repo_ids": [
+        "meituan-longcat/LongCat-Image",
+        "meituan-longcat/LongCat-Image-Dev",
+        "meituan-longcat/LongCat-Image-Edit"
+      ]
+    },
+    {
+      "family": "chroma",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/chroma.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "ChromaImg2ImgPipeline",
+        "ChromaInpaintPipeline",
+        "ChromaPipeline"
+      ],
+      "repo_ids": [
+        "lodestones/Chroma",
+        "lodestones/Chroma1-Base",
+        "lodestones/Chroma1-HD"
+      ]
+    },
+    {
+      "family": "cogview3",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/cogview3.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "CogView3PlusPipeline"
+      ],
+      "repo_ids": []
+    },
+    {
+      "family": "cogview4",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/cogview4.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "CogView4Pipeline"
+      ],
+      "repo_ids": []
+    },
+    {
+      "family": "kolors",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/kolors.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "KolorsImg2ImgPipeline",
+        "KolorsPipeline"
+      ],
+      "repo_ids": [
+        "Kwai-Kolors/Kolors-IP-Adapter-Plus",
+        "Kwai-Kolors/Kolors-diffusers",
+        "openai/clip-vit-large-patch14-336"
+      ]
+    },
+    {
+      "family": "stable_cascade",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/stable_cascade.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "StableCascadeCombinedPipeline",
+        "StableCascadeDecoderPipeline",
+        "StableCascadePriorPipeline"
+      ],
+      "repo_ids": [
+        "stabilityai/stable-cascade",
+        "stabilityai/stable-cascade-prior"
+      ]
+    },
+    {
+      "family": "kandinsky",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/kandinsky.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Kandinsky3Img2ImgPipeline",
+        "Kandinsky3Pipeline",
+        "KandinskyCombinedPipeline",
+        "KandinskyImg2ImgCombinedPipeline",
+        "KandinskyImg2ImgPipeline",
+        "KandinskyInpaintCombinedPipeline",
+        "KandinskyInpaintPipeline",
+        "KandinskyPipeline",
+        "KandinskyPriorPipeline",
+        "KandinskyV22CombinedPipeline",
+        "KandinskyV22ControlnetImg2ImgPipeline",
+        "KandinskyV22ControlnetPipeline",
+        "KandinskyV22Img2ImgCombinedPipeline",
+        "KandinskyV22Img2ImgPipeline",
+        "KandinskyV22InpaintCombinedPipeline",
+        "KandinskyV22InpaintPipeline",
+        "KandinskyV22Pipeline",
+        "KandinskyV22PriorEmb2EmbPipeline",
+        "KandinskyV22PriorPipeline"
+      ],
+      "repo_ids": [
+        "kandinsky-community/kandinsky-2-1",
+        "kandinsky-community/kandinsky-2-1-inpaint",
+        "kandinsky-community/kandinsky-2-1-prior",
+        "kandinsky-community/kandinsky-2-2-controlnet-depth",
+        "kandinsky-community/kandinsky-2-2-decoder",
+        "kandinsky-community/kandinsky-2-2-decoder-inpaint",
+        "kandinsky-community/kandinsky-2-2-prior",
+        "kandinsky-community/kandinsky-3"
+      ]
+    },
+    {
+      "family": "kandinsky3",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/kandinsky3.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Kandinsky3Img2ImgPipeline",
+        "Kandinsky3Pipeline"
+      ],
+      "repo_ids": [
+        "google/flan-ul2"
+      ]
+    },
+    {
+      "family": "kandinsky_v22",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/kandinsky_v22.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "KandinskyV22CombinedPipeline",
+        "KandinskyV22ControlnetImg2ImgPipeline",
+        "KandinskyV22ControlnetPipeline",
+        "KandinskyV22Img2ImgCombinedPipeline",
+        "KandinskyV22Img2ImgPipeline",
+        "KandinskyV22InpaintCombinedPipeline",
+        "KandinskyV22InpaintPipeline",
+        "KandinskyV22Pipeline",
+        "KandinskyV22PriorEmb2EmbPipeline",
+        "KandinskyV22PriorPipeline"
+      ],
+      "repo_ids": []
+    },
+    {
+      "family": "kandinsky5_image",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/kandinsky5_image.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Kandinsky5I2IPipeline",
+        "Kandinsky5T2IPipeline"
+      ],
+      "repo_ids": [
+        "kandinsky-community/kandinsky-3",
+        "kandinskylab/Kandinsky-5.0-I2I-Lite-pretrain-Diffusers",
+        "kandinskylab/Kandinsky-5.0-I2I-Lite-sft-Diffusers",
+        "kandinskylab/Kandinsky-5.0-T2I-Lite-pretrain-Diffusers",
+        "kandinskylab/Kandinsky-5.0-T2I-Lite-sft-Diffusers"
+      ]
+    },
+    {
+      "family": "kandinsky6",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/kandinsky6.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Kandinsky6SRPipeline",
+        "Kandinsky6TI2VAPipeline"
+      ],
+      "repo_ids": [
+        "kandinskylab/Kandinsky-6.0-Lite-5s-Diffusers",
+        "kandinskylab/Kandinsky-6.0-Lite-distill-5s-Diffusers",
+        "kandinskylab/Kandinsky-6.0-Lite-pretrain-5s-Diffusers",
+        "kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers",
+        "kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers",
+        "kandinskylab/Kandinsky-6.0-Pro-pretrain-5s-Diffusers",
+        "kandinskylab/Kandinsky-6.0-VSR-5s-Diffusers",
+        "kandinskylab/Kandinsky-6.0-VSR-distilled2steps-5s-Diffusers"
+      ]
+    },
+    {
+      "family": "bria_3_2",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/bria_3_2.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "BriaPipeline"
+      ],
+      "repo_ids": [
+        "briaai/BRIA-3.2"
+      ]
+    },
+    {
+      "family": "bria_fibo",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/bria_fibo.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "BriaFiboPipeline"
+      ],
+      "repo_ids": [
+        "briaai/FIBO",
+        "briaai/FIBO-VLM-prompt-to-JSON",
+        "briaai/FIBO-gemini-prompt-to-JSON"
+      ]
+    },
+    {
+      "family": "bria_fibo2",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/bria_fibo2.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "BriaFibo2Pipeline"
+      ],
+      "repo_ids": [
+        "Qwen/Qwen3-VL-4B-Instruct",
+        "briaai/FIBO",
+        "briaai/Fibo-2.0-dev",
+        "briaai/Fibo-2.0-edit-turbo"
+      ]
+    },
+    {
+      "family": "ideogram4",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/ideogram4.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Ideogram4Pipeline"
+      ],
+      "repo_ids": [
+        "diffusers/qwen3-vl-8b-instruct-lm-head",
+        "ideogram-ai/ideogram-4-nf4",
+        "ideogram-ai/ideogram-v4"
+      ]
+    },
+    {
+      "family": "text2img",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/stable_diffusion/text2img.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "StableDiffusionPipeline"
+      ],
+      "repo_ids": []
+    },
+    {
+      "family": "stable_diffusion_xl",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/stable_diffusion/stable_diffusion_xl.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "StableDiffusionXLControlNetPipeline",
+        "StableDiffusionXLImg2ImgPipeline",
+        "StableDiffusionXLInpaintPipeline",
+        "StableDiffusionXLPipeline"
+      ],
+      "repo_ids": [
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "stabilityai/stable-diffusion-xl-refiner-1.0"
+      ]
+    },
+    {
+      "family": "stable_diffusion_3",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/stable_diffusion/stable_diffusion_3.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "StableDiffusion3Pipeline"
+      ],
+      "repo_ids": [
+        "madebyollin/taesd3",
+        "stabilityai/stable-diffusion-3-medium",
+        "stabilityai/stable-diffusion-3-medium-diffusers",
+        "stabilityai/stable-diffusion-3.5-large",
+        "stabilityai/stable-diffusion-3.5-large-turbo"
+      ]
+    },
+    {
+      "family": "sdxl_turbo",
+      "category": "image",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/stable_diffusion/sdxl_turbo.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "StableDiffusionXLPipeline"
+      ],
+      "repo_ids": [
+        "madebyollin/sdxl-vae-fp16-fix",
+        "stabilityai/sdxl-turbo"
+      ]
+    },
+    {
+      "family": "wan",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/wan.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "WanAnimatePipeline",
+        "WanImageToVideoPipeline",
+        "WanPipeline",
+        "WanVACEPipeline",
+        "WanVideoToVideoPipeline"
+      ],
+      "repo_ids": [
+        "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        "Kijai/WanVideo_comfy",
+        "Wan-AI/Wan2.1-FLF2V-14B-720P-diffusers",
+        "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
+        "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
+        "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        "Wan-AI/Wan2.1-T2V-14B-Diffusers",
+        "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+        "Wan-AI/Wan2.1-VACE-14B-diffusers",
+        "Wan-AI/Wan2.2-Animate-14B-Diffusers",
+        "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+      ]
+    },
+    {
+      "family": "ltx_video",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/ltx_video.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "LTXConditionPipeline",
+        "LTXI2VLongMultiPromptPipeline",
+        "LTXImageToVideoPipeline",
+        "LTXLatentUpsamplePipeline",
+        "LTXPipeline"
+      ],
+      "repo_ids": [
+        "Lightricks/LTX-Video",
+        "Lightricks/LTX-Video-0.9.5",
+        "Lightricks/LTX-Video-0.9.7-dev",
+        "Lightricks/LTX-Video-0.9.7-distilled",
+        "Lightricks/LTX-Video-0.9.8-13B-distilled",
+        "Lightricks/LTX-Video-Cakeify-LoRA",
+        "Lightricks/ltxv-spatial-upscaler-0.9.7",
+        "a-r-r-o-w/LTX-0.9.8-Latent-Upsampler",
+        "city96/LTX-Video-gguf"
+      ]
+    },
+    {
+      "family": "ltx2",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/ltx2.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "LTX25ModularPipeline",
+        "LTX2ConditionPipeline",
+        "LTX2DFRPipeline",
+        "LTX2DFRTemporalRefinePipeline",
+        "LTX2ImageToVideoPipeline",
+        "LTX2LatentUpsamplePipeline",
+        "LTX2ModularPipeline",
+        "LTX2Pipeline",
+        "LTX2VideoDiffusionDecodePipeline"
+      ],
+      "repo_ids": [
+        "Lightricks/LTX-2",
+        "Lightricks/LTX-2.5-22b-LoRA-Slow-Motion-Control",
+        "Lightricks/LTX-2.5-Diffusers",
+        "google/gemma-3-12b-it-qat-q4_0-unquantized",
+        "google/gemma-4-E2B-it"
+      ]
+    },
+    {
+      "family": "sana_video",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/sana_video.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "SanaImageToVideoPipeline",
+        "SanaVideoPipeline"
+      ],
+      "repo_ids": [
+        "Efficient-Large-Model/SANA-Video_2B_480p_diffusers"
+      ]
+    },
+    {
+      "family": "skyreels_v2",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/skyreels_v2.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "SkyReelsV2DiffusionForcingImageToVideoPipeline",
+        "SkyReelsV2DiffusionForcingPipeline",
+        "SkyReelsV2DiffusionForcingVideoToVideoPipeline",
+        "SkyReelsV2ImageToVideoPipeline",
+        "SkyReelsV2Pipeline"
+      ],
+      "repo_ids": [
+        "Skywork/SkyReels-V2-DF-1.3B-540P-Diffusers",
+        "Skywork/SkyReels-V2-DF-14B-540P-Diffusers",
+        "Skywork/SkyReels-V2-DF-14B-720P-Diffusers",
+        "Skywork/SkyReels-V2-I2V-1.3B-540P-Diffusers",
+        "Skywork/SkyReels-V2-I2V-14B-540P-Diffusers",
+        "Skywork/SkyReels-V2-I2V-14B-720P-Diffusers",
+        "Skywork/SkyReels-V2-T2V-14B-540P-Diffusers",
+        "Skywork/SkyReels-V2-T2V-14B-720P-Diffusers"
+      ]
+    },
+    {
+      "family": "cogvideox",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/cogvideox.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "CogVideoXFunControlPipeline",
+        "CogVideoXImageToVideoPipeline",
+        "CogVideoXPipeline",
+        "CogVideoXVideoToVideoPipeline"
+      ],
+      "repo_ids": [
+        "THUDM/CogVideoX-2b",
+        "THUDM/CogVideoX-5b"
+      ]
+    },
+    {
+      "family": "hunyuan_video",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/hunyuan_video.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "HunyuanVideoPipeline"
+      ],
+      "repo_ids": [
+        "hunyuanvideo-community/HunyuanVideo",
+        "lucataco/hunyuan-steamboat-willie-10"
+      ]
+    },
+    {
+      "family": "hunyuan_video15",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/hunyuan_video15.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "HunyuanVideo15ImageToVideoPipeline",
+        "HunyuanVideo15Pipeline"
+      ],
+      "repo_ids": []
+    },
+    {
+      "family": "framepack",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/framepack.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "HunyuanVideoFramepackPipeline"
+      ],
+      "repo_ids": [
+        "hunyuanvideo-community/HunyuanVideo",
+        "lllyasviel/FramePackI2V_HY",
+        "lllyasviel/FramePack_F1_I2V_HY_20250503",
+        "lllyasviel/flux_redux_bfl"
+      ]
+    },
+    {
+      "family": "mochi",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/mochi.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "MochiPipeline"
+      ],
+      "repo_ids": [
+        "Comfy-Org/mochi_preview_repackaged",
+        "genmo/mochi-1-preview"
+      ]
+    },
+    {
+      "family": "cosmos",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/cosmos.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Cosmos2TextToImagePipeline",
+        "Cosmos2VideoToWorldPipeline",
+        "Cosmos2_5_PredictBasePipeline",
+        "Cosmos2_5_TransferPipeline",
+        "CosmosTextToWorldPipeline",
+        "CosmosVideoToWorldPipeline"
+      ],
+      "repo_ids": []
+    },
+    {
+      "family": "cosmos3",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/cosmos3.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Cosmos3DistilledModularPipeline",
+        "Cosmos3OmniModularPipeline",
+        "Cosmos3OmniPipeline"
+      ],
+      "repo_ids": [
+        "nvidia/Cosmos3-Nano",
+        "nvidia/Cosmos3-Super"
+      ]
+    },
+    {
+      "family": "allegro",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/allegro.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "AllegroPipeline"
+      ],
+      "repo_ids": [
+        "rhymes-ai/Allegro"
+      ]
+    },
+    {
+      "family": "animatediff",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/animatediff.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "AnimateDiffControlNetPipeline",
+        "AnimateDiffPipeline",
+        "AnimateDiffSDXLPipeline",
+        "AnimateDiffSparseControlNetPipeline",
+        "AnimateDiffVideoToVideoControlNetPipeline",
+        "AnimateDiffVideoToVideoPipeline"
+      ],
+      "repo_ids": [
+        "Lightricks/LongAnimateDiff",
+        "SG161222/Realistic_Vision_V5.1_noVAE",
+        "emilianJR/epiCRealism",
+        "guoyww/animatediff-motion-adapter-sdxl-beta",
+        "guoyww/animatediff-motion-adapter-v1-5-2",
+        "guoyww/animatediff-motion-adapter-v1-5-3",
+        "guoyww/animatediff-sparsectrl-rgb",
+        "guoyww/animatediff-sparsectrl-scribble",
+        "lllyasviel/Annotators",
+        "lllyasviel/ControlNet-v1-1",
+        "lllyasviel/sd-controlnet-depth",
+        "lllyasviel/sd-controlnet-openpose",
+        "stabilityai/sd-vae-ft-mse",
+        "wangfuyun/AnimateLCM"
+      ]
+    },
+    {
+      "family": "easyanimate",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/easyanimate.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "EasyAnimatePipeline"
+      ],
+      "repo_ids": [
+        "alibaba-pai/EasyAnimateV5.1-12b-zh",
+        "alibaba-pai/EasyAnimateV5.1-12b-zh-Control",
+        "alibaba-pai/EasyAnimateV5.1-12b-zh-Control-Camera",
+        "alibaba-pai/EasyAnimateV5.1-12b-zh-InP"
+      ]
+    },
+    {
+      "family": "consisid",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/consisid.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "ConsisIDPipeline"
+      ],
+      "repo_ids": [
+        "BestWishYsh/ConsisID-preview"
+      ]
+    },
+    {
+      "family": "kandinsky5_video",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/kandinsky5_video.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "Kandinsky5I2VPipeline",
+        "Kandinsky5T2VPipeline"
+      ],
+      "repo_ids": [
+        "kandinsky-community/kandinsky-3",
+        "kandinskylab/Kandinsky-5.0-T2V-Lite-sft-10s-Diffusers"
+      ]
+    },
+    {
+      "family": "wan_animate_2",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/wan_animate_2.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "WanAnimate2DistilledModularPipeline",
+        "WanAnimate2ModularPipeline"
+      ],
+      "repo_ids": [
+        "Wan-AI/Wan2.2-Animate-2-14B-Diffusers"
+      ]
+    },
+    {
+      "family": "svd",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/stable_diffusion/svd.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "StableVideoDiffusionPipeline"
+      ],
+      "repo_ids": [
+        "stabilityai/stable-video-diffusion-img2vid",
+        "stabilityai/stable-video-diffusion-img2vid-xt"
+      ]
+    },
+    {
+      "family": "helios",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/helios.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "HeliosPipeline",
+        "HeliosPyramidPipeline"
+      ],
+      "repo_ids": [
+        "BestWishYsh/Helios-Base",
+        "BestWishYsh/Helios-Distilled",
+        "BestWishYsh/Helios-Mid"
+      ]
+    },
+    {
+      "family": "motif_video",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/motif_video.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "MotifVideoImage2VideoPipeline",
+        "MotifVideoPipeline"
+      ],
+      "repo_ids": [
+        "Motif-Technologies/Motif-Video-2B"
+      ]
+    },
+    {
+      "family": "minimax_h3",
+      "category": "video",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/minimax_h3.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "MiniMaxH3ModularPipeline"
+      ],
+      "repo_ids": [
+        "MiniMaxAI/MiniMax-H3"
+      ]
+    },
+    {
+      "family": "audioldm2",
+      "category": "audio",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/audioldm2.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "AudioLDM2Pipeline"
+      ],
+      "repo_ids": [
+        "anhnct/audioldm2_gigaspeech",
+        "anhnct/audioldm2_ljspeech",
+        "cvssp/audioldm2",
+        "cvssp/audioldm2-large",
+        "cvssp/audioldm2-music"
+      ]
+    },
+    {
+      "family": "stable_audio",
+      "category": "audio",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/stable_audio.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "StableAudioPipeline"
+      ],
+      "repo_ids": [
+        "stabilityai/stable-audio-open-1.0"
+      ]
+    },
+    {
+      "family": "stable_audio_3",
+      "category": "audio",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/stable_audio_3.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "StableAudio3AudioToAudioPipeline",
+        "StableAudio3InpaintPipeline",
+        "StableAudio3Pipeline"
+      ],
+      "repo_ids": []
+    },
+    {
+      "family": "ace_step",
+      "category": "audio",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/ace_step.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "AceStepPipeline"
+      ],
+      "repo_ids": [
+        "ACE-Step/acestep-v15-base",
+        "ACE-Step/acestep-v15-sft",
+        "ACE-Step/acestep-v15-xl-turbo-diffusers"
+      ]
+    },
+    {
+      "family": "longcat_audio_dit",
+      "category": "audio",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/longcat_audio_dit.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "LongCatAudioDiTPipeline"
+      ],
+      "repo_ids": [
+        "ruixiangma/LongCat-AudioDiT-1B-Diffusers"
+      ]
+    },
+    {
+      "family": "minimax_music3",
+      "category": "audio",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/minimax_music3.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "MiniMaxMusic3ModularPipeline"
+      ],
+      "repo_ids": [
+        "MiniMaxAI/MiniMax-Music3"
+      ]
+    },
+    {
+      "family": "marigold",
+      "category": "vision",
+      "source_url": "https://github.com/huggingface/diffusers/blob/v0.42.1/docs/source/en/api/pipelines/marigold.md",
+      "upstream_revision": "v0.42.1",
+      "documented_pipeline_classes": [
+        "MarigoldDepthPipeline",
+        "MarigoldIntrinsicsPipeline",
+        "MarigoldNormalsPipeline",
+        "StableDiffusionXLControlNetPipeline"
+      ],
+      "repo_ids": [
+        "SG161222/RealVisXL_V4.0",
+        "diffusers/controlnet-depth-sdxl-1.0",
+        "madebyollin/taesd",
+        "prs-eth/marigold-depth-v1-1",
+        "prs-eth/marigold-iid-appearance-v1-1",
+        "prs-eth/marigold-iid-lighting-v1-1",
+        "prs-eth/marigold-normals-v0-1",
+        "prs-eth/marigold-normals-v1-1"
+      ]
+    },
+    {
+      "family": "Qwen3-TTS",
+      "category": "tts",
+      "source_url": "https://github.com/QwenLM/Qwen3-TTS/blob/022e286b98fbec7e1e916cb940cdf532cd9f488e/README.md",
+      "upstream_revision": "022e286b98fbec7e1e916cb940cdf532cd9f488e",
+      "documented_pipeline_classes": [],
+      "repo_ids": [
+        "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        "Qwen/Qwen3-TTS-Tokenizer-12Hz"
+      ]
+    },
+    {
+      "family": "chatterbox",
+      "category": "tts",
+      "source_url": "https://github.com/resemble-ai/chatterbox/blob/ab55923c27757c90cfcc407baa57dc25a7d25217/README.md",
+      "upstream_revision": "ab55923c27757c90cfcc407baa57dc25a7d25217",
+      "documented_pipeline_classes": [],
+      "repo_ids": [
+        "ResembleAI/Chatterbox-Multilingual-es-es",
+        "ResembleAI/Chatterbox-Multilingual-es-mx-latam",
+        "ResembleAI/Chatterbox-Multilingual-hi",
+        "ResembleAI/Chatterbox-Multilingual-pt-br",
+        "ResembleAI/Chatterbox-Multilingual-pt-pt",
+        "ResembleAI/Chatterbox-Multilingual-zh-cmn",
+        "ResembleAI/chatterbox-nano"
+      ]
+    },
+    {
+      "family": "kokoro",
+      "category": "tts",
+      "source_url": "https://github.com/hexgrad/kokoro/blob/dfb907a02bba8152ca444717ca5d78747ccb4bec/README.md",
+      "upstream_revision": "dfb907a02bba8152ca444717ca5d78747ccb4bec",
+      "documented_pipeline_classes": [],
+      "repo_ids": [
+        "hexgrad/Kokoro-82M"
+      ]
+    },
+    {
+      "family": "CosyVoice",
+      "category": "tts",
+      "source_url": "https://github.com/FunAudioLLM/CosyVoice/blob/074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc/README.md",
+      "upstream_revision": "074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc",
+      "documented_pipeline_classes": [],
+      "repo_ids": [
+        "FunAudioLLM/CosyVoice-300M",
+        "FunAudioLLM/CosyVoice2-0.5B",
+        "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
+      ]
+    },
+    {
+      "family": "ACE-Step-1.5",
+      "category": "audio",
+      "source_url": "https://github.com/ACE-Step/ACE-Step-1.5/blob/ca1e85fe9430179831e6bc6be790c332190a3866/README.md",
+      "upstream_revision": "ca1e85fe9430179831e6bc6be790c332190a3866",
+      "documented_pipeline_classes": [],
+      "repo_ids": [
+        "ACE-Step/Ace-Step1.5",
+        "ACE-Step/acestep-v15-base",
+        "ACE-Step/acestep-v15-sft",
+        "ACE-Step/acestep-v15-xl-base",
+        "ACE-Step/acestep-v15-xl-sft",
+        "ACE-Step/acestep-v15-xl-turbo"
+      ]
+    },
+    {
+      "family": "Qwen3-VL",
+      "category": "vision",
+      "source_url": "https://github.com/QwenLM/Qwen3-VL/blob/96588727e44c78b25ba03ea03b8e12f7e64fd0da/README.md",
+      "upstream_revision": "96588727e44c78b25ba03ea03b8e12f7e64fd0da",
+      "documented_pipeline_classes": [],
+      "repo_ids": [
+        "Qwen/QVQ-72B-Preview",
+        "Qwen/Qwen2-VL-72B-Instruct",
+        "Qwen/Qwen2-VL-72B-Instruct-AWQ",
+        "Qwen/Qwen2-VL-72B-Instruct-GPTQ-Int4",
+        "Qwen/Qwen2-VL-72B-Instruct-GPTQ-Int8",
+        "Qwen/Qwen2.5-VL-32B-Instruct",
+        "Qwen/Qwen2.5-VL-3B-Instruct-AWQ",
+        "Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
+        "Qwen/Qwen2.5-VL-7B-Instruct-AWQ",
+        "Qwen/Qwen3-VL-235B-A22B-Instruct",
+        "Qwen/Qwen3-VL-235B-A22B-Thinking",
+        "Qwen/Qwen3-VL-2B-Instruct",
+        "Qwen/Qwen3-VL-2B-Thinking",
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "Qwen/Qwen3-VL-30B-A3B-Thinking",
+        "Qwen/Qwen3-VL-32B-Instruct",
+        "Qwen/Qwen3-VL-32B-Thinking",
+        "Qwen/Qwen3-VL-4B-Instruct",
+        "Qwen/Qwen3-VL-4B-Thinking",
+        "Qwen/Qwen3-VL-8B-Instruct",
+        "Qwen/Qwen3-VL-8B-Thinking"
+      ]
+    },
+    {
+      "family": "HunyuanVideo-1.5",
+      "category": "video",
+      "source_url": "https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5/blob/60783e704160023913bee78f0b47036d393d4dfa/README.md",
+      "upstream_revision": "60783e704160023913bee78f0b47036d393d4dfa",
+      "documented_pipeline_classes": [],
+      "repo_ids": [
+        "Qwen/Qwen3-235B-A22B-Thinking-2507",
+        "Qwen/Qwen3-VL-235B-A22B-Instruct",
+        "tencent/HunyuanVideo-1.5"
+      ]
+    },
+    {
+      "family": "flux2",
+      "category": "image",
+      "source_url": "https://github.com/black-forest-labs/flux2/blob/50fe5162777813d869182b139e83b10743caef15/README.md",
+      "upstream_revision": "50fe5162777813d869182b139e83b10743caef15",
+      "documented_pipeline_classes": [],
+      "repo_ids": [
+        "black-forest-labs/FLUX.1-dev",
+        "black-forest-labs/FLUX.2-dev",
+        "black-forest-labs/FLUX.2-klein-4B",
+        "black-forest-labs/FLUX.2-klein-9B",
+        "black-forest-labs/FLUX.2-klein-9b-kv",
+        "black-forest-labs/FLUX.2-klein-base-4B",
+        "black-forest-labs/FLUX.2-klein-base-9B",
+        "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
+      ]
+    }
+  ],
+  "curation_note": "Non-model Hub URLs and known documentation typos removed. References may still be companion components, older IDs or unsupported formats; inspect current Hub metadata before use."
+}

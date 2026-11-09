@@ -304,7 +304,7 @@
                 </div>
                 <div>
                   <label class="field-label">Guía (CFG)</label>
-                  <input type="number" id="img-cfg" value="4.0" min="1.0" max="15.0" step="0.5" />
+                  <input type="number" id="img-cfg" value="4.0" min="0.0" max="15.0" step="0.5" />
                 </div>
               </div>
 
@@ -934,7 +934,7 @@
         <div class="catalog-top-note">
           <div style="flex:1;min-width:260px;">
             <strong>Catálogo Hugging Face Bajo Demanda y Filtro por GPU:</strong>
-            Elige tu GPU de Colab para ver qué modelos van fluidos (<span class="inline-badge-ok">🟢 Excelente</span>), normales (<span class="inline-badge-good">🟡 Normal</span>) o lentos (<span class="inline-badge-slow">🟠 Lento</span>).
+            Compara recetas implementadas y candidatos por motor, VRAM, RAM, disco y dependencias. Las cifras son estimaciones, no benchmarks ni garantías de ejecución.
             <span class="muted-block" id="ephemeral-note-text">Nota: el disco de sesión de Google Colab se reinicia al desconectar la máquina.</span>
           </div>
           <div class="filter-pills">
@@ -961,42 +961,76 @@
           </div>
           <label class="gpu-compat-toggle">
             <input type="checkbox" id="chk-cat-only-compat" />
-            <span>Ocultar los que no caben en esta GPU</span>
+            <span>Solo recetas con encaje estimado (GPU + RAM + disco)</span>
           </label>
         </div>
 
-        <!-- Buscador en Tiempo Real de Hugging Face (funciona al instante mientras escribes, con o sin Token HF) -->
+        <!-- Metadata-only discovery, shared with the hardware-aware MCP oracle. -->
         <div class="card add-hf-card live-hf-box" id="live-hf-search-card" style="margin-top:0;margin-bottom:14px;">
           <div class="card-header">
             <div>
-              <div class="row-gap" style="flex-wrap:wrap;">
-                <h3>🔍 Buscador Hugging Face en Tiempo Real</h3>
-                <span class="live-pill-indicator" id="hf-live-indicator">⚡ En vivo al escribir</span>
+              <div class="row-gap discovery-actions">
+                <h3>🔍 Descubridor de modelos y recetas</h3>
+                <span class="live-pill-indicator" id="hf-live-indicator" role="status">Metadatos · sin pesos</span>
               </div>
-              <span class="muted">Escribe cualquier modelo o LoRA y verás al instante su peso, descargas y si cabe en tu GPU</span>
+              <span class="muted">Receta revisada ≠ GPU validada. Los candidatos sin receta no se pueden cargar; el tamaño de un archivo no demuestra VRAM.</span>
             </div>
-            <div class="row-gap" style="flex-wrap:wrap;">
-              <div class="preset-pills" id="hf-quick-topics">
-                <button type="button" class="hf-topic-chip" data-q="Wan" data-c="video">Wan</button>
-                <button type="button" class="hf-topic-chip" data-q="LTX" data-c="video">LTX</button>
-                <button type="button" class="hf-topic-chip" data-q="HunyuanVideo" data-c="video">Hunyuan</button>
-                <button type="button" class="hf-topic-chip" data-q="FLUX" data-c="image">FLUX</button>
-                <button type="button" class="hf-topic-chip" data-q="Qwen-Image" data-c="lora">LoRAs Qwen</button>
-              </div>
-              <button type="button" class="btn btn-secondary btn-sm" id="btn-hf-box-token">🔑 Token HF</button>
-            </div>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-hf-box-token">🔑 Token HF</button>
+          </div>
+          <div class="row-gap discovery-actions" id="hf-quick-topics">
+            <button type="button" class="hf-topic-chip" data-q="Wan" data-c="video">Wan</button>
+            <button type="button" class="hf-topic-chip" data-q="LTX" data-c="video">LTX</button>
+            <button type="button" class="hf-topic-chip" data-q="Hunyuan" data-c="video">Hunyuan</button>
+            <button type="button" class="hf-topic-chip" data-q="FLUX" data-c="image">FLUX</button>
+            <button type="button" class="hf-topic-chip" data-q="Sana" data-c="image">SANA</button>
+            <button type="button" class="hf-topic-chip" data-q="Qwen" data-c="tts">Qwen TTS</button>
           </div>
           <div class="hf-search-bar">
-            <select id="hf-live-cat" class="hf-cat-select">
-              <option value="video">🎬 Vídeo (I2V / T2V)</option>
-              <option value="lora">🧩 LoRAs</option>
-              <option value="image">🖼️ Imagen</option>
-              <option value="tts">🎙️ Voz / TTS</option>
+            <select id="hf-live-cat" class="hf-cat-select" aria-label="Categoría de modelos">
+              <option value="video">🎬 Vídeo</option><option value="image">🖼️ Imagen</option>
+              <option value="lora">🧩 LoRAs</option><option value="tts">🎙️ Voz / TTS</option>
+              <option value="audio">🎵 Música / SFX</option><option value="vision">👁️ Visión</option>
+              <option value="lipsync">👄 LipSync</option><option value="all">Todas las categorías</option>
             </select>
-            <input type="text" id="hf-live-query" class="flex-1" autocomplete="off" placeholder="Escribe para buscar en tiempo real (ej: LTX, Wan 2.2, SkyReels, CogVideoX, Qwen, FLUX...)" />
-            <button type="button" class="btn btn-primary" id="btn-hf-live-search">🔍 Buscar</button>
+            <input type="text" id="hf-live-query" class="flex-1" autocomplete="off" maxlength="160" aria-label="Buscar modelos" placeholder="Modelo, familia o autor/repo…" />
+            <select id="hf-sort" aria-label="Orden de resultados"><option value="downloads">Más descargados</option><option value="lastModified">Actualizados recientemente</option></select>
+            <button type="button" class="btn btn-primary" id="btn-hf-live-search">Buscar / refrescar</button>
           </div>
-          <div id="hf-live-results" class="hf-live-results"></div>
+          <div class="discovery-updater">
+            <label class="check-row"><input type="checkbox" id="hf-auto-refresh" /><span>Actualizar metadatos automáticamente</span></label>
+            <select id="hf-refresh-interval" aria-label="Intervalo de actualización"><option value="15">Cada 15 minutos</option><option value="60">Cada hora</option><option value="360" selected>Cada 6 horas</option><option value="1440">Cada día</option></select>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-hf-refresh-index">↻ Actualizar índice ahora</button>
+          </div>
+          <p class="muted discovery-status" id="hf-index-status" role="status">Leyendo estado del índice…</p>
+          <p class="muted" id="hf-search-meta">Fuentes y fechas explícitas. La actualización no instala librerías, recetas ni pesos.</p>
+          <div id="hf-live-results" class="hf-live-results" aria-live="polite"></div>
+          <div class="discovery-pagination">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-hf-prev" disabled>← Anterior</button>
+            <span id="hf-page-label" class="muted">Página 1</span>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-hf-next" disabled>Siguiente →</button>
+          </div>
+          <section id="hf-inspection" class="model-inspect-panel" hidden aria-label="Inspección de modelo">
+            <div class="row-gap"><strong>Inspector de receta / metadatos</strong><button type="button" class="btn btn-secondary btn-sm" id="btn-hf-close-inspection">Cerrar</button></div>
+            <div id="hf-inspection-body" aria-live="polite"></div>
+          </section>
+          <details class="discovery-oracle">
+            <summary>🧭 Oráculo: qué receta puede usar mi hardware real</summary>
+            <p class="muted">Siempre evalúa el equipo real, no la GPU simulada de arriba. Puede no haber una receta apta.</p>
+            <div class="row-gap discovery-actions">
+              <select id="hf-oracle-task" aria-label="Tarea para el oráculo">
+                <option value="video_flf2v">Vídeo con inicial y final</option><option value="video_i2v">Imagen a vídeo</option><option value="video_t2v">Texto a vídeo</option>
+                <option value="image_create">Crear imagen</option><option value="image_edit">Editar con referencias</option><option value="consistent_keyframes">Keyframes coherentes</option>
+                <option value="tts">Voz</option><option value="coherence_check">Auditar coherencia</option><option value="music_and_ambience">Música / ambiente</option><option value="lipsync_talking_scene">LipSync</option><option value="montage">Montaje</option>
+              </select>
+              <select id="hf-oracle-priority" aria-label="Prioridad del oráculo"><option value="balanced_fast">Equilibrado</option><option value="max_quality_14b">Calidad / 14B si es apto</option><option value="ultra_fast_draft">Borrador ligero</option><option value="zero_vram_cpu">Solo CPU (no equivalente IA)</option></select>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-hf-oracle">Consultar sin descargar</button>
+            </div>
+            <div id="hf-oracle-result" aria-live="polite"></div>
+          </details>
+          <div class="row-gap discovery-manuals">
+            <a href="/api/models/manual?guide=operations" target="_blank" rel="noopener" class="link-btn">📖 Manual detallado MCP y oráculo</a>
+            <a href="/api/models/manual?guide=research" target="_blank" rel="noopener" class="link-btn">Fuentes e investigación de modelos ↗</a>
+          </div>
         </div>
 
         <div id="catalog-grid" class="catalog-grid"></div>
@@ -1004,8 +1038,8 @@
         <!-- Añadir repositorio propio de Hugging Face manualmente -->
         <div class="card add-hf-card">
           <div class="card-header">
-            <h3>➕ Añadir otro Repositorio Exacto de Hugging Face</h3>
-            <span class="muted">Si ya tienes el nombre «autor/modelo», pégalo aquí</span>
+            <h3>➕ Guardar un repositorio como candidato</h3>
+            <span class="muted">No habilita un cargador ni descarga pesos. Requiere inspección y receta revisada.</span>
           </div>
           <div class="params-grid-5">
             <div>
@@ -1019,7 +1053,7 @@
             <div>
               <label class="field-label">Tipo</label>
               <select id="custom-hf-cat">
-                <option value="lora">LoRA para Qwen Imagen</option>
+                <option value="lora">LoRA (base aún por verificar)</option>
                 <option value="image">Modelo Imagen Base</option>
                 <option value="video">Modelo Vídeo</option>
                 <option value="tts">Modelo Voz / TTS</option>
@@ -1033,7 +1067,7 @@
               <label class="field-label">Peso aprox. (GB)</label>
               <div class="row-gap">
                 <input type="number" id="custom-hf-gb" value="0.5" min="0.05" step="0.1" />
-                <button class="btn btn-secondary" id="btn-add-custom-hf">Añadir</button>
+                <button class="btn btn-secondary" id="btn-add-custom-hf">Guardar candidato</button>
               </div>
             </div>
           </div>
