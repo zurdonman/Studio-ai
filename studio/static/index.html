@@ -1665,6 +1665,21 @@
           <label class="field-label">Configuración `mcpServers` JSON (Cursor / Windsurf / Gemini CLI)</label>
           <textarea id="mcp-cmd-json" rows="5" readonly style="font-family:monospace;font-size:12px;"></textarea>
         </div>
+
+        <div style="border-top:1px solid var(--border,#333); margin-top:10px; padding-top:10px;">
+          <label class="field-label">🔗 Túnel GitHub para agente arena.ai</label>
+          <p style="font-size:12px; opacity:.8; margin:4px 0 8px;">
+            Algunos agentes (arena.ai) no pueden abrir conexiones a tu túnel de Cloudflare. Este canal
+            invierte la dirección: el agente escribe órdenes en el repo y esta celda las ejecuta contra
+            el servidor local. Solo ejecuta una lista cerrada de acciones: sin shell, sin descargas y sin
+            borrar pesos. Necesita un token de GitHub con permiso de escritura en el repo.
+          </p>
+          <div class="row-gap">
+            <input type="text" id="mcp-github-command" readonly placeholder="(abre este panel desde el dominio de tu túnel)" />
+            <button type="button" class="btn btn-secondary btn-sm" data-copy-target="mcp-github-command">📋 Copiar comando</button>
+          </div>
+          <div id="mcp-github-status" style="font-size:12px; opacity:.75; margin-top:6px;"></div>
+        </div>
       </div>
     </div>
   </div>

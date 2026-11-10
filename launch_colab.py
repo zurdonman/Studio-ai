@@ -202,10 +202,29 @@ def main() -> None:
     # Token NUEVO en cada arranque: si uno se filtra (captura, chat, log), muere al reiniciar.
     # Para fijarlo, exporta STUDIO_MCP_TOKEN antes de lanzar.
     mcp_token = os.environ.get("STUDIO_MCP_TOKEN", "").strip() or f"st_mcp_{secrets.token_hex(12)}"
+
+    # Token de GitHub para el canal de control (solo se usa para leer/escribir 2 ficheros
+    # del propio repo). Se acepta por entorno o por fichero para no dejarlo en el historial.
+    channel_token_file = data_dir / "state" / "github_channel_token.txt"
+    gh_token = (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip()
+    if not gh_token and channel_token_file.exists():
+        try:
+            gh_token = channel_token_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            gh_token = ""
+    if gh_token:
+        try:
+            channel_token_file.parent.mkdir(parents=True, exist_ok=True)
+            channel_token_file.write_text(gh_token, encoding="utf-8")
+            os.chmod(channel_token_file, 0o600)
+        except OSError:
+            pass
     env = os.environ.copy()
     env["PORT"] = str(PORT)
     env["PYTHONUNBUFFERED"] = "1"
     env["STUDIO_MCP_TOKEN"] = mcp_token
+    if gh_token:
+        env["STUDIO_CHANNEL_GH_TOKEN"] = gh_token
     env["PYTHONFAULTHANDLER"] = "1"
     env["STUDIO_DIAGNOSTIC_DIR"] = str(diagnostics.folder)
     env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -259,6 +278,34 @@ def main() -> None:
         except Exception:
             pass
 
+    # Canal de control por GitHub: permite que un agente que NO alcanza el túnel
+    # (arena.ai) dirija esta instancia. Ejecuta verbos de una lista cerrada contra
+    # el servidor local; sin token de GitHub funciona en solo lectura.
+    channel_proc = None
+    channel_script = ROOT_DIR / "tools" / "mcp_github_channel.py"
+    msg_channel = "🔗 Canal GitHub: desactivado"
+    if channel_script.exists():
+        channel_env = env.copy()
+        channel_env["STUDIO_URL"] = f"http://127.0.0.1:{PORT}"
+        channel_env["STUDIO_MCP_TOKEN"] = mcp_token
+        if gh_token:
+            channel_env["GH_TOKEN"] = gh_token
+        try:
+            channel_proc = subprocess.Popen(
+                [sys.executable, "-u", str(channel_script), "--poll", "20"],
+                cwd=str(ROOT_DIR), env=channel_env,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1,
+            )
+            msg_channel = (
+                "🔗 CANAL GITHUB PARA AGENTES SIN TÚNEL (arena.ai): ACTIVO"
+                + ("" if gh_token else " · solo lectura (sin token de GitHub)")
+            )
+        except Exception as exc:
+            msg_channel = f"⚠️ Canal GitHub no arrancó: {type(exc).__name__}"
+    else:
+        msg_channel = "⚠️ Canal GitHub no encontrado en tools/mcp_github_channel.py"
+
+
     hw = initial_status.get("hardware", {})
     gpu = hw.get("gpu", {})
     disk = hw.get("disk", {})
@@ -291,10 +338,23 @@ def main() -> None:
         f'     curl -fsSL "{base_ext}/mcp/bridge.py?token={mcp_token}" -o studio_mcp.py && (claude mcp remove studio-ia >/dev/null 2>&1 || true) && claude mcp add studio-ia -- python3 "$(pwd)/studio_mcp.py"'
     )
     msg_lines.append("─" * 74)
+    msg_lines.append(msg_channel)
+    msg_lines.append(
+        "   El agente escribe órdenes en channel/ordenes.json del repo y lee state/channel/resultados.json."
+    )
+    if gh_token:
+        msg_lines.append("   🔑 Token de GitHub cargado (guardado en studio_data/state, nunca en el repo).")
+    else:
+        msg_lines.append(
+            "   Para que el agente reciba resultados: guarda un PAT de GitHub con Contents:read/write en "
+            "studio_data/state/github_channel_token.txt y reinicia."
+        )
+    msg_lines.append("─" * 74)
     msg_lines.append("📡 Debajo verás EN TIEMPO REAL todo lo que hagas tú en la Web o tu Agente vía MCP:")
     _print_box(msg_lines)
 
-    diagnostics.event("ready", status="running", public_url=cf_url, tunnel_pid=cf_proc.pid if cf_proc else None)
+    diagnostics.event("ready", status="running", public_url=cf_url, tunnel_pid=cf_proc.pid if cf_proc else None,
+                      github_channel=bool(channel_proc))
     requested_stop = False
     tunnel_exit_reported = False
     last_sample = 0.0

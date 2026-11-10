@@ -192,6 +192,13 @@ contra la instancia. La vía que sí funciona invierte la dirección:
 !GH_TOKEN=ghp_xxx python3 /content/studio/tools/mcp_github_channel.py --poll 20
 ```
 
-El agente escribe órdenes en `channel/ordenes.json` y lee `state/channel/resultados.json`. Los verbos están
+El lanzador arranca el canal **solo** (`launch_colab.py`), y el panel MCP muestra un botón
+«🔗 Túnel GitHub para agente arena.ai» con el comando ya rellenado. El agente escribe órdenes en
+`channel/ordenes.json` y lee `state/channel/resultados.json`.
+
+El canal habla con el servidor local por `http://127.0.0.1:7860/mcp` **a propósito**: importar
+`studio.mcp_server` en su propio proceso crearía una segunda cola de trabajos invisible para la
+interfaz y duplicaría el modelo en RAM. Todo lo que ejecute aparece en la app y respeta su gobernanza
+de memoria. Los verbos están
 en una lista cerrada: **no** hay shell, ni descarga de modelos, ni borrado de pesos, ni acceso al token del
 canal. Cada orden se ejecuta una vez por `id`, y un fallo se reporta sin tumbar el canal.

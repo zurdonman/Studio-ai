@@ -3775,6 +3775,47 @@ def api_get_mcp_info(request: Request) -> Dict[str, Any]:
     }
 
 
+@mcp_router.get("/api/mcp/github-channel")
+def api_mcp_github_channel(request: Request) -> Dict[str, Any]:
+    """Credenciales y comando del canal de control por GitHub.
+
+    Igual que `/api/mcp/info`: el token solo se entrega a la UI del propio host o a
+    quien ya lo presenta. El `repo_token` es un PAT de GitHub con escritura en el
+    repo; si no está configurado, el canal funciona en solo lectura (útil para
+    ejecutar órdenes ya publicadas, no para devolver resultados).
+    """
+    trusted = _caller_is_trusted(request)
+    repo_token = (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip()
+    repo = (os.environ.get("STUDIO_CHANNEL_REPO") or "zurdonman/Studio-ai").strip()
+    branch = (os.environ.get("STUDIO_CHANNEL_BRANCH") or "arena/f0997b49-studio-ai").strip()
+    details = get_mcp_connection_details(request) if trusted else None
+    mcp_token = (details or {}).get("token") or ""
+    command = (
+        f"GH_TOKEN={repo_token or 'ghp_TU_TOKEN'} python3 /content/studio/tools/mcp_github_channel.py "
+        f"--poll 20 --repo {repo} --branch {branch}"
+    )
+    return {
+        "ok": True,
+        "available": True,
+        "trusted": trusted,
+        "repo": repo,
+        "branch": branch,
+        "repo_token_configured": bool(repo_token),
+        "instructions": (
+            "1) Crea un token de GitHub con permiso Contents: read/write sobre el repo. "
+            "2) Guárdalo en Colab con STUDIO_CHANNEL_GH_TOKEN antes de lanzar, o pégalo en el comando. "
+            "3) El agente publica órdenes en channel/ordenes.json y lee state/channel/resultados.json."
+        ),
+        "command": command if trusted else "(oculto: abre el panel MCP desde este mismo dominio)",
+        "repo_token": repo_token if trusted else "",
+        "mcp_token": mcp_token if trusted else "",
+        "limits": (
+            "El canal ejecuta verbos de una lista cerrada contra el servidor local: "
+            "sin shell, sin descargas y sin borrar pesos."
+        ),
+    }
+
+
 @mcp_router.get("/api/mcp/presets")
 def api_list_mcp_presets() -> Dict[str, Any]:
     return {"ok": True, "presets": list_agent_workflow_presets()}

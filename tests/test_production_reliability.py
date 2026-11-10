@@ -616,22 +616,39 @@ def test_github_channel_only_runs_closed_verbs_and_never_forwards_credentials():
         assert forbidden not in ch.ALLOWED_VERBS
     assert set(ch.ALLOWED_VERBS) == set(ch.VERB_TO_TOOL)
 
-    # Un argumento con credencial se rechaza antes de llegar a la herramienta.
-    original = ch._execute_mcp_tool if hasattr(ch, "_execute_mcp_tool") else None
-    called = []
-    import studio.mcp_server as srv
+    # Un argumento con credencial se rechaza ANTES de hablar con el servidor.
+    sent = []
+    ch._rpc = lambda base, token, payload, session: sent.append(payload) or {"result": {"content": []}}
 
-    real = srv._execute_mcp_tool
-    srv._execute_mcp_tool = lambda name, args: called.append((name, args)) or {"content": []}
+    session = {"ready": "1", "seq": "1", "id": "s"}
     try:
-        try:
-            ch._dispatch("get_state", {"include_recent_assets": True, "token": "st_mcp_x"})
-            raise AssertionError("debía rechazar el token")
-        except ValueError:
-            pass
-        assert called == []
-        ch._dispatch("get_state", {"include_recent_assets": False})
-        assert called and called[0][0] == "studio_get_state_and_manual"
-        assert "token" not in called[0][1]
-    finally:
-        srv._execute_mcp_tool = real
+        ch._dispatch("get_state", {"include_recent_assets": True, "token": "st_mcp_x"},
+                     "http://127.0.0.1:7860", "t", session)
+        raise AssertionError("debía rechazar el token")
+    except ValueError:
+        pass
+    assert sent == []
+
+    ch._dispatch("get_state", {"include_recent_assets": False}, "http://127.0.0.1:7860", "t", session)
+    tool_call = sent[-1]["params"]
+    assert tool_call["name"] == "studio_get_state_and_manual"
+    assert "token" not in tool_call["arguments"]
+
+
+def test_github_channel_talks_to_the_local_server_without_duplicating_queues():
+    """El canal debe ir por HTTP al servidor local, no importar su cola de trabajos."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "mcp_github_channel.py"
+    source = path.read_text(encoding="utf-8")
+    # Nunca importa la cola del servidor: eso crearía trabajos invisibles para la UI.
+    assert "from studio.mcp_server import _execute_mcp_tool" not in source
+    assert "from studio.mcp_server import _wait_for_job_bounded" not in source
+    assert "127.0.0.1:7860" in source
+
+    spec = importlib.util.spec_from_file_location("mcp_github_channel_http", path)
+    ch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ch)
+    assert callable(ch._rpc)
+    assert "wait_for_job" in ch.ALLOWED_VERBS

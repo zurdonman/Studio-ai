@@ -3436,6 +3436,17 @@
           if ($("mcp-cmd-codex-stdio")) $("mcp-cmd-codex-stdio").value = cmds.codex_cli_stdio || "";
           if ($("mcp-cmd-http")) $("mcp-cmd-http").value = cmds.claude_code_http || "";
           if ($("mcp-cmd-json")) $("mcp-cmd-json").value = cmds.mcp_servers_json || "";
+          try {
+            const ch = await api("/api/mcp/github-channel", { headers: { "X-Studio-UI": "1" } });
+            if ($("mcp-github-command")) $("mcp-github-command").value = ch.command || "";
+            if ($("mcp-github-status")) {
+              $("mcp-github-status").textContent = ch.repo_token_configured
+                ? `Listo · repo ${ch.repo} · rama ${ch.branch}`
+                : `Este es el comando · repo ${ch.repo} · rama ${ch.branch}. Sustituye el token de GitHub: sin él el canal no puede devolver resultados.`;
+            }
+          } catch (_e) {
+            if ($("mcp-github-status")) $("mcp-github-status").textContent = "Canal no disponible en esta versión.";
+          }
           if (info.token_exposed === false) {
             toast("Este panel no es de confianza para ver el token: ábrelo desde este mismo dominio.");
           }

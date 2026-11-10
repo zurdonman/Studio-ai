@@ -72,9 +72,11 @@ VERB_TO_TOOL = {
 FORBIDDEN_ARGS = {"token", "authorization", "hf_token", "password", "api_key"}
 
 
-def _api_get(repo: str, path: str, token: str) -> Optional[Dict[str, Any]]:
+def _api_get(repo: str, path: str, token: str, branch: str = "") -> Optional[Dict[str, Any]]:
     """Lee un fichero del repo por la API de contenidos (JSON base64)."""
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    if branch:
+        url += f"?ref={branch}"
     req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -88,10 +90,10 @@ def _api_get(repo: str, path: str, token: str) -> Optional[Dict[str, Any]]:
         raise SystemExit(f"GitHub {exc.code} leyendo {path}")
 
 
-def _read_json_file(repo: str, path: str, token: str) -> Optional[Dict[str, Any]]:
+def _read_json_file(repo: str, path: str, token: str, branch: str = "") -> Optional[Dict[str, Any]]:
     import base64
 
-    data = _api_get(repo, path, token)
+    data = _api_get(repo, path, token, branch)
     if not data or "content" not in data:
         return None
     try:
@@ -101,15 +103,53 @@ def _read_json_file(repo: str, path: str, token: str) -> Optional[Dict[str, Any]
         return None
 
 
-def _dispatch(verb: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Ejecuta el verbo EN PROCESO, con las mismas guardas que el servidor MCP."""
-    from studio.mcp_server import _execute_mcp_tool
+def _rpc(base: str, token: str, payload: Dict[str, Any], session: Dict[str, str]) -> Dict[str, Any]:
+    req = urllib.request.Request(
+        f"{base}/mcp",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "User-Agent": "studio-ia-github-channel/1.0",
+        },
+    )
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    if session.get("id"):
+        req.add_header("Mcp-Session-Id", session["id"])
+    with urllib.request.urlopen(req, timeout=90) as resp:
+        session["id"] = resp.headers.get("Mcp-Session-Id") or session.get("id", "")
+        body = resp.read().decode("utf-8", "replace").strip()
+    if body.startswith("data:"):
+        body = [ln[5:].strip() for ln in body.splitlines() if ln.startswith("data:")][-1]
+    return json.loads(body) if body else {}
 
+
+def _dispatch(verb: str, args: Dict[str, Any], base: str, token: str,
+              session: Dict[str, str]) -> Dict[str, Any]:
+    """Ejecuta la orden contra el SERVIDOR LOCAL (127.0.0.1) por MCP.
+
+    Se hace por HTTP y no importando `studio.mcp_server` a propósito: así el
+    trabajo entra en la cola de la aplicación, se ve en la interfaz y respeta su
+    gobernanza de memoria. Importarlo en este proceso crearía una segunda cola
+    invisible y duplicaría el modelo en RAM.
+    """
     clean = {k: v for k, v in args.items() if k.lower() not in FORBIDDEN_ARGS}
     if clean != args:
         raise ValueError("argumento prohibido en la orden")
-    tool = VERB_TO_TOOL[verb]
-    result = _execute_mcp_tool(tool, clean)
+    if not session.get("ready"):
+        _rpc(base, token, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                           "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                                      "clientInfo": {"name": "github-channel", "version": "1.0"}}}, session)
+        session["ready"] = "1"
+        session["seq"] = "1"
+    session["seq"] = str(int(session.get("seq", "1")) + 1)
+    resp = _rpc(base, token, {"jsonrpc": "2.0", "id": int(session["seq"]), "method": "tools/call",
+                              "params": {"name": VERB_TO_TOOL[verb], "arguments": clean}}, session)
+    if "error" in resp:
+        return {"ok": False, "error_code": "RPC_ERROR", "error": resp["error"]}
+    result = resp.get("result") or {}
     texts = [c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text"]
     raw = "\n".join(t for t in texts if t)
     try:
@@ -118,12 +158,11 @@ def _dispatch(verb: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"raw": raw[:2000]}
 
 
-def _wait_job(job_id: str, budget_sec: float = 3000.0) -> Dict[str, Any]:
-    from studio.mcp_server import _wait_for_job_bounded
-
+def _wait_job(base: str, token: str, session: Dict[str, str], job_id: str,
+              budget_sec: float = 3000.0) -> Dict[str, Any]:
     started = time.time()
     while True:
-        snapshot = _wait_for_job_bounded(job_id, max_wait_seconds=80)
+        snapshot = _dispatch("wait_for_job", {"job_id": job_id, "wait_seconds": 80}, base, token, session)
         status = snapshot.get("status")
         if status in ("completed", "failed", "cancelled"):
             return snapshot
@@ -131,17 +170,19 @@ def _wait_job(job_id: str, budget_sec: float = 3000.0) -> Dict[str, Any]:
             return dict(snapshot, ok=False, error_code="CLIENT_TIMEOUT")
 
 
-def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run: bool) -> int:
-    orders = _read_json_file(repo, orders_path, token) or {}
+def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run: bool,
+             base: str = "http://127.0.0.1:7860", mcp_token: str = "", branch: str = "") -> int:
+    orders = _read_json_file(repo, orders_path, token, branch) or {}
     queue = orders.get("orders") or []
     if not queue:
         print("Sin órdenes pendientes.")
         return 0
 
-    done = _read_json_file(repo, results_path, token) or {}
+    done = _read_json_file(repo, results_path, token, branch) or {}
     executed = set(done.get("executed_ids") or [])
     results: List[Dict[str, Any]] = list(done.get("results") or [])
 
+    session: Dict[str, str] = {}
     for order in queue:
         oid = str(order.get("id") or "").strip()
         verb = str(order.get("verb") or "").strip()
@@ -158,10 +199,11 @@ def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run
             continue
         started = time.time()
         try:
-            out = _dispatch(verb, args)
+            out = _dispatch(verb, args, base, mcp_token, session)
             job_id = out.get("job_id") or (out.get("job") or {}).get("id")
             if verb not in ("wait_for_job",) and job_id and order.get("wait", True):
-                out = _wait_job(str(job_id), budget_sec=float(order.get("budget_sec") or 3000))
+                out = _wait_job(base, mcp_token, session, str(job_id),
+                                budget_sec=float(order.get("budget_sec") or 3000))
             entry = {
                 "id": oid,
                 "verb": verb,
@@ -174,9 +216,9 @@ def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run
         print(f"   {'✓' if entry['ok'] else '✗'} {entry.get('seconds', 0)}s {entry.get('error', '')}")
         results.append(entry)
         executed.add(oid)
-        _write_results(repo, results_path, token, sorted(executed), results)
+        _write_results(repo, results_path, token, sorted(executed), results, branch)
     if not dry_run:
-        _write_results(repo, results_path, token, sorted(executed), results)
+        _write_results(repo, results_path, token, sorted(executed), results, branch)
     return 0
 
 
@@ -189,7 +231,8 @@ def _compact(out: Dict[str, Any]) -> Dict[str, Any]:
     return {k: merged[k] for k in keys if k in merged}
 
 
-def _write_results(repo: str, path: str, token: str, ids: List[str], results: List[Dict[str, Any]]) -> None:
+def _write_results(repo: str, path: str, token: str, ids: List[str], results: List[Dict[str, Any]],
+                   branch: str = "") -> None:
     """Escribe el estado en el repo (lo lee el agente con GET normal)."""
     import base64
     import subprocess
@@ -206,8 +249,10 @@ def _write_results(repo: str, path: str, token: str, ids: List[str], results: Li
     if not token:
         print(f"   (sin GH_TOKEN: resultados solo en {target})")
         return
-    existing = _api_get(repo, path, token) or {}
+    existing = _api_get(repo, path, token, branch) or {}
     message = {"message": f"canal: resultados {time.strftime('%H:%M:%S')}", "content": base64.b64encode(body.encode()).decode()}
+    if branch:
+        message["branch"] = branch
     if existing.get("sha"):
         message["sha"] = existing["sha"]
     req = urllib.request.Request(
@@ -227,11 +272,16 @@ def _write_results(repo: str, path: str, token: str, ids: List[str], results: Li
 def main() -> int:
     ap = argparse.ArgumentParser(description="Canal de control por GitHub para Studio IA.")
     ap.add_argument("--repo", default=os.environ.get("STUDIO_CHANNEL_REPO", DEFAULT_REPO))
+    ap.add_argument("--branch", default=os.environ.get("STUDIO_CHANNEL_BRANCH", "arena/f0997b49-studio-ai"))
     ap.add_argument("--orders", default=DEFAULT_ORDERS)
     ap.add_argument("--results", default=DEFAULT_RESULTS)
     ap.add_argument("--once", action="store_true", help="una pasada")
     ap.add_argument("--poll", type=float, default=0.0, help="segundos entre pasadas (0 = salir)")
     ap.add_argument("--dry-run", action="store_true", help="muestra las órdenes sin ejecutarlas")
+    ap.add_argument("--url", default=os.environ.get("STUDIO_URL", "http://127.0.0.1:7860"),
+                    help="URL del servidor Studio IA local (por defecto el de la propia celda)")
+    ap.add_argument("--mcp-token", default=os.environ.get("STUDIO_MCP_TOKEN", ""),
+                    help="token MCP del servidor local (lo usa el propio lanzador)")
     args = ap.parse_args()
 
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
@@ -239,7 +289,8 @@ def main() -> int:
         print("Aviso: sin GH_TOKEN solo se puede LEER el repo público (no publicar resultados).")
 
     while True:
-        run_once(args.repo, args.orders, args.results, token, args.dry_run)
+        run_once(args.repo, args.orders, args.results, token, args.dry_run,
+                 base=args.url.rstrip("/"), mcp_token=args.mcp_token, branch=args.branch)
         if args.poll <= 0:
             return 0
         time.sleep(max(5.0, args.poll))
