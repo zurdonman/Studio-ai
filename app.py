@@ -103,6 +103,14 @@ async def studio_lifespan(_app: FastAPI):
     model_discovery.start()
     memory_manager.start()
     try:
+        # Canal de control por GitHub: si el usuario ya configuró el secreto (una vez),
+        # se enciende solo en cada sesión. Sin credenciales no hace nada.
+        from studio import github_channel_service as _channel
+
+        _channel.autostart_if_possible(mcp_token=os.environ.get("STUDIO_MCP_TOKEN", ""))
+    except Exception:
+        pass
+    try:
         yield
     finally:
         model_discovery.stop()

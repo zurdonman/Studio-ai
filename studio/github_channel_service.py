@@ -62,11 +62,34 @@ def _token_path() -> Path:
     return state / "github_channel.json"
 
 
+# Nombre del secreto en el panel «Secrets» (🔑) de Colab. Se configura UNA vez por
+# cuenta de Google y sobrevive a todas las sesiones: no hay que volver a pegarlo.
+COLAB_SECRET_NAME = os.environ.get("STUDIO_CHANNEL_GH_SECRET", "GH_TOKEN")
+
+
+def _from_colab_secrets() -> str:
+    """Lee el token del gestor de secretos de Colab (persistente entre sesiones)."""
+    try:
+        from google.colab import userdata  # type: ignore
+
+        value = userdata.get(COLAB_SECRET_NAME)
+        return str(value or "").strip()
+    except Exception:
+        return ""
+
+
 def load_saved_token() -> str:
-    """Token de GitHub ya guardado (por el lanzador o por un arranque anterior)."""
+    """Token de GitHub, por orden de preferencia: entorno → Colab Secrets → disco.
+
+    Colab Secrets es lo que hace que esto sea «una vez en la vida»: el secreto vive
+    en la cuenta de Google del usuario, no en la máquina efímera de Colab.
+    """
     env = (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip()
     if env:
         return env
+    secret = _from_colab_secrets()
+    if secret:
+        return secret
     legacy = _token_path().with_name("github_channel_token.txt")
     for path, key in ((_token_path(), "gh_token"), (legacy, None)):
         try:
@@ -268,6 +291,41 @@ def _loop(interval: float, repo: str, branch: str, backend: str, _unused: str,
         _stop.wait(interval)
 
 
+ARENA_LINK_PATH = "channel/arena_link.json"
+
+
+def publish_arena_link(base: str = "", token: str = "") -> Optional[str]:
+    """Publica (una vez por arranque) el enlace que se le da a arena.ai.
+
+    Va en la rama del canal, no en la de código. El enlace es estable, así que la
+    URL que el usuario copió en la primera sesión sigue sirviendo siempre.
+    """
+    import base64
+
+    token = token or load_saved_token()
+    if not token:
+        return None
+    body = {
+        "schema": 1,
+        "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "arena_url": (f"{base.rstrip('/')}/mcp/arena" if base else "/mcp/arena"),
+        "note": ("URL estable del canal. La instancia cambia de túnel en cada sesión, pero el buzón "
+                 "de GitHub no: el agente siempre empieza por aquí."),
+        "channel": agent_handoff("", repo_slug(), "", "state"),
+    }
+    url = (f"https://api.github.com/repos/{repo_slug()}/contents/{ARENA_LINK_PATH}")
+    existing = _api(f"{url}?ref={state_branch()}", token) or {}
+    payload: Dict[str, Any] = {
+        "message": "canal: enlace de arena",
+        "content": base64.b64encode(json.dumps(body, indent=2, ensure_ascii=False).encode()).decode(),
+        "branch": state_branch(),
+    }
+    if isinstance(existing, dict) and existing.get("sha"):
+        payload["sha"] = existing["sha"]
+    out = _api(url, token, "PUT", payload)
+    return (out or {}).get("commit", {}).get("sha")
+
+
 def _pending_orders() -> int:
     try:
         agent = (read_state(load_saved_token()) or {}).get("agent") or {}
@@ -305,8 +363,25 @@ def start(gh_token: str = "", gist_id: str = "", backend: str = "gist",
     )
     _state["thread"] = thread
     _state["mode"] = "activo" if token else "solo_lectura"
+    try:
+        publish_arena_link(base=f"http://127.0.0.1:{os.environ.get('PORT', '7860')}", token=token)
+    except Exception:
+        pass
     thread.start()
     return {**snapshot(), "ok": True}
+
+
+def autostart_if_possible(mcp_token: str = "") -> Dict[str, Any]:
+    """Arranca el canal sin intervención si ya hay credenciales guardadas.
+
+    Pensado para llamarse al iniciar el servidor: si el usuario configuró el secreto
+    una vez, cada sesión de Colab queda conectada sin pulsar nada.
+    """
+    if (os.environ.get("STUDIO_CHANNEL_AUTOSTART") or "1").strip() == "0":
+        return {"ok": False, "skipped": "autostart desactivado"}
+    if not load_saved_token():
+        return {"ok": False, "skipped": "sin credenciales guardadas"}
+    return start(mcp_token=mcp_token)
 
 
 def stop() -> Dict[str, Any]:

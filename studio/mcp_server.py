@@ -3842,6 +3842,40 @@ def api_mcp_github_channel(request: Request) -> Dict[str, Any]:
     return payload
 
 
+@mcp_router.get("/mcp/arena")
+def api_mcp_arena_alias(c: str = "") -> Dict[str, Any]:
+    """Enlace corto y estable para arena.ai.
+
+    La app publica este fichero en `channel/arena_link.json` de la rama del canal,
+    así que la URL que se le da al agente NUNCA cambia entre sesiones de Colab: no
+    hay que copiarla de la interfaz cada vez.
+    """
+    from studio import github_channel_service as channel
+
+    handoff = channel.agent_handoff("", channel.repo_slug(), "", "state")
+    handoff["enabled"] = channel.snapshot().get("running", False)
+    payload = {
+        "ok": True,
+        "what": "Canal de control de Studio IA (Studio-ai) por GitHub.",
+        "channel": handoff,
+        "usage": [
+            "GET a channel.read_url con Accept: application/vnd.github+json.",
+            "Decodifica content (base64) → JSON con 'agent' y 'app'.",
+            "Los resultados están en app.results / app.executed_ids.",
+            "Para dejar órdenes hace falta el token del usuario con Contents: read/write.",
+        ],
+    }
+    if c:
+        try:
+            import base64
+
+            payload["channel"].update(json.loads(
+                base64.urlsafe_b64decode((c + "=" * (-len(c) % 4)).encode()).decode()))
+        except (ValueError, UnicodeDecodeError):
+            payload["channel_error"] = "parámetro c inválido"
+    return payload
+
+
 @mcp_router.get("/mcp/emparejar")
 def api_mcp_pair(request: Request, c: str = "") -> Dict[str, Any]:
     """Página de emparejamiento que el agente lee: dónde está el buzón y cómo usarlo.

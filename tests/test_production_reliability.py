@@ -780,3 +780,49 @@ def test_github_channel_does_not_commit_to_git_unless_something_changed():
     # Contenido nuevo → se escribe una vez.
     box.write_app(["a", "b"], [{"id": "a"}, {"id": "b"}])
     assert len(writes) == 1
+
+
+def test_github_channel_can_autostart_without_user_actions(monkeypatch):
+    """Con credenciales ya guardadas, cada sesión de Colab queda conectada sola."""
+    import studio.github_channel_service as svc
+
+    monkeypatch.setattr(svc, "load_saved_token", lambda: "tok")
+    started = {}
+
+    def fake_start(**kwargs):
+        started.update(kwargs)
+        return {"ok": True, "mode": "activo"}
+
+    monkeypatch.setattr(svc, "start", fake_start)
+    monkeypatch.setenv("STUDIO_CHANNEL_AUTOSTART", "1")
+    out = svc.autostart_if_possible(mcp_token="t")
+    assert out["ok"] is True
+
+    # Sin credenciales no arranca nada (ni falla).
+    monkeypatch.setattr(svc, "load_saved_token", lambda: "")
+    started.clear()
+    out = svc.autostart_if_possible(mcp_token="t")
+    assert out["ok"] is False and "skipped" in out
+    assert started == {}
+
+    # Y se puede desactivar explícitamente.
+    monkeypatch.setenv("STUDIO_CHANNEL_AUTOSTART", "0")
+    monkeypatch.setattr(svc, "load_saved_token", lambda: "tok")
+    out = svc.autostart_if_possible(mcp_token="t")
+    assert out["ok"] is False and "skipped" in out
+
+
+def test_colab_secret_is_used_when_no_env_token(monkeypatch):
+    """El secreto de Colab (🔑) debe ser suficiente: una configuración por cuenta."""
+    import sys
+    import types
+
+    import studio.github_channel_service as svc
+
+    monkeypatch.delenv("STUDIO_CHANNEL_GH_TOKEN", raising=False)
+    fake_userdata = types.SimpleNamespace(get=lambda name: "ghp_desde_secreto" if name == "GH_TOKEN" else None)
+    monkeypatch.setitem(sys.modules, "google.colab", types.SimpleNamespace(userdata=fake_userdata))
+    monkeypatch.setitem(sys.modules, "google.colab.userdata", fake_userdata)
+    monkeypatch.setattr(svc, "_token_path", lambda: __import__("pathlib").Path("/nonexistent/x.json"))
+
+    assert svc.load_saved_token() == "ghp_desde_secreto"

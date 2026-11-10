@@ -194,8 +194,16 @@ permite `api.github.com`, `pypi.org` y `registry.npmjs.org`). La vía que funcio
 `Contents: read/write`, que aporta el usuario **una vez** y se guarda en
 `studio_data/state/github_channel.json` (0600, nunca en el repo).
 
-**Emparejamiento:** el panel MCP da una URL (`/mcp/emparejar?c=…`) que contiene solo la descripción
-del buzón. Se pega en el chat del agente **una vez**; el buzón es fijo entre arranques de Colab.
+**Emparejamiento sin pulsaciones, en dos capas:**
+
+1. **Credenciales.** El token puede venir de `Colab → 🔑 Secrets → GH_TOKEN`. Ese secreto pertenece a la
+   cuenta de Google, sobrevive a todas las sesiones y a los borrados de `/content`. Si existe, el canal
+   se enciende solo al arrancar el servidor (`autostart_if_possible`), sin abrir el panel ni pulsar nada.
+   Orden de búsqueda: entorno → Colab Secrets → `studio_data/state/github_channel.json`.
+2. **URL estable.** El buzón publica `channel/arena_link.json` con un enlace `/mcp/arena` que **no
+   cambia nunca**. Es la URL que se le pasa al agente una vez, no una por sesión.
+
+Se puede desactivar el autostart con `STUDIO_CHANNEL_AUTOSTART=0`.
 
 **Sin token no se ejecuta nada.** No es una limitación, es una protección: si la app ejecutase sin
 poder publicar el resultado, las órdenes se repetirían en cada sondeo y gastarían créditos en trabajos

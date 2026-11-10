@@ -283,6 +283,14 @@ def main() -> None:
     # viva en el proceso del servidor y la interfaz pueda mostrarlo y pararlo.
     gh_token = (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip()
     if not gh_token:
+        # Secreto persistente de Colab (🔑): se configura una vez y sobrevive.
+        try:
+            from google.colab import userdata  # type: ignore
+
+            gh_token = str(userdata.get(os.environ.get("STUDIO_CHANNEL_GH_SECRET", "GH_TOKEN")) or "").strip()
+        except Exception:
+            gh_token = ""
+    if not gh_token:
         for candidate in (data_dir / "state" / "github_channel.json",
                           data_dir / "state" / "github_channel_token.txt"):
             try:
@@ -301,10 +309,10 @@ def main() -> None:
     if gh_token:
         env["STUDIO_CHANNEL_GH_TOKEN"] = gh_token
     msg_channel = (
-        "🔗 CANAL PARA AGENTE arena.ai: listo · enciéndelo en el panel MCP (botón «Encender canal»)"
+        "🔗 CANAL PARA AGENTE arena.ai: ACTIVO AUTOMÁTICAMENTE (credenciales encontradas)"
         if gh_token else
-        "🔗 CANAL PARA AGENTE arena.ai: en el panel MCP pega un PAT con 'Contents: read/write' "
-        "y pulsa «Encender» (se guarda y no se vuelve a pedir)"
+        "🔗 CANAL PARA AGENTE arena.ai: sin credenciales. Configúralas UNA vez en Colab → 🔑 Secrets "
+        "→ nombre «GH_TOKEN», y a partir de ahí se enciende solo en cada sesión."
     )
 
     hw = initial_status.get("hardware", {})
@@ -340,6 +348,11 @@ def main() -> None:
     )
     msg_lines.append("─" * 74)
     msg_lines.append(msg_channel)
+    if not gh_token:
+        msg_lines.append(
+            "   ➜ Colab: 🔑 (panel izquierdo) → Secrets → nombre GH_TOKEN → pega el PAT → "
+            "«Notebook access». Una sola vez por cuenta."
+        )
     msg_lines.append(
         "   El agente escribe órdenes en channel/ordenes.json del repo y lee state/channel/resultados.json."
     )
