@@ -61,6 +61,7 @@ class Client:
         self.session_id: Optional[str] = None
         self._id = 0
         self.steps: List[Dict[str, Any]] = []
+        self.state_path = self.out_dir / "estado_test.json"
 
     # ---------------------------------------------------------------- JSON-RPC
     def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -118,6 +119,20 @@ class Client:
         if result.get("isError"):
             payload.setdefault("ok", False)
         return payload
+
+    def save_state(self, payload: Dict[str, Any]) -> None:
+        """Guarda lo ya generado: un corte de Colab no debe costar la GPU gastada."""
+        try:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def load_state(self) -> Dict[str, Any]:
+        try:
+            return json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     # ---------------------------------------------------------------- helpers
     def wait(self, job_id: str, label: str, budget_sec: float = 3600.0) -> Dict[str, Any]:
@@ -187,6 +202,8 @@ def main() -> int:
     ap.add_argument("--fast", action="store_true", help="Solo 2 clips y 3 keyframes (test rápido)")
     ap.add_argument("--from", dest="start_at", default="prepare",
                     choices=["prepare", "keyframes", "audit", "clips", "voices", "lipsync", "montage"])
+    ap.add_argument("--resume", action="store_true",
+                    help="Reutiliza los assets ya generados en --out (estado_test.json)")
     ap.add_argument("--timeout", type=float, default=90.0)
     args = ap.parse_args()
 
@@ -248,6 +265,20 @@ def main() -> int:
     voices: List[str] = []
     ambience: Optional[str] = None
     master: Optional[str] = None
+    if args.resume:
+        prev = cli.load_state()
+        frames = [f for f in (prev.get("frames") or []) if f]
+        clips = [c for c in (prev.get("clips") or []) if c]
+        voices = [v for v in (prev.get("voices") or []) if v]
+        ambience = prev.get("ambience")
+        master = prev.get("master")
+        if frames or clips:
+            print(f"Reanudando: {len(frames)} keyframes, {len(clips)} clips, {len(voices)} voces", flush=True)
+
+    def _persist() -> None:
+        cli.save_state({"frames": frames, "clips": clips, "voices": voices,
+                        "ambience": ambience, "master": master,
+                        "build": build, "updated": time.strftime("%Y-%m-%dT%H:%M:%S")})
 
     try:
         for step in steps:
@@ -263,6 +294,11 @@ def main() -> int:
                 continue
 
             if "keyframes" in active and tool == "studio_generate_or_edit_image":
+                import re as _re
+
+                _m = _re.search(r"FRAME_(\d+)_REL", str(step.get("save_output_as") or ""))
+                if _m and len(frames) >= int(_m.group(1)):
+                    continue  # ya generado en una ejecución anterior
                 filled = _fill(args_, {"<FRAME_1_REL>": frames[0] if frames else "", **{
                     f"<FRAME_{i}_REL>": (frames[i - 1] if len(frames) >= i else "") for i in range(1, 9)}})
                 done = cli.tool_and_wait(tool, filled, phase, budget_sec=1800)
@@ -271,6 +307,7 @@ def main() -> int:
                     print(f"  ✗ keyframe falló: {done.get('error') or done.get('error_code')}", flush=True)
                     return 1
                 frames.append(rel)
+                _persist()
                 print(f"  ✓ {rel}", flush=True)
                 cli.fetch(rel)
                 continue
@@ -291,6 +328,8 @@ def main() -> int:
                 continue
 
             if "clips" in active and tool == "studio_generate_video":
+                if len(clips) >= len(frames) - 1 and clips:
+                    continue
                 filled = _fill(args_, {**{f"<FRAME_{i}_REL>": (frames[i - 1] if len(frames) >= i else "")
                                          for i in range(1, 9)}})
                 done = cli.tool_and_wait(tool, filled, phase, budget_sec=5400)
@@ -299,6 +338,7 @@ def main() -> int:
                     print(f"  ✗ clip falló: {done.get('error') or done.get('error_code')}", flush=True)
                     return 1
                 clips.append(rel)
+                _persist()
                 print(f"  ✓ {rel} ({done.get('elapsed_seconds')}s)", flush=True)
                 cli.fetch(rel)
                 continue
@@ -314,12 +354,14 @@ def main() -> int:
                     done = cli.tool_and_wait(call.get("tool"), c_args, call.get("tool"), budget_sec=900)
                     rel = cli.asset(done)
                     if not rel:
-                        print(f"  ✗ {call.get('tool')} falló: {done.get('error') or done.get('error_code')}", flush=True)
-                        return 1
+                        print(f"  ✗ {call.get('tool')} falló: {done.get('error') or done.get('error_code')}"
+                              " (se continúa: el montaje saldrá sin esa pista)", flush=True)
+                        continue
                     if call.get("tool") == "studio_generate_music_or_sfx":
                         ambience = rel
                     else:
                         voices.append(rel)
+                    _persist()
                     print(f"  ✓ {rel}", flush=True)
                     cli.fetch(rel)
                 continue
@@ -356,6 +398,7 @@ def main() -> int:
                         done = cli.tool_and_wait("studio_render_montage", c_args, "montaje", budget_sec=1800)
                         master = cli.asset(done)
                         if master:
+                            _persist()
                             print(f"  ✓ MASTER {master}", flush=True)
                             cli.fetch(master)
                         else:
