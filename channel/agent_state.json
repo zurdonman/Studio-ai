@@ -14,7 +14,8 @@
   },
   "app": {
     "executed_ids": [
-      "diag-1"
+      "diag-1",
+      "diag-2"
     ],
     "results": [
       {
@@ -25,8 +26,17 @@
         "result": {
           "ok": true
         }
+      },
+      {
+        "id": "diag-2",
+        "verb": "get_state",
+        "ok": true,
+        "seconds": 0.0,
+        "result": {
+          "ok": true
+        }
       }
     ],
-    "updated": "2026-11-10T16:25:27Z"
+    "updated": "2026-11-10T16:31:17Z"
   }
 }
