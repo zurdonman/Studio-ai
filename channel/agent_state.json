@@ -3,7 +3,7 @@
   "agent": {
     "orders": [
       {
-        "id": "diag-2",
+        "id": "diag-3",
         "verb": "get_state",
         "args": {
           "include_recent_assets": true
@@ -13,30 +13,8 @@
     ]
   },
   "app": {
-    "executed_ids": [
-      "diag-1",
-      "diag-2"
-    ],
-    "results": [
-      {
-        "id": "diag-1",
-        "verb": "get_state",
-        "ok": true,
-        "seconds": 0.1,
-        "result": {
-          "ok": true
-        }
-      },
-      {
-        "id": "diag-2",
-        "verb": "get_state",
-        "ok": true,
-        "seconds": 0.0,
-        "result": {
-          "ok": true
-        }
-      }
-    ],
+    "executed_ids": [],
+    "results": [],
     "updated": "2026-11-10T16:31:17Z"
   }
 }
