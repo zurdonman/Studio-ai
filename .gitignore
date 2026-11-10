@@ -24,3 +24,4 @@ cloudflared
 cloudflared.exe
 *.log
 .DS_Store
+.venv

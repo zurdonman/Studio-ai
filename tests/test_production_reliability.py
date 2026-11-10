@@ -476,3 +476,81 @@ def test_explicit_clip_count_beats_a_duration_mentioned_in_the_text():
     assert infer("lo que sea, 30 segundos", 6)[0] == 6
     assert infer("dos personas andando", None)[0] == 2
     assert infer("x", 99)[0] == 12  # acotado al máximo del preset
+
+
+def test_small_video_model_stays_on_gpu_instead_of_cpu_offload(monkeypatch):
+    """Un 1.3B (~2.7 GB) en una L4 de 22 GB no debe pagar offload por paso.
+
+    El umbral usaba `min_vram_gb` de la RECETA (8 GB) como si fuera el tamaño del
+    modelo: eso activaba CPU offload con 21.8 GB libres y cada paso tardaba ~20 s.
+    """
+    import types
+
+    from studio.engines import video_engine
+
+    class _P:
+        def __init__(self, n):
+            self.n = n
+
+        def numel(self):
+            return self.n
+
+        def element_size(self):
+            return 2
+
+    calls = []
+
+    def _fake_module(n_bytes):
+        mod = types.SimpleNamespace()
+        mod.parameters = lambda: [_P(n_bytes // 2)]
+        return mod
+
+    pipe = types.SimpleNamespace(
+        transformer=_fake_module(int(1.9 * 1024**3)),
+        vae=_fake_module(int(0.25 * 1024**3)),
+        text_encoder=_fake_module(int(0.5 * 1024**3)),
+        to=lambda dev: calls.append(("to", dev)),
+        enable_model_cpu_offload=lambda: calls.append(("model_offload",)),
+        enable_sequential_cpu_offload=lambda: calls.append(("sequential_offload",)),
+        remove_all_hooks=lambda: calls.append(("remove_hooks",)),
+        vae2=None,
+    )
+    video_engine._apply_best_offload(pipe, vram_total_gb=22.03, min_vram_gb=8.0, job=None)
+    assert ("to", "cuda") in calls
+    assert not any(c[0].endswith("offload") for c in calls), calls
+
+    # Un 14B FP8 (~15.8 GB de pesos) sí necesita offload en 22 GB.
+    calls.clear()
+    big = types.SimpleNamespace(
+        transformer=_fake_module(int(14.0 * 1024**3)),
+        vae=_fake_module(int(0.6 * 1024**3)),
+        to=lambda dev: calls.append(("to", dev)),
+        enable_model_cpu_offload=lambda: calls.append(("model_offload",)),
+        enable_sequential_cpu_offload=lambda: calls.append(("sequential_offload",)),
+        remove_all_hooks=lambda: calls.append(("remove_hooks",)),
+    )
+    video_engine._apply_best_offload(big, vram_total_gb=22.03, min_vram_gb=15.8, job=None)
+    assert any(c[0].endswith("offload") for c in calls), calls
+
+
+def test_invalid_lora_checkpoint_is_retried_without_orphan_alpha():
+    """El ValueError de Diffusers se arregla quitando el `.alpha` suelto, no el adaptador."""
+    from studio.engines.video_engine import (
+        _drop_pure_alpha_keys,
+        _is_invalid_lora_checkpoint,
+    )
+    import numpy as np
+
+    exc = ValueError("Invalid LoRA checkpoint. Make sure all LoRA param names contain `'lora'` substring.")
+    assert _is_invalid_lora_checkpoint(exc)
+    assert not _is_invalid_lora_checkpoint(ValueError("otra cosa"))
+
+    sd = {
+        "diffusion_model.blocks.0.self_attn.q.lora_down.weight": np.ones((4, 4)),
+        "diffusion_model.blocks.0.self_attn.q.lora_up.weight": np.ones((4, 4)),
+        "diffusion_model.blocks.0.self_attn.q.alpha": np.float32(4.0),
+        "diffusion_model.bogus.alpha": np.float32(1.0),
+    }
+    clean = _drop_pure_alpha_keys(sd)
+    assert "diffusion_model.blocks.0.self_attn.q.lora_down.weight" in clean
+    assert not any(k.endswith(".alpha") for k in clean)

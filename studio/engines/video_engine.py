@@ -105,6 +105,21 @@ def _attach_vae_oom_guard(vae: Any) -> None:
     vae._studio_oom_guard_attached = True
 
 
+def _pipeline_weight_bytes(pipe: Any) -> int:
+    """VRAM que ocupa el pipeline residente (solo pesos, sin activaciones)."""
+    total = 0
+    for obj in ("transformer", "unet", "vae", "text_encoder", "text_encoder_2", "image_encoder"):
+        module = getattr(pipe, obj, None)
+        if module is None:
+            continue
+        try:
+            for param in module.parameters():
+                total += int(param.numel()) * int(param.element_size())
+        except (AttributeError, TypeError, RuntimeError):
+            continue
+    return total
+
+
 def _apply_best_offload(
     pipe: Any,
     vram_total_gb: float,
@@ -112,11 +127,36 @@ def _apply_best_offload(
     job: Optional[JobRecord] = None,
     pct: float = 90.0,
 ) -> None:
+    """Mantener el modelo en GPU si cabe.
+
+    `min_vram_gb` es el mínimo de la RECETA (8 GB en un 1.3B), no lo que el modelo
+    ocupa. Usarlo como umbral activaba offload de modelo completo en una L4 con
+    21.8 GB libres, y cada paso pagaba la transferencia: 20 s/paso en un 1.3B.
+    """
     if hasattr(pipe, "remove_all_hooks"):
         try:
             pipe.remove_all_hooks()
         except Exception:
             pass
+
+    weights_gb = _pipeline_weight_bytes(pipe) / (1024**3)
+    activations_gb = max(2.0, 0.55 * weights_gb)  # latents + atención a 832x480x81
+    needs_gb = weights_gb + activations_gb + 1.0  # + fragmentación
+
+    if vram_total_gb >= needs_gb and hasattr(pipe, "to"):
+        if job:
+            job.log(
+                f"Modelo residente en GPU: {weights_gb:.2f} GB de pesos + reserva de activaciones "
+                f"caben en {vram_total_gb:.1f} GB (sin CPU offload).",
+                progress=pct,
+                step="Modelo en GPU...",
+            )
+        try:
+            pipe.to("cuda")
+            return
+        except Exception as exc:  # si no cabe de verdad, se degrada con aviso
+            if job:
+                job.log(f"No se pudo mantener el modelo en GPU ({type(exc).__name__}); se aplica offload.", progress=pct)
 
     if vram_total_gb < min_vram_gb + 1.5 and hasattr(pipe, "enable_sequential_cpu_offload"):
         if job:
@@ -128,7 +168,12 @@ def _apply_best_offload(
         pipe.enable_sequential_cpu_offload()
     elif hasattr(pipe, "enable_model_cpu_offload"):
         if job:
-            job.log("Activando CPU Offload inteligente...", progress=pct, step="Activando CPU Offload...")
+            job.log(
+                f"Activando CPU Offload (pesos {weights_gb:.2f} GB + activaciones no caben en "
+                f"{vram_total_gb:.1f} GB): cada paso transferirá bloques.",
+                progress=pct,
+                step="Activando CPU Offload...",
+            )
         pipe.enable_model_cpu_offload()
     elif hasattr(pipe, "to"):
         pipe.to("cuda")
@@ -901,6 +946,31 @@ def _maybe_set_wan_flow_shift(pipe: Any, flow_shift: Optional[float]) -> None:
         pass
 
 
+def _is_invalid_lora_checkpoint(exc: Exception) -> bool:
+    """Diffusers exige que TODA clave del dict contenga "lora" o sea de norma.
+
+    Un `.alpha` suelto intenta satisfacerlo y aun así aborta el adaptador entero
+    (`ValueError: Invalid LoRA checkpoint...`), que es lo que tumbó el clip.
+    """
+    return "Invalid LoRA checkpoint" in str(exc)
+
+
+def _drop_pure_alpha_keys(sd: Dict[str, Any]) -> Dict[str, Any]:
+    """Quita `.alpha` sin su matriz: el alpha ya se plegó en el `lora_down`.
+
+    Solo se descartan los huérfanos; cualquier tensor con datos se conserva.
+    """
+    out: Dict[str, Any] = {}
+    for key, value in sd.items():
+        if key.endswith(".alpha"):
+            base = key[: -len(".alpha")]
+            if not any(f"{base}{suffix}" in sd for suffix in (".lora_down.weight", ".lora_A.weight")):
+                continue
+            continue  # escalado ya aplicado en _prepare_wan_lora_state_dict
+        out[key] = value
+    return out
+
+
 def _load_single_video_lora_onto_pipe(
     pipe: Any,
     engine: str,
@@ -927,9 +997,21 @@ def _load_single_video_lora_onto_pipe(
                 k: (v.to(torch_mod.bfloat16) if hasattr(v, "dtype") and v.is_floating_point() else v)
                 for k, v in clean_sd.items()
             }
-            guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name, low_cpu_mem_usage=True)
+            try:
+                guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name, low_cpu_mem_usage=True)
+            except ValueError as exc:
+                if not _is_invalid_lora_checkpoint(exc):
+                    raise
+                clean_sd = _drop_pure_alpha_keys(clean_sd)
+                guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name, low_cpu_mem_usage=True)
         else:
-            guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name)
+            try:
+                guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name)
+            except ValueError as exc:
+                if not _is_invalid_lora_checkpoint(exc):
+                    raise
+                clean_sd = _drop_pure_alpha_keys(clean_sd)
+                guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name)
     else:
         lora_kw: Dict[str, Any] = {
             "weight_name": lora_file.name,

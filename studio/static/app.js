@@ -16,6 +16,8 @@
     modelDiscovery: null,
     hfAuth: { has_token: false, masked_token: null, username: null },
     assets: { uploads: [], images: [], videos: [], audio: [], montages: [] },
+    assetsSignature: "",
+    assetsLoading: false,
     voices: [],
     jobs: [],
     selectedJobId: null,
@@ -160,6 +162,14 @@
       renderHfAuthStatus(snap.hf_auth);
       renderRuntimeStatus(snap.runtime);
       renderJobs(snap.jobs);
+      // Los trabajos que lanza el agente por MCP no pasan por la interfaz: si no se
+      // vuelven a leer los assets, sus imágenes y vídeos no aparecen nunca en las
+      // galerías hasta recargar. Se refresca solo cuando cambia el número o el último job.
+      const signature = `${(snap.jobs || []).length}:${(snap.jobs || [])[0]?.id || ""}:${(snap.jobs || [])[0]?.status || ""}`;
+      if (signature !== state.assetsSignature) {
+        state.assetsSignature = signature;
+        await loadAssets();
+      }
     } catch (_e) {
       // Silencioso en polling puntual
     }
@@ -1920,6 +1930,16 @@
   }
 
   async function loadAssets() {
+    if (state.assetsLoading) return;
+    state.assetsLoading = true;
+    try {
+      await _loadAssetsOnce();
+    } finally {
+      state.assetsLoading = false;
+    }
+  }
+
+  async function _loadAssetsOnce() {
     state.assets = await api("/api/assets");
     renderImageGallery();
     renderVideoSelectsAndGallery();

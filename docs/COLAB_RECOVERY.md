@@ -128,3 +128,35 @@ fijar la URL pública sin credenciales, porque Cloudflare llega siempre como `12
 cubre anónimo, UI del mismo host, `Origin` ajeno (CSRF), petición forzada sin cabecera de UI y cliente que ya
 presenta el token. Si tu instancia es anterior a este commit, el token que muestra la celda sigue siendo válido para
 cualquiera que haya visto la URL: reinicia para obtener uno nuevo.
+
+## Clip a 20 s/paso y LoRAs rápidos que no se cargan (sesión del 10-N)
+
+Tres causas distintas, las tres en el log `studio_ia_log_20261110_005200.md`.
+
+**1. CPU offload en una GPU sobrada.** Wan VACE 1.3B + su LoRA rondan 2,7 GB y la L4 tenía 21,8 GB
+libres, pero se activó `enable_model_cpu_offload()` y el clip se fue a **20,6 s por paso** (739 s para
+5 s de vídeo). El umbral comparaba la VRAM **total** con `min_vram_gb` de la *receta* (8 GB), que es el
+mínimo exigido, no lo que el modelo ocupa. Ahora se suman los pesos reales del pipeline (`transformer`,
+`vae`, `text_encoder`) más una reserva de activaciones y solo se hace offload si no caben; si no cabe,
+el aviso dice cuántos GB son y por qué.
+
+**2. El LoRA rápido abortaba entero.** `ValueError: Invalid LoRA checkpoint. Make sure all LoRA param
+names contain 'lora' substring.` Diffusers recorre el dict y exige que **toda** clave contenga `lora`;
+un `.alpha` huérfano del export vale para satisfacer esa comprobación y aun así tumba el adaptador.
+Ahora, ante ese error concreto, se reintenta una vez sin los `.alpha` huérfanos (el alpha ya está plegado
+en el `lora_down`). El clip anterior se generó con `active_lora_id: null`: 30 pasos a CFG 5 en vez de los
+6-8 pasos destilados.
+
+**3. El mismo clip se lanzó dos veces.** Los jobs 18 y 19 usaban los mismos fotogramas y el mismo prompt:
+el segundo esperó en cola 12 minutos para repetir trabajo idéntico. `studio_generate_video` ahora calcula
+una clave de deduplicación (modelo, LoRA, prompt, fotogramas, duración, fps y pasos) y devuelve el trabajo
+que ya está corriendo en vez de encolar otro.
+
+**4. La interfaz no mostraba lo que generaba el agente.** `pollStatus` refrescaba hardware, trabajos y
+compatibilidad, pero nunca volvía a pedir `/api/assets`: las imágenes y los clips generados por MCP no
+aparecían en las galerías hasta recargar la página. Ahora, cuando cambia el número o el estado del último
+trabajo, se recargan los assets (con guarda para no solapar peticiones).
+
+Y una decisión de capacidad: el 14B FP8 + 3 adaptadores necesita 44,47 GiB de RAM y la sesión tenía
+48,43 libres con 5,30 de reserva, así que **no** entró (`MEMORY_BUDGET_EXCEEDED`). Ese rechazo es correcto:
+bajar de 14B a 1.3B fue lo que dejó el clip en 739 s.

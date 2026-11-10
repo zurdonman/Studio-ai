@@ -13,6 +13,7 @@ y en la barra de actividad de la interfaz web.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -2417,9 +2418,31 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                         extra={"disk_check": space},
                     )
 
+        # El mismo clip (mismos fotogramas, modelo y prompt) se espera, no se repite:
+        # en producción el agente relanzó el clip 1 mientras el 1 seguía corriendo.
+        video_dedup = "video:" + hashlib.sha1(
+            json.dumps(
+                {
+                    "mode": mode,
+                    "sub": sub,
+                    "model": model_id,
+                    "lora": requested_lora_id,
+                    "extra": sorted(requested_extra_loras),
+                    "prompt": prompt,
+                    "img": str(img_p),
+                    "end": str(end_img_p),
+                    "dur": round(duration_sec, 3),
+                    "fps": fps,
+                    "steps": steps,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
         job = job_manager.submit(
             kind="video",
             title=f"[MCP] Vídeo ({sub} · {model_id}): {(prompt or 'animación')[:34]}",
+            dedup_key=video_dedup,
             fn=lambda j: generate_video_clip(
                 mode=mode,
                 video_submode=sub,
