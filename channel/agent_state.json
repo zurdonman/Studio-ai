@@ -1,15 +1,21 @@
 {
   "schema": 1,
   "agent": {
-    "orders": []
+    "orders": [
+      {
+        "id": "diag-1",
+        "verb": "get_state",
+        "args": {
+          "include_recent_assets": false
+        },
+        "wait": false
+      }
+    ]
   },
   "app": {
-    "executed_ids": [
-      "r1",
-      "r2"
-    ],
+    "executed_ids": [],
     "results": [],
     "updated": "2026-11-05T00:00:00Z",
-    "note": "canal de Studio IA \u00b7 rama de estado, no contiene c\u00f3digo"
+    "note": "buzón de diagnóstico · rama de estado, no contiene código"
   }
 }
