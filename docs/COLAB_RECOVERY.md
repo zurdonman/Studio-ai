@@ -226,3 +226,20 @@ habría dejado ~4.300 comités al día en la rama del canal.
 
 Límites: 20 s de latencia como máximo, y si la sesión de Colab muere el agente deja de recibir
 resultados. La app publica un latido en `app.updated`.
+
+## El panel se quedaba en «Comprobando…»
+
+Causa real: el endpoint de estado llamaba a `userdata.get()` (Colab Secrets) en **cada** consulta. En
+Colab esa llamada puede quedarse esperando la autorización del usuario —a veces con el diálogo detrás del
+notebook—, así que la interfaz nunca recibía respuesta.
+
+Corregido en tres capas, porque una sola no basta:
+
+1. El secreto se lee **una vez por proceso** y se cachea; los endpoints de la interfaz no lo consultan
+   nunca (`has_token()` no bloquea).
+2. La lectura inicial ocurre en un hilo aparte al arrancar, fuera del camino de la UI.
+3. Todas las peticiones a GitHub tienen `timeout` (8 s) y la interfaz aborta a los 8 s mostrando
+   «Reintentar» en lugar de un texto fijo.
+
+Si vuelve a pasar, el panel ahora dice **por qué**: token inválido (401), sin acceso al repo, o
+servidor ocupado.

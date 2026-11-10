@@ -33,6 +33,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 _lock = threading.Lock()
+# Nada de lo que hace el canal puede colgar la interfaz: el READ de estado usa el
+# token del usuario y, si ese token es inválido, GitHub puede tardar. El sondeo corre
+# en su propio hilo, así que el límite es holgura, no supervivencia.
+HTTP_TIMEOUT = float(os.environ.get("STUDIO_CHANNEL_HTTP_TIMEOUT", "8"))
 STATE_BRANCH_DEFAULT = "studio-channel"
 STATE_PATH_DEFAULT = "channel/agent_state.json"
 
@@ -67,22 +71,46 @@ def _token_path() -> Path:
 COLAB_SECRET_NAME = os.environ.get("STUDIO_CHANNEL_GH_SECRET", "GH_TOKEN")
 
 
-def _from_colab_secrets() -> str:
+# `userdata.get()` puede BLOQUEARSE en Colab esperando autorización del usuario.
+# Por eso se consulta una sola vez por proceso y nunca en el camino de la interfaz:
+# si se llamase en cada GET, el panel se quedaría en «comprobando» para siempre.
+_secret_cache: Dict[str, Any] = {"checked": False, "value": ""}
+
+
+def _from_colab_secrets(force: bool = False) -> str:
     """Lee el token del gestor de secretos de Colab (persistente entre sesiones)."""
+    if _secret_cache["checked"] and not force:
+        return str(_secret_cache["value"])
+    value = ""
     try:
         from google.colab import userdata  # type: ignore
 
-        value = userdata.get(COLAB_SECRET_NAME)
-        return str(value or "").strip()
+        value = str(userdata.get(COLAB_SECRET_NAME) or "").strip()
     except Exception:
-        return ""
+        value = ""
+    _secret_cache.update({"checked": True, "value": value})
+    return value
+
+
+def has_token() -> bool:
+    """¿Hay credenciales? Sin bloquearse NUNCA: no consulta Colab Secrets si aún no
+    se ha leído. Lo usan los endpoints de la interfaz, que deben responder ya."""
+    if (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip():
+        return True
+    if str(_secret_cache.get("value") or ""):
+        return True
+    try:
+        return _token_path().exists()
+    except OSError:
+        return False
 
 
 def token_source() -> str:
     """De dónde sale el token: para poder decírselo al usuario sin exponerlo."""
     if (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip():
         return "entorno"
-    if _from_colab_secrets():
+    cached = str(_secret_cache.get("value") or "")
+    if cached:
         return "colab_secrets"
     if _token_path().exists():
         return "disco_local"
@@ -98,7 +126,7 @@ def load_saved_token() -> str:
     env = (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip()
     if env:
         return env
-    secret = _from_colab_secrets()
+    secret = _from_colab_secrets(force=True)
     if secret:
         return secret
     legacy = _token_path().with_name("github_channel_token.txt")
@@ -195,12 +223,14 @@ def _api(url: str, token: str, method: str = "GET",
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=25) as resp:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             body = resp.read().decode("utf-8", "replace")
         return json.loads(body) if body.strip() else {}
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
+        if exc.code in (401, 403):
+            return {"__http_error__": exc.code}
         raise
     except (urllib.error.URLError, OSError):
         return None
@@ -258,6 +288,10 @@ def _loop(interval: float, repo: str, branch: str, backend: str, _unused: str,
     ch = _channel_module()
     counted: set = set()
     ledger = _load_ledger()
+    try:
+        publish_arena_link(base=base, token=load_saved_token())
+    except Exception:
+        pass
 
     def _on_result(entry: Dict[str, Any]) -> None:
         oid = str(entry.get("id") or "")
@@ -374,12 +408,45 @@ def start(gh_token: str = "", gist_id: str = "", backend: str = "gist",
     )
     _state["thread"] = thread
     _state["mode"] = "activo" if token else "solo_lectura"
-    try:
-        publish_arena_link(base=f"http://127.0.0.1:{os.environ.get('PORT', '7860')}", token=token)
-    except Exception:
-        pass
+    # El enlace estable se publica desde el hilo del canal, nunca dentro de la petición
+    # HTTP: si GitHub tarda, la interfaz no debe esperar.
+
     thread.start()
     return {**snapshot(), "ok": True}
+
+
+def probe(gh_token: str = "") -> Dict[str, Any]:
+    """Valida el token y el buzón sin encender nada. Respuesta rápida para la UI.
+
+    Devuelve qué puede hacer el token (leer, escribir, crear ramas) para que el
+    panel pueda decir «falta permiso X» en vez de quedarse en «comprobando».
+    """
+    token = (gh_token or "").strip() or load_saved_token()
+    if not token:
+        return {"ok": False, "error_code": "NO_GITHUB_TOKEN",
+                "error": "Sin token: solo se podrían leer órdenes, no publicar resultados."}
+    repo = repo_slug()
+    result: Dict[str, Any] = {"ok": True, "repo": repo, "branch": state_branch(), "can_write": False}
+    me = _api("https://api.github.com/user", token)
+    if me is None or (isinstance(me, dict) and me.get("__http_error__") == 401):
+        return {"ok": False, "error_code": "TOKEN_INVALIDO",
+                "error": "GitHub rechazó el token (401). Caducado, revocado o mal copiado."}
+    result["user"] = (me or {}).get("login", "")
+    meta = _api(f"https://api.github.com/repos/{repo}", token) or {}
+    perms = (meta or {}).get("permissions") or {}
+    result["can_write"] = bool(perms.get("push") or perms.get("maintain") or perms.get("admin"))
+    if isinstance(meta, dict) and meta.get("__http_error__"):
+        return {"ok": False, "error_code": "SIN_ACCESO_AL_REPO",
+                "error": f"El token no tiene acceso a {repo} (HTTP {meta['__http_error__']})."}
+    state = read_state(token)
+    result["state_readable"] = bool(state)
+    result["pending_orders"] = len(((state or {}).get("agent") or {}).get("orders") or [])
+    if not result["can_write"]:
+        result.update({
+            "ok": False, "error_code": "SIN_PERMISO_ESCRITURA",
+            "error": "El token no puede escribir en el repositorio: revisa Contents: read/write.",
+        })
+    return result
 
 
 def autostart_if_possible(mcp_token: str = "") -> Dict[str, Any]:

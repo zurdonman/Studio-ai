@@ -5,6 +5,7 @@ import os
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import shutil
+import threading
 import time
 import uuid
 import zipfile
@@ -102,14 +103,18 @@ STATIC_DIR = Path(__file__).resolve().parent / "studio" / "static"
 async def studio_lifespan(_app: FastAPI):
     model_discovery.start()
     memory_manager.start()
-    try:
-        # Canal de control por GitHub: si el usuario ya configuró el secreto (una vez),
-        # se enciende solo en cada sesión. Sin credenciales no hace nada.
-        from studio import github_channel_service as _channel
+    # Canal de control por GitHub: puede tardar (Colab Secrets puede pedir permisos),
+    # así que se hace en un hilo y NUNCA bloquea el arranque ni la interfaz.
+    def _start_channel() -> None:
+        try:
+            from studio import github_channel_service as _channel
 
-        _channel.autostart_if_possible(mcp_token=os.environ.get("STUDIO_MCP_TOKEN", ""))
-    except Exception:
-        pass
+            _channel.load_saved_token()  # una sola lectura, cacheada
+            _channel.autostart_if_possible(mcp_token=os.environ.get("STUDIO_MCP_TOKEN", ""))
+        except Exception:
+            pass
+
+    threading.Thread(target=_start_channel, name="channel-boot", daemon=True).start()
     try:
         yield
     finally:

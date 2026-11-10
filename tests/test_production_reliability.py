@@ -826,3 +826,28 @@ def test_colab_secret_is_used_when_no_env_token(monkeypatch):
     monkeypatch.setattr(svc, "_token_path", lambda: __import__("pathlib").Path("/nonexistent/x.json"))
 
     assert svc.load_saved_token() == "ghp_desde_secreto"
+
+
+def test_channel_status_endpoint_never_waits_for_colab_secrets(monkeypatch):
+    """El panel no puede quedarse en «comprobando» porque Colab pida autorización."""
+    import sys
+    import time
+    import types
+
+    import studio.github_channel_service as svc
+
+    def blocking_get(name):
+        time.sleep(30)  # simula la espera de autorización de Colab
+        return "ghp_nunca"
+
+    fake = types.SimpleNamespace(get=blocking_get)
+    monkeypatch.setitem(sys.modules, "google.colab", types.SimpleNamespace(userdata=fake))
+    monkeypatch.setitem(sys.modules, "google.colab.userdata", fake)
+    monkeypatch.delenv("STUDIO_CHANNEL_GH_TOKEN", raising=False)
+    monkeypatch.setattr(svc, "_token_path", lambda: __import__("pathlib").Path("/nonexistent/x.json"))
+    monkeypatch.setattr(svc, "_secret_cache", {"checked": False, "value": ""})
+
+    started = time.time()
+    assert svc.has_token() is False
+    assert svc.token_source() == "ninguna"
+    assert time.time() - started < 1.0, "la comprobación de estado debe ser instantánea"

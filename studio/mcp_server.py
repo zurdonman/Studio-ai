@@ -3812,7 +3812,7 @@ def api_mcp_github_channel(request: Request) -> Dict[str, Any]:
     repo = (os.environ.get("STUDIO_CHANNEL_REPO") or "zurdonman/Studio-ai").strip()
     branch = (os.environ.get("STUDIO_CHANNEL_BRANCH") or "arena/f0997b49-studio-ai").strip()
     state = channel.snapshot()
-    token_present = bool(channel.load_saved_token())
+    token_present = channel.has_token()
     gist_id = state.get("gist_id") or ""
     payload: Dict[str, Any] = {
         "ok": True,
@@ -3915,6 +3915,16 @@ def api_mcp_pair(request: Request, c: str = "") -> Dict[str, Any]:
         except (ValueError, UnicodeDecodeError):
             payload["channel_error"] = "parámetro c inválido"
     return payload
+
+
+@mcp_router.post("/api/mcp/github-channel/probe")
+def api_mcp_github_channel_probe(request: Request, payload: GitHubChannelReq) -> Dict[str, Any]:
+    """Comprueba el token en segundos, sin encender el canal (respuesta inmediata)."""
+    from studio import github_channel_service as channel
+
+    if not _caller_is_trusted(request):
+        raise HTTPException(status_code=403, detail="Solo la interfaz de esta instancia puede probar el token.")
+    return channel.probe(payload.gh_token)
 
 
 @mcp_router.post("/api/mcp/github-channel/start")
