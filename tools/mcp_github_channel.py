@@ -43,6 +43,9 @@ DEFAULT_REPO = "zurdonman/Studio-ai"
 DEFAULT_ORDERS = "channel/ordenes.json"
 DEFAULT_RESULTS = "state/channel/resultados.json"
 
+# Latido máximo: sin cambios reales no se escribe más de una vez cada 10 minutos.
+HEARTBEAT_SECONDS = 600
+
 # Lista CERRADA de verbos. Si una orden pide otra cosa, se rechaza y se reporta.
 ALLOWED_VERBS = {
     "get_state",
@@ -174,6 +177,22 @@ class StateMailbox:
         if not self.token:
             raise RuntimeError("sin token de GitHub no se pueden publicar resultados")
         current = self.read() or {"schema": 1, "agent": {"orders": []}}
+        previous = dict(current.get("app") or {})
+        # Solo se escribe cuando hay algo nuevo: un comité por sondeo ensuciaría el
+        # repositorio para siempre y no aporta nada. El latido va aparte y espaciado.
+        same_results = (previous.get("executed_ids") == ids
+                        and len(previous.get("results") or []) == len(results))
+        last_beat = 0.0
+        try:
+            stamp = str(previous.get("updated") or "")
+            if stamp:
+                import calendar
+
+                last_beat = calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+        except (ValueError, TypeError):
+            last_beat = 0.0
+        if same_results and (time.time() - last_beat) < HEARTBEAT_SECONDS:
+            return
         current["app"] = {
             "executed_ids": ids,
             "results": results[-200:],

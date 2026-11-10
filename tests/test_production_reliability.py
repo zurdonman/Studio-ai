@@ -751,3 +751,32 @@ def test_github_channel_reads_orders_without_any_token():
         raise AssertionError("sin token no se debe poder publicar")
     except RuntimeError:
         pass
+
+
+def test_github_channel_does_not_commit_to_git_unless_something_changed():
+    """Publicar resultados no debe crear un comité por sondeo (ensuciaría el repo)."""
+    import importlib.util
+    import time
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "mcp_github_channel.py"
+    spec = importlib.util.spec_from_file_location("mcp_gh_beat", path)
+    ch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ch)
+
+    writes = []
+    box = ch.StateMailbox("zurdonman/Studio-ai", "studio-channel", "channel/agent_state.json", "tok")
+    box.read = lambda: {"schema": 1, "agent": {"orders": []},
+                        "app": {"executed_ids": ["a"], "results": [{"id": "a"}],
+                                "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}}
+    # El GET previo (para el sha) no cuenta: solo interesa el PUT que crea comité.
+    ch._gh_api = lambda url, token, method="GET", payload=None: (
+        writes.append(payload) if method == "PUT" else {"sha": "x"})
+
+    # Mismo contenido y latido reciente → no se escribe nada.
+    box.write_app(["a"], [{"id": "a"}])
+    assert writes == []
+
+    # Contenido nuevo → se escribe una vez.
+    box.write_app(["a", "b"], [{"id": "a"}, {"id": "b"}])
+    assert len(writes) == 1

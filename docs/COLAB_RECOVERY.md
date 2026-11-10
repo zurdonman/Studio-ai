@@ -212,5 +212,9 @@ colateral: los resultados no pasan por `main`.
 media, estados de trabajo) son legibles por cualquiera que sepa la URL. Si eso importa, el modo
 `privado` (`backend=repo` sobre repo privado) requiere que el agente tenga también token de lectura.
 
+**No se escribe si no hay novedades.** La app solo crea un comité cuando hay resultados nuevos; el
+latido (`app.updated`) se refresca como mucho cada 10 minutos. Sin esta guarda, un sondeo cada 20 s
+habría dejado ~4.300 comités al día en la rama del canal.
+
 Límites: 20 s de latencia como máximo, y si la sesión de Colab muere el agente deja de recibir
 resultados. La app publica un latido en `app.updated`.
