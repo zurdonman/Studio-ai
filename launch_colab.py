@@ -138,9 +138,21 @@ def start_cloudflared_tunnel(port: int, diagnostics: DiagnosticSession | None = 
     return proc, (public_url[0] if public_url else None)
 
 
-def wait_for_local_server(port: int, timeout: float = 35.0) -> dict | None:
+def wait_for_local_server(port: int, timeout: float = 35.0,
+                          proc: "subprocess.Popen | None" = None) -> dict | None:
+    """Espera a que el servidor responda.
+
+    Si el hijo muere, se corta la espera de inmediato: antes se quedaba 35 s
+    reintentando contra un proceso que ya no existía, con un `KeyboardInterrupt`
+    de fondo que ocultaba el error de verdad.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            print(f"❌ El servidor terminó con código {proc.returncode} antes de responder.", flush=True)
+            print("   La traza real está unas líneas más arriba; el fichero server.log tiene el detalle.",
+                  flush=True)
+            return None
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=2) as resp:
                 if resp.status == 200:
@@ -253,7 +265,7 @@ def main() -> None:
     log_thread = threading.Thread(target=_stream_server_logs, daemon=True)
     log_thread.start()
 
-    initial_status = wait_for_local_server(PORT, timeout=35.0)
+    initial_status = wait_for_local_server(PORT, timeout=35.0, proc=server_proc)
     if not initial_status:
         print("❌ El servidor tardó demasiado en responder.", flush=True)
         _stop_process(server_proc)

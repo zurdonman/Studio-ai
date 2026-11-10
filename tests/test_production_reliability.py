@@ -950,3 +950,24 @@ def test_channel_result_is_capped_so_the_buzon_stays_small():
     out = ch._compact(huge, "get_workflow_preset")
     assert len(json.dumps(out, ensure_ascii=False)) < ch.MAX_PUBLISHED_CHARS
     assert out.get("truncated") is True
+
+
+def test_compat_patches_never_block_boot(tmp_path, monkeypatch):
+    """Un parche opcional que falle no puede impedir que arranque el servidor."""
+    import socket
+    import sys
+
+    import studio.compat_patches as cp
+    import studio.memory_safety_hooks as hooks
+
+    def boom():
+        socket.create_connection(("127.0.0.1", 1), timeout=0.2)
+
+    # peft no se importa durante el arranque: era lo que abría conexiones de red.
+    monkeypatch.delitem(sys.modules, "peft", raising=False)
+    cp._patch_peft_integrations()
+    assert "peft" not in sys.modules
+
+    monkeypatch.setattr(cp, "_patch_peft_integrations", boom)
+    monkeypatch.setattr(hooks, "install_memory_safety_hooks", boom)
+    cp.apply_runtime_compatibility_patches()  # no debe lanzar

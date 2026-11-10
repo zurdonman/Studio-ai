@@ -121,10 +121,13 @@ def ensure_patchable_runtime(*, modules: Optional[Iterable[str]] = None) -> dict
 
 
 def _patch_peft_integrations() -> None:
-    try:
-        import peft.utils.integrations as integrations  # type: ignore
-    except Exception:
-        # Optional in the CPU application; try again on the next model load.
+    # NO importar `peft` aquí si aún no está cargado. En algunos entornos su primera
+    # importación abre conexiones de red (descubrimiento de integraciones) y un fallo
+    # de red tumbaba el arranque COMPLETO de la aplicación antes de existir, con un
+    # ConnectionRefusedError que parecía venir del lanzador. Es un parche opcional:
+    # si peft llega después, se aplica al cargar el modelo.
+    integrations = sys.modules.get("peft.utils.integrations")
+    if integrations is None:
         return
 
     original = getattr(integrations, "init_empty_weights", None)
@@ -147,27 +150,47 @@ def _patch_peft_integrations() -> None:
 
 
 def apply_runtime_compatibility_patches() -> None:
-    """Idempotent, including when optional GPU dependencies are installed later."""
+    """Idempotent, including when optional GPU dependencies are installed later.
+
+    Cada paso es PRESCINDIBLE: si un parche opcional falla (por ejemplo, porque una
+    dependencia intenta usar la red), se registra un aviso y la aplicación sigue
+    arrancando. Antes, una excepción aquí impedía abrir el servidor y el lanzador
+    solo mostraba un «Connection refused» que ocultaba la causa real.
+    """
     with _PATCH_LOCK:
         try:
             import torch  # type: ignore
         except ImportError:
             return
 
+        def _safe(label: str, fn) -> None:
+            try:
+                fn()
+            except Exception as exc:  # un parche nunca debe bloquear el arranque
+                LOGGER.warning("Parche de compatibilidad omitido (%s): %s", label, exc)
+
         parameter_cls = getattr(getattr(torch, "nn", None), "Parameter", None)
         if isinstance(parameter_cls, type):
-            _wrap_parameter_subclass_new(parameter_cls)
-        try:
+            _safe("Parameter.__new__", lambda: _wrap_parameter_subclass_new(parameter_cls))
+
+        def _patch_bnb() -> None:
             import bitsandbytes as bnb  # type: ignore
-        except Exception:
-            bnb = None
-        if bnb is not None:
             # These subclasses override __new__ and bypass Parameter.__new__.
             for name in ("Params4bit", "Int8Params"):
                 cls = getattr(getattr(bnb, "nn", None), name, None)
                 if isinstance(cls, type):
                     _wrap_parameter_subclass_new(cls)
 
-        _patch_peft_integrations()
-        from studio.memory_safety_hooks import install_memory_safety_hooks
-        install_memory_safety_hooks()
+        try:
+            import bitsandbytes  # noqa: F401
+            _safe("bitsandbytes", _patch_bnb)
+        except Exception:
+            pass
+
+        _safe("peft.integrations", _patch_peft_integrations)
+
+        def _hooks() -> None:
+            from studio.memory_safety_hooks import install_memory_safety_hooks
+            install_memory_safety_hooks()
+
+        _safe("memory_safety_hooks", _hooks)
