@@ -3682,11 +3682,72 @@ python3 studio_mcp.py --cli studio_export_session_log '{{"format": "md"}}'
     return PlainTextResponse(content=guide, media_type="text/markdown; charset=utf-8")
 
 
+# La UI se identifica con `X-Studio-UI: 1` y el navegador añade su Origin al mismo host.
+_UI_HEADER = "x-studio-ui"
+
+
+def _request_origin(request: Request) -> str:
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+    return f"{proto}://{host}".rstrip("/") if host else ""
+
+
+def _caller_is_trusted(request: Request) -> bool:
+    """Quién puede recibir el token: la UI servida por ESTE host, o quien ya lo presenta.
+
+    La IP del cliente no sirve como criterio: detrás de Cloudflare/Colab todas las
+    peticiones llegan como 127.0.0.1. Se exige coincidencia de `Origin`/`Referer` con el
+    host público y la cabecera `X-Studio-UI` que añade el propio panel.
+    """
+    provided = ""
+    auth_hdr = request.headers.get("authorization") or ""
+    if auth_hdr.lower().startswith("bearer "):
+        provided = auth_hdr[7:].strip()
+    provided = provided or (request.headers.get("x-studio-token") or "").strip()
+    provided = provided or (request.query_params.get("token") or "").strip()
+    expected = get_expected_mcp_token()
+    if expected and provided and secrets.compare_digest(provided, expected):
+        return True
+    ui_header = (request.headers.get(_UI_HEADER) or "").strip().lower()
+    if ui_header != "1":
+        return False
+    ours = _request_origin(request)
+    if not ours:
+        return False
+    for candidate in ((request.headers.get("origin") or "").strip(), (request.headers.get("referer") or "").strip()):
+        if candidate and (candidate == ours or candidate.startswith(ours + "/")):
+            return True
+    return False
+
+
+def _redacted_connection_details(request: Request) -> Dict[str, Any]:
+    details = get_mcp_connection_details(request)
+    public = dict(details)
+    public["token"] = ""
+    public["token_required"] = bool(details.get("token"))
+    public["mcp_url_with_token"] = details.get("mcp_endpoint") or ""
+    public["agent_guide_url"] = (details.get("agent_guide_url") or "").split("?")[0]
+    public["bridge_preconfigured_url"] = details.get("bridge_script_url") or ""
+    public["commands"] = {
+        key: "(oculto: abre el panel MCP desde este mismo dominio para copiar los comandos)"
+        for key in (details.get("commands") or {})
+    }
+    return public
+
+
 @mcp_router.get("/api/mcp/info")
 def api_get_mcp_info(request: Request) -> Dict[str, Any]:
+    """Identidad de la instancia. El token SOLO se entrega a la UI del propio host o a quien ya lo presenta.
+
+    Antes esta ruta devolvía el token a cualquiera que conociera la URL del túnel, y el túnel
+    es público: con ese token se podía lanzar cualquier herramienta MCP (descargas, renders).
+    """
+    trusted = _caller_is_trusted(request)
+    details = get_mcp_connection_details(request) if trusted else _redacted_connection_details(request)
     return {
         "ok": True,
-        **get_mcp_connection_details(request),
+        **details,
+        "token_exposed": trusted,
         "workflow_presets": list_agent_workflow_presets(),
     }
 

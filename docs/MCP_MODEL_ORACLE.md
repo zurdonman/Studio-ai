@@ -234,6 +234,7 @@ Máximo dos reintentos del mismo trabajo; al segundo, `studio_export_session_log
 - `GET /api/memory/status` (vigilancia, presión, reserva y modelos protegidos)
 - `GET /api/runtime/status` (si el proceso tuvo que recargar frameworks por los parches de compatibilidad, y `build` con el commit real)
 - `GET /api/preferences` / `POST /api/preferences` (las mismas preferencias que guarda el agente)
+- `GET /api/mcp/info` devuelve el token **solo** a la UI del propio host (`X-Studio-UI: 1` + `Origin` coincidente) o a quien ya lo presenta; un tercero recibe `token_exposed: false` y los comandos ocultos. El token se regenera en cada arranque.
 - `GET /api/models/discovery/status`
 - `POST /api/models/discovery/settings` con `{"auto_refresh":true,"interval_minutes":360}`
 - `POST /api/models/discovery/refresh` con `{"category":"all"}` → job, no pesos.

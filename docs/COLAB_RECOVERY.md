@@ -106,3 +106,25 @@ Estos logs sobreviven a una caída del proceso **mientras exista la misma VM/dis
 5. Para ~30 s se necesitan aproximadamente seis tramos de 5 s y siete keyframes, ajustando duración real por frames/fps y montaje; tres keyframes solo dan dos transiciones. Revisar el número de clips del preset antes de ejecutarlo.
 
 Las regresiones de CPU verifican contratos, redacción, salida del hijo, recuperación y ausencia de reenvíos/descargas. **La inferencia Wan 14B con el cargador corregido sigue pendiente de validación en la L4 real.**
+
+## `/api/mcp/info` filtraba el token MCP (corregido)
+
+**Síntoma:** cualquier persona con la URL pública del túnel (`*.trycloudflare.com`, sin token) podía abrir
+`/api/mcp/info` y recibir el token en claro *y* los comandos listos para usarlo. Con ese token se pueden lanzar
+herramientas MCP: descargas de pesos, renders de vídeo, exportaciones. Además, `/api/mcp/tunnel-info` permitía
+fijar la URL pública sin credenciales, porque Cloudflare llega siempre como `127.0.0.1` y la comprobación
+"es local" daba por bueno a cualquiera.
+
+**Corrección:**
+
+- El token solo se entrega si la petición trae `X-Studio-UI: 1` (lo pone el panel) **y** su `Origin`/`Referer`
+  coincide con el host público, o si quien pregunta ya presenta el token. Un tercero recibe `token_exposed: false`
+  con los comandos ocultos, así que el panel sigue funcionando dentro de la app.
+- La IP del cliente ya no se usa como prueba de confianza: detrás de túnel siempre es `127.0.0.1`.
+- El token se **regenera en cada arranque** de `launch_colab.py`, de modo que uno filtrado queda inutilizado al reiniciar.
+  El token solo aparece en la celda de Colab, que es el canal privado del usuario.
+
+**Verificación:** `tests/test_production_reliability.py::test_public_mcp_info_never_hands_the_token_to_a_stranger`
+cubre anónimo, UI del mismo host, `Origin` ajeno (CSRF), petición forzada sin cabecera de UI y cliente que ya
+presenta el token. Si tu instancia es anterior a este commit, el token que muestra la celda sigue siendo válido para
+cualquiera que haya visto la URL: reinicia para obtener uno nuevo.

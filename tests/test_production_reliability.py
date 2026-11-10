@@ -398,3 +398,69 @@ def test_audit_script_accepts_the_link_the_user_pastes():
     url2, token2 = module._split_link("https://abc.trycloudflare.com", "st_mcp_x")
     assert url2 == "https://abc.trycloudflare.com" and token2 == "st_mcp_x"
     assert "st_mcp" not in module._redact("token=st_mcp_secret and st_mcp_secret")
+
+
+def test_public_mcp_info_never_hands_the_token_to_a_stranger():
+    """The tunnel URL is public: /api/mcp/info must not leak the token to anyone."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from studio import mcp_server
+
+    token = "st_mcp_auditsecret0123456789"
+    previous = __import__("os").environ.get("STUDIO_MCP_TOKEN")
+    __import__("os").environ["STUDIO_MCP_TOKEN"] = token
+    try:
+        probe = FastAPI()
+        probe.include_router(mcp_server.mcp_router)
+        client = TestClient(probe)
+        # 1) tercero anónimo, sin cabeceras de UI
+        stranger = client.get("/api/mcp/info", headers={"host": "abc.trycloudflare.com"}).json()
+        assert stranger["ok"] is True
+        assert stranger["token"] == "" and stranger["token_exposed"] is False
+        assert token not in json.dumps(stranger)
+        assert "/mcp?token=" not in json.dumps(stranger)
+        assert all("token" not in str(v) for v in stranger["commands"].values())
+        # 2) UI del mismo host: Origin coincide y manda X-Studio-UI
+        trusted = client.get(
+            "/api/mcp/info",
+            headers={
+                "x-forwarded-host": "abc.trycloudflare.com",
+                "x-forwarded-proto": "https",
+                "origin": "https://abc.trycloudflare.com",
+                "x-studio-ui": "1",
+            },
+        ).json()
+        assert trusted["token_exposed"] is True and trusted["token"] == token
+        # 3) mismo Origin pero sin la cabecera de la UI: no es la interfaz
+        forced = client.get(
+            "/api/mcp/info",
+            headers={
+                "x-forwarded-host": "abc.trycloudflare.com",
+                "x-forwarded-proto": "https",
+                "origin": "https://abc.trycloudflare.com",
+            },
+        ).json()
+        assert forced["token"] == "" and forced["token_exposed"] is False
+        # 4) Origin de otro sitio (CSRF desde una página ajena)
+        foreign = client.get(
+            "/api/mcp/info",
+            headers={
+                "x-forwarded-host": "abc.trycloudflare.com",
+                "x-forwarded-proto": "https",
+                "origin": "https://evil.example",
+                "x-studio-ui": "1",
+            },
+        ).json()
+        assert foreign["token"] == "" and foreign["token_exposed"] is False
+        # 5) un cliente que ya presenta el token sí lo recupera
+        bearer = client.get(
+            "/api/mcp/info",
+            headers={"host": "abc.trycloudflare.com", "authorization": f"Bearer {token}"},
+        ).json()
+        assert bearer["token_exposed"] is True
+    finally:
+        if previous is None:
+            __import__("os").environ.pop("STUDIO_MCP_TOKEN", None)
+        else:
+            __import__("os").environ["STUDIO_MCP_TOKEN"] = previous

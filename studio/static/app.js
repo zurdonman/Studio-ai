@@ -3404,7 +3404,9 @@
     if ($("btn-open-mcp-modal")) {
       $("btn-open-mcp-modal").addEventListener("click", async () => {
         try {
-          const info = await api("/api/mcp/info");
+          // X-Studio-UI identifica al panel servido por este mismo host: solo así
+          // el servidor devuelve el token (nunca a un tercero que abra la URL del túnel).
+          const info = await api("/api/mcp/info", { headers: { "X-Studio-UI": "1" } });
           state.lastMcpInfo = info;
           const cmds = info.commands || {};
           if ($("mcp-cmd-agent-prompt")) $("mcp-cmd-agent-prompt").value = cmds.agent_chat_prompt || "";
@@ -3414,6 +3416,9 @@
           if ($("mcp-cmd-codex-stdio")) $("mcp-cmd-codex-stdio").value = cmds.codex_cli_stdio || "";
           if ($("mcp-cmd-http")) $("mcp-cmd-http").value = cmds.claude_code_http || "";
           if ($("mcp-cmd-json")) $("mcp-cmd-json").value = cmds.mcp_servers_json || "";
+          if (info.token_exposed === false) {
+            toast("Este panel no es de confianza para ver el token: ábrelo desde este mismo dominio.");
+          }
 
           const presets = info.workflow_presets || [];
           const pSel = $("mcp-preset-select");

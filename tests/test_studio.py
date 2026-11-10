@@ -1472,7 +1472,13 @@ def test_mcp_server_auth_manuals_guardrails_and_colab_logs(temp_studio_env, monk
     r_info = client.get("/api/mcp/info")
     assert r_info.status_code == 200
     assert r_info.json()["token_required"] is True
-    assert "claude mcp add" in r_info.json()["commands"]["claude_code_stdio"]
+    # Un tercero anónimo NO recibe comandos con credenciales (el túnel es público).
+    assert r_info.json()["token_exposed"] is False
+    assert "claude mcp add" not in r_info.json()["commands"]["claude_code_stdio"]
+    # El panel servido por este mismo host sí los recibe.
+    r_ui = client.get("/api/mcp/info", headers={"X-Studio-UI": "1", "Origin": "http://testserver"})
+    assert r_ui.json()["token_exposed"] is True
+    assert "claude mcp add" in r_ui.json()["commands"]["claude_code_stdio"]
 
 
 def test_studio_mcp_local_bridge_upload_poll_and_download(temp_studio_env, monkeypatch, tmp_path):

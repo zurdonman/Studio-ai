@@ -199,6 +199,8 @@ def main() -> None:
         shutdown_flag.unlink()
 
     print("🚀 [2/3] Arrancando servidor Studio IA en proceso limpio...", flush=True)
+    # Token NUEVO en cada arranque: si uno se filtra (captura, chat, log), muere al reiniciar.
+    # Para fijarlo, exporta STUDIO_MCP_TOKEN antes de lanzar.
     mcp_token = os.environ.get("STUDIO_MCP_TOKEN", "").strip() or f"st_mcp_{secrets.token_hex(12)}"
     env = os.environ.copy()
     env["PORT"] = str(PORT)
@@ -280,6 +282,10 @@ def main() -> None:
     msg_lines.append(f"      👉 {base_ext}/mcp/guia?token={mcp_token}")
     msg_lines.append(f"   🔗 Endpoint MCP HTTP directo (con token en URL): {base_ext}/mcp?token={mcp_token}")
     msg_lines.append(f"   🔑 Token suelto (si tu cliente lo pide aparte):   {mcp_token}")
+    msg_lines.append(
+        "   🔒 Este token cambia en cada arranque y NO se publica en /api/mcp/info: si se filtra, "
+        "reinicia la instancia y quedará invalidado."
+    )
     msg_lines.append("   💻 Si usas Claude Code en PC (Mac/Linux/WSL):")
     msg_lines.append(
         f'     curl -fsSL "{base_ext}/mcp/bridge.py?token={mcp_token}" -o studio_mcp.py && (claude mcp remove studio-ia >/dev/null 2>&1 || true) && claude mcp add studio-ia -- python3 "$(pwd)/studio_mcp.py"'
