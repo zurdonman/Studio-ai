@@ -278,33 +278,33 @@ def main() -> None:
         except Exception:
             pass
 
-    # Canal de control por GitHub: permite que un agente que NO alcanza el túnel
-    # (arena.ai) dirija esta instancia. Ejecuta verbos de una lista cerrada contra
-    # el servidor local; sin token de GitHub funciona en solo lectura.
-    channel_proc = None
-    channel_script = ROOT_DIR / "tools" / "mcp_github_channel.py"
-    msg_channel = "🔗 Canal GitHub: desactivado"
-    if channel_script.exists():
-        channel_env = env.copy()
-        channel_env["STUDIO_URL"] = f"http://127.0.0.1:{PORT}"
-        channel_env["STUDIO_MCP_TOKEN"] = mcp_token
-        if gh_token:
-            channel_env["GH_TOKEN"] = gh_token
-        try:
-            channel_proc = subprocess.Popen(
-                [sys.executable, "-u", str(channel_script), "--poll", "20"],
-                cwd=str(ROOT_DIR), env=channel_env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1,
-            )
-            msg_channel = (
-                "🔗 CANAL GITHUB PARA AGENTES SIN TÚNEL (arena.ai): ACTIVO"
-                + ("" if gh_token else " · solo lectura (sin token de GitHub)")
-            )
-        except Exception as exc:
-            msg_channel = f"⚠️ Canal GitHub no arrancó: {type(exc).__name__}"
-    else:
-        msg_channel = "⚠️ Canal GitHub no encontrado en tools/mcp_github_channel.py"
-
+    # Canal de control por GitHub (para agentes que no alcanzan el túnel, como arena.ai).
+    # NO se lanza aquí: se enciende desde el panel MCP con un botón, para que el estado
+    # viva en el proceso del servidor y la interfaz pueda mostrarlo y pararlo.
+    gh_token = (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip()
+    if not gh_token:
+        for candidate in (data_dir / "state" / "github_channel.json",
+                          data_dir / "state" / "github_channel_token.txt"):
+            try:
+                if not candidate.exists():
+                    continue
+                raw = candidate.read_text(encoding="utf-8").strip()
+                if candidate.suffix == ".json":
+                    import json as _json
+                    gh_token = str((_json.loads(raw) or {}).get("gh_token", "")).strip()
+                else:
+                    gh_token = raw
+                if gh_token:
+                    break
+            except (OSError, ValueError):
+                continue
+    if gh_token:
+        env["STUDIO_CHANNEL_GH_TOKEN"] = gh_token
+    msg_channel = (
+        "🔗 CANAL PARA AGENTE arena.ai: listo · enciéndelo en el panel MCP (botón «Encender canal»)"
+        if gh_token else
+        "🔗 CANAL PARA AGENTE arena.ai: pega el token de GitHub en el panel MCP y pulsa «Encender»"
+    )
 
     hw = initial_status.get("hardware", {})
     gpu = hw.get("gpu", {})
@@ -343,18 +343,14 @@ def main() -> None:
         "   El agente escribe órdenes en channel/ordenes.json del repo y lee state/channel/resultados.json."
     )
     if gh_token:
-        msg_lines.append("   🔑 Token de GitHub cargado (guardado en studio_data/state, nunca en el repo).")
+        msg_lines.append("   🔑 Token de GitHub ya guardado en studio_data/state (nunca en el repo).")
     else:
-        msg_lines.append(
-            "   Para que el agente reciba resultados: guarda un PAT de GitHub con Contents:read/write en "
-            "studio_data/state/github_channel_token.txt y reinicia."
-        )
+        msg_lines.append("   Solo necesitas un PAT de GitHub con permiso 'gist' y pulsar el botón en el panel MCP.")
     msg_lines.append("─" * 74)
     msg_lines.append("📡 Debajo verás EN TIEMPO REAL todo lo que hagas tú en la Web o tu Agente vía MCP:")
     _print_box(msg_lines)
 
-    diagnostics.event("ready", status="running", public_url=cf_url, tunnel_pid=cf_proc.pid if cf_proc else None,
-                      github_channel=bool(channel_proc))
+    diagnostics.event("ready", status="running", public_url=cf_url, tunnel_pid=cf_proc.pid if cf_proc else None)
     requested_stop = False
     tunnel_exit_reported = False
     last_sample = 0.0

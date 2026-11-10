@@ -3436,17 +3436,7 @@
           if ($("mcp-cmd-codex-stdio")) $("mcp-cmd-codex-stdio").value = cmds.codex_cli_stdio || "";
           if ($("mcp-cmd-http")) $("mcp-cmd-http").value = cmds.claude_code_http || "";
           if ($("mcp-cmd-json")) $("mcp-cmd-json").value = cmds.mcp_servers_json || "";
-          try {
-            const ch = await api("/api/mcp/github-channel", { headers: { "X-Studio-UI": "1" } });
-            if ($("mcp-github-command")) $("mcp-github-command").value = ch.command || "";
-            if ($("mcp-github-status")) {
-              $("mcp-github-status").textContent = ch.repo_token_configured
-                ? `Listo · repo ${ch.repo} · rama ${ch.branch}`
-                : `Este es el comando · repo ${ch.repo} · rama ${ch.branch}. Sustituye el token de GitHub: sin él el canal no puede devolver resultados.`;
-            }
-          } catch (_e) {
-            if ($("mcp-github-status")) $("mcp-github-status").textContent = "Canal no disponible en esta versión.";
-          }
+          refreshGitHubChannel();
           if (info.token_exposed === false) {
             toast("Este panel no es de confianza para ver el token: ábrelo desde este mismo dominio.");
           }
@@ -4036,5 +4026,86 @@
     startAdaptivePolling();
   }
 
-  document.addEventListener("DOMContentLoaded", init);
+  document.addEventListener("DOMContentLoaded", () => {
+  const s = $("btn-ghc-start"); if (s) s.addEventListener("click", startGitHubChannel);
+  const t = $("btn-ghc-stop"); if (t) t.addEventListener("click", stopGitHubChannel);
+  const c = $("btn-ghc-copy");
+  if (c) c.addEventListener("click", () => {
+    const box = $("ghc-handoff");
+    if (box && box.value) {
+      navigator.clipboard?.writeText(box.value);
+      toast("Datos del canal copiados: pégalos en el chat del agente", "success");
+    }
+  });
+});
+document.addEventListener("DOMContentLoaded", init);
 })();
+
+// ── Canal GitHub para agentes sin túnel (arena.ai) ───────────────────────────
+async function refreshGitHubChannel() {
+  const status = $("ghc-status");
+  const startBtn = $("btn-ghc-start");
+  const stopBtn = $("btn-ghc-stop");
+  const copyBtn = $("btn-ghc-copy");
+  const box = $("ghc-handoff");
+  if (!status) return;
+  try {
+    const ch = await api("/api/mcp/github-channel", { headers: { "X-Studio-UI": "1" } });
+    if (ch.running) {
+      status.innerHTML = `🟢 <b>Activo</b> · ${ch.polls || 0} sondeos · buzón ${ch.gist_id ? "privado (gist)" : ch.backend}` +
+        (ch.last_error ? ` · <span style="color:#f88">${ch.last_error}</span>` : "");
+      if (startBtn) startBtn.hidden = true;
+      if (stopBtn) stopBtn.hidden = false;
+      if (copyBtn) copyBtn.hidden = false;
+      if (box && ch.agent) {
+        box.hidden = false;
+        box.value = JSON.stringify(ch.agent, null, 2);
+      }
+    } else {
+      status.innerHTML = ch.token_present
+        ? "⚪ Apagado · ya hay un token guardado: basta pulsar «Encender»."
+        : "⚪ Apagado · pega un token de GitHub con permiso <code>gist</code> y pulsa «Encender».";
+      if (startBtn) startBtn.hidden = false;
+      if (stopBtn) stopBtn.hidden = true;
+      if (copyBtn) copyBtn.hidden = true;
+      if (box) box.hidden = true;
+    }
+  } catch (_e) {
+    status.textContent = "Canal no disponible en esta versión.";
+  }
+}
+
+async function startGitHubChannel() {
+  const status = $("ghc-status");
+  const tokenEl = $("ghc-token");
+  const startBtn = $("btn-ghc-start");
+  if (status) status.textContent = "Encendiendo… (creando el buzón privado)";
+  if (startBtn) startBtn.disabled = true;
+  try {
+    const out = await api("/api/mcp/github-channel/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Studio-UI": "1" },
+      body: JSON.stringify({ gh_token: tokenEl ? tokenEl.value.trim() : "" }),
+    });
+    if (tokenEl) tokenEl.value = "";
+    if (!out.ok) {
+      if (status) status.innerHTML = `⚠️ ${out.error || out.error_code || "no se pudo encender"}` +
+        (out.hint ? `<br><span style="opacity:.8">${out.hint}</span>` : "");
+    } else {
+      toast("Canal para arena.ai encendido", "success");
+    }
+  } catch (e) {
+    if (status) status.textContent = `⚠️ ${e.message}`;
+  } finally {
+    if (startBtn) startBtn.disabled = false;
+    refreshGitHubChannel();
+  }
+}
+
+async function stopGitHubChannel() {
+  try {
+    await api("/api/mcp/github-channel/stop", { method: "POST", headers: { "X-Studio-UI": "1" } });
+    toast("Canal detenido", "info");
+  } catch (_e) {}
+  refreshGitHubChannel();
+}

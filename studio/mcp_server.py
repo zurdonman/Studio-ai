@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from pydantic import BaseModel
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from studio.agent_presets import (
@@ -3775,45 +3776,74 @@ def api_get_mcp_info(request: Request) -> Dict[str, Any]:
     }
 
 
+class GitHubChannelReq(BaseModel):
+    gh_token: str = ""
+    gist_id: str = ""
+    backend: str = "gist"
+    interval: float = 20.0
+
+
 @mcp_router.get("/api/mcp/github-channel")
 def api_mcp_github_channel(request: Request) -> Dict[str, Any]:
-    """Credenciales y comando del canal de control por GitHub.
+    """Estado del canal de control por GitHub y datos para conectarse.
 
-    Igual que `/api/mcp/info`: el token solo se entrega a la UI del propio host o a
-    quien ya lo presenta. El `repo_token` es un PAT de GitHub con escritura en el
-    repo; si no está configurado, el canal funciona en solo lectura (útil para
-    ejecutar órdenes ya publicadas, no para devolver resultados).
+    El token de GitHub NUNCA se devuelve: solo se informa de si hay uno guardado.
     """
+    from studio import github_channel_service as channel
+
     trusted = _caller_is_trusted(request)
-    repo_token = (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip()
     repo = (os.environ.get("STUDIO_CHANNEL_REPO") or "zurdonman/Studio-ai").strip()
     branch = (os.environ.get("STUDIO_CHANNEL_BRANCH") or "arena/f0997b49-studio-ai").strip()
-    details = get_mcp_connection_details(request) if trusted else None
-    mcp_token = (details or {}).get("token") or ""
-    command = (
-        f"GH_TOKEN={repo_token or 'ghp_TU_TOKEN'} python3 /content/studio/tools/mcp_github_channel.py "
-        f"--poll 20 --repo {repo} --branch {branch}"
-    )
-    return {
+    state = channel.snapshot()
+    token_present = bool(channel.load_saved_token())
+    gist_id = state.get("gist_id") or ""
+    payload: Dict[str, Any] = {
         "ok": True,
         "available": True,
         "trusted": trusted,
+        "running": bool(state.get("running")),
+        "token_present": token_present,
         "repo": repo,
         "branch": branch,
-        "repo_token_configured": bool(repo_token),
-        "instructions": (
-            "1) Crea un token de GitHub con permiso Contents: read/write sobre el repo. "
-            "2) Guárdalo en Colab con STUDIO_CHANNEL_GH_TOKEN antes de lanzar, o pégalo en el comando. "
-            "3) El agente publica órdenes en channel/ordenes.json y lee state/channel/resultados.json."
-        ),
-        "command": command if trusted else "(oculto: abre el panel MCP desde este mismo dominio)",
-        "repo_token": repo_token if trusted else "",
-        "mcp_token": mcp_token if trusted else "",
-        "limits": (
-            "El canal ejecuta verbos de una lista cerrada contra el servidor local: "
-            "sin shell, sin descargas y sin borrar pesos."
-        ),
+        "backend": state.get("backend") or "gist",
+        "gist_id": gist_id,
+        "polls": state.get("polls", 0),
+        "last_poll": state.get("last_poll", 0),
+        "last_error": state.get("last_error", ""),
+        "limits": ("Lista cerrada de verbos: sin shell, sin descargas y sin borrar pesos. "
+                   "El token de GitHub nunca sale de esta máquina."),
     }
+    if trusted and state.get("running"):
+        payload["agent"] = channel.agent_handoff(gist_id, repo, branch, state.get("backend") or "gist")
+    return payload
+
+
+@mcp_router.post("/api/mcp/github-channel/start")
+def api_mcp_github_channel_start(request: Request, payload: GitHubChannelReq) -> Dict[str, Any]:
+    """Enciende el canal. Lo llama el botón del panel; no requiere pegar comandos."""
+    from studio import github_channel_service as channel
+
+    if not _caller_is_trusted(request):
+        raise HTTPException(status_code=403, detail="Solo la interfaz de esta instancia puede encender el canal.")
+    result = channel.start(
+        gh_token=payload.gh_token,
+        gist_id=payload.gist_id,
+        backend=payload.backend,
+        repo=(os.environ.get("STUDIO_CHANNEL_REPO") or "zurdonman/Studio-ai").strip(),
+        branch=(os.environ.get("STUDIO_CHANNEL_BRANCH") or "arena/f0997b49-studio-ai").strip(),
+        interval=payload.interval,
+        mcp_token=get_expected_mcp_token() or "",
+    )
+    return {**result, "state": channel.snapshot()}
+
+
+@mcp_router.post("/api/mcp/github-channel/stop")
+def api_mcp_github_channel_stop(request: Request) -> Dict[str, Any]:
+    from studio import github_channel_service as channel
+
+    if not _caller_is_trusted(request):
+        raise HTTPException(status_code=403, detail="Solo la interfaz de esta instancia puede apagar el canal.")
+    return {"ok": True, "state": channel.stop()}
 
 
 @mcp_router.get("/api/mcp/presets")

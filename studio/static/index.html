@@ -1667,18 +1667,28 @@
         </div>
 
         <div style="border-top:1px solid var(--border,#333); margin-top:10px; padding-top:10px;">
-          <label class="field-label">🔗 Túnel GitHub para agente arena.ai</label>
+          <label class="field-label">🔗 Canal para agente arena.ai (sin túnel)</label>
           <p style="font-size:12px; opacity:.8; margin:4px 0 8px;">
-            Algunos agentes (arena.ai) no pueden abrir conexiones a tu túnel de Cloudflare. Este canal
-            invierte la dirección: el agente escribe órdenes en el repo y esta celda las ejecuta contra
-            el servidor local. Solo ejecuta una lista cerrada de acciones: sin shell, sin descargas y sin
-            borrar pesos. Necesita un token de GitHub con permiso de escritura en el repo.
+            Hay agentes que no pueden abrir conexiones hacia tu túnel. Este canal invierte la
+            dirección: el agente deja órdenes en un buzón privado de GitHub y esta instancia las
+            ejecuta. Se enciende aquí con un clic; no hay que pegar nada en la celda. Solo ejecuta
+            una lista cerrada de acciones (sin shell, sin descargas, sin borrar pesos).
           </p>
+
+          <label class="field-label" style="font-size:11px;">1 · Token de GitHub (se guarda en esta máquina, nunca en el repo)</label>
           <div class="row-gap">
-            <input type="text" id="mcp-github-command" readonly placeholder="(abre este panel desde el dominio de tu túnel)" />
-            <button type="button" class="btn btn-secondary btn-sm" data-copy-target="mcp-github-command">📋 Copiar comando</button>
+            <input type="password" id="ghc-token" placeholder="ghp_… con permiso 'gist' o Contents:read/write" autocomplete="off" />
           </div>
-          <div id="mcp-github-status" style="font-size:12px; opacity:.75; margin-top:6px;"></div>
+
+          <div class="row-gap" style="margin-top:8px;">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-ghc-start">🔗 Encender canal para arena.ai</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-ghc-stop" hidden>Detener</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-ghc-copy" hidden>📋 Copiar para el agente</button>
+          </div>
+
+          <div id="ghc-status" style="font-size:12px; opacity:.8; margin-top:8px;">Comprobando…</div>
+          <textarea id="ghc-handoff" rows="6" readonly hidden
+                    style="font-family:monospace;font-size:11px;margin-top:6px;width:100%;"></textarea>
         </div>
       </div>
     </div>

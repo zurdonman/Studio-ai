@@ -652,3 +652,60 @@ def test_github_channel_talks_to_the_local_server_without_duplicating_queues():
     spec.loader.exec_module(ch)
     assert callable(ch._rpc)
     assert "wait_for_job" in ch.ALLOWED_VERBS
+
+
+def test_github_channel_starts_from_the_app_and_publishes_results(monkeypatch, tmp_path):
+    """Un clic en el panel debe encender el canal, ejecutar y publicar; sin comandos."""
+    import studio.github_channel_service as svc
+
+    store = {
+        "ordenes.json": {"orders": [
+            {"id": "x1", "verb": "get_state", "args": {"include_recent_assets": False}, "wait": False},
+            {"id": "x2", "verb": "shell", "args": {"cmd": "ls"}},
+        ]},
+        "resultados.json": {"executed_ids": [], "results": []},
+    }
+
+    class FakeGist:
+        def __init__(self, gist_id, token):
+            self.gist_id = gist_id
+
+        @staticmethod
+        def create(token, description=""):
+            return "gist_test"
+
+        def read(self, name):
+            return store.get(name, {})
+
+        def write(self, name, body):
+            store[name] = body
+
+    ch = svc._channel_module()
+    ch.GistMailbox = FakeGist
+    monkeypatch.setattr(svc, "_channel_module", lambda: ch)
+    monkeypatch.setattr(svc, "load_saved_token", lambda: "tok")
+    monkeypatch.setattr(svc, "save_token", lambda token: None)
+    monkeypatch.setattr(svc, "_token_path", lambda: tmp_path / "ci.json")
+
+    out = svc.start(gh_token="tok", base="http://127.0.0.1:9", mcp_token="t", interval=5)
+    # El sondeo corre en un hilo; esperamos a que procese las dos órdenes.
+    for _ in range(60):
+        if len(store["resultados.json"].get("results") or []) >= 2:
+            break
+        import time
+
+        time.sleep(0.1)
+    svc.stop()
+
+    assert out["backend"] == "gist"
+    assert out["gist_id"] == "gist_test"
+    ids = [r["id"] for r in store["resultados.json"]["results"]]
+    assert "x1" in ids and "x2" in ids
+    bad = [r for r in store["resultados.json"]["results"] if r["id"] == "x2"][0]
+    assert bad["error"] == "VERB_NOT_ALLOWED"
+    state = svc.snapshot()
+    assert state["executed"] == 2, "el contador no debe inflarse al republicar"
+    # Al agente se le da el buzón, nunca el token.
+    handoff = svc.agent_handoff("gist_test", "r", "b", "gist")
+    assert "tok" not in str(handoff)
+    assert handoff["gist_id"] == "gist_test"

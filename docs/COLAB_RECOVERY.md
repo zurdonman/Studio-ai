@@ -187,18 +187,22 @@ El agente de Arena no puede conectarse a `trycloudflare.com` (ni a ningún otro 
 permite `api.github.com`, `pypi.org` y `registry.npmjs.org`), así que no puede lanzar trabajos por MCP
 contra la instancia. La vía que sí funciona invierte la dirección:
 
-```bash
-# en la celda de Colab, con un token de GitHub con permiso de escritura en el repo
-!GH_TOKEN=ghp_xxx python3 /content/studio/tools/mcp_github_channel.py --poll 20
-```
+    agente --(API de GitHub)--> buzón privado (gist) <--(sondeo)--> app --(MCP local)--> trabajos
 
-El lanzador arranca el canal **solo** (`launch_colab.py`), y el panel MCP muestra un botón
-«🔗 Túnel GitHub para agente arena.ai» con el comando ya rellenado. El agente escribe órdenes en
-`channel/ordenes.json` y lee `state/channel/resultados.json`.
+**Se enciende desde la aplicación.** Panel MCP → «🔗 Canal para agente arena.ai» → pegar el token de
+GitHub → «Encender canal». No hay comandos que copiar a la celda: la app crea el buzón, lanza el bucle
+en un hilo y muestra el estado (sondeos, último verbo, último error) y el botón «Copiar para el agente»,
+que entrega **solo el identificador del gist**, nunca el token.
+
+Por qué gist privado y no el repositorio: el repo puede ser privado y no hace falta publicar órdenes ni
+resultados. El agente solo necesita `https://api.github.com/gists/<id>`. El backend `repo`
+(`channel/ordenes.json` + `state/channel/resultados.json`) sigue disponible para repos públicos con
+`--backend repo`.
 
 El canal habla con el servidor local por `http://127.0.0.1:7860/mcp` **a propósito**: importar
 `studio.mcp_server` en su propio proceso crearía una segunda cola de trabajos invisible para la
-interfaz y duplicaría el modelo en RAM. Todo lo que ejecute aparece en la app y respeta su gobernanza
-de memoria. Los verbos están
-en una lista cerrada: **no** hay shell, ni descarga de modelos, ni borrado de pesos, ni acceso al token del
-canal. Cada orden se ejecuta una vez por `id`, y un fallo se reporta sin tumbar el canal.
+interfaz y duplicaría el modelo en RAM. Todo lo que ejecute aparece en la app.
+
+Límites, deliberados: lista cerrada de verbos (nada de shell, descargas de modelos ni borrado de pesos),
+argumentos con credenciales rechazados, cada orden se ejecuta una sola vez por `id`, y el token de GitHub
+vive en `studio_data/state/github_channel.json` con permisos 600.

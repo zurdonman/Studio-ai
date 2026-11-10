@@ -14,10 +14,16 @@ Seguridad:
   - Escribe resultados en `state/channel/resultados.json`, sin credenciales.
   - Las órdenes se ejecutan en orden y una sola vez por `id`.
 
-Uso en Colab:
+Normalmente NO se lanza a mano: la aplicación lo enciende desde el panel MCP
+(POST /api/mcp/github-channel/start) y lo vigila en segundo plano. El comando
+manual queda solo para depurar:
 
-    !python3 /content/studio/tools/mcp_github_channel.py --once          # una pasada
-    !python3 /content/studio/tools/mcp_github_channel.py --once --dry-run # ver qué haría
+    python3 tools/mcp_github_channel.py --once --dry-run
+
+Transporte (`--backend`):
+  - `gist` (por defecto): un gist privado del usuario hace de buzón. El repo puede
+    ser privado; el agente solo necesita la URL del gist.
+  - `repo`: ficheros `channel/ordenes.json` y `state/channel/resultados.json`.
 """
 from __future__ import annotations
 
@@ -29,9 +35,14 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 DEFAULT_REPO = "zurdonman/Studio-ai"
+DEFAULT_GIST_ID = ""
+
+# El canal NO depende de que el repo sea público: por defecto usa un gist privado,
+# que el agente alcanza por la misma API (api.github.com) y que no expone ni el
+# código ni los resultados del usuario en internet.
 DEFAULT_ORDERS = "channel/ordenes.json"
 DEFAULT_RESULTS = "state/channel/resultados.json"
 
@@ -103,6 +114,66 @@ def _read_json_file(repo: str, path: str, token: str, branch: str = "") -> Optio
         return None
 
 
+def _gh_api(url: str, token: str, method: str = "GET",
+            payload: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Llamada mínima a la API de GitHub (solo api.github.com, único dominio permitido)."""
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "studio-ia-github-channel/1.0")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        return json.loads(body) if body.strip() else {}
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    except urllib.error.URLError:
+        return None
+
+
+class GistMailbox:
+    """Buzón de órdenes en un gist privado: dos ficheros, `ordenes.json` y `resultados.json`."""
+
+    def __init__(self, gist_id: str, token: str) -> None:
+        self.gist_id = gist_id
+        self.token = token
+
+    @staticmethod
+    def create(token: str, description: str = "Studio IA · canal de control") -> str:
+        out = _gh_api("https://api.github.com/gists", token, "POST", {
+            "description": description,
+            "public": False,
+            "files": {"ordenes.json": {"content": json.dumps({"orders": []}, indent=2)},
+                      "resultados.json": {"content": json.dumps({"results": []}, indent=2)}},
+        })
+        if not out or not out.get("id"):
+            raise RuntimeError("no se pudo crear el gist del canal")
+        return str(out["id"])
+
+    def read(self, name: str) -> Dict[str, Any]:
+        out = _gh_api(f"https://api.github.com/gists/{self.gist_id}", self.token)
+        if not out:
+            return {}
+        f = (out.get("files") or {}).get(name) or {}
+        content = f.get("content")
+        if content is None and f.get("raw_url"):
+            content = (_gh_api(f["raw_url"], self.token) or {}).get("raw", "")
+        try:
+            return json.loads(content or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return {}
+
+    def write(self, name: str, body: Dict[str, Any]) -> None:
+        _gh_api(f"https://api.github.com/gists/{self.gist_id}", self.token, "PATCH",
+                {"files": {name: {"content": json.dumps(body, indent=2, ensure_ascii=False)}}})
+
+
 def _rpc(base: str, token: str, payload: Dict[str, Any], session: Dict[str, str]) -> Dict[str, Any]:
     req = urllib.request.Request(
         f"{base}/mcp",
@@ -170,15 +241,64 @@ def _wait_job(base: str, token: str, session: Dict[str, str], job_id: str,
             return dict(snapshot, ok=False, error_code="CLIENT_TIMEOUT")
 
 
+class _Mailbox:
+    """Abstracción mínima: leer/escribir el buzón, sea gist (privado) o repo (público)."""
+
+    def __init__(self, backend: str, repo: str, branch: str, orders_path: str, results_path: str,
+                 gist_id: str, token: str) -> None:
+        self.backend = backend
+        self.repo = repo
+        self.branch = branch
+        self.orders_path = orders_path
+        self.results_path = results_path
+        self.token = token
+        self.gist = GistMailbox(gist_id, token) if backend == "gist" else None
+
+    def read_orders(self) -> Dict[str, Any]:
+        if self.gist:
+            return self.gist.read("ordenes.json")
+        return _read_json_file(self.repo, self.orders_path, self.token, self.branch) or {}
+
+    def read_results(self) -> Dict[str, Any]:
+        if self.gist:
+            return self.gist.read("resultados.json")
+        return _read_json_file(self.repo, self.results_path, self.token, self.branch) or {}
+
+    def write_results(self, ids: List[str], results: List[Dict[str, Any]]) -> None:
+        if self.gist:
+            self.gist.write("resultados.json", {
+                "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "executed_ids": ids, "results": results[-200:]})
+            return
+        _write_results(self.repo, self.results_path, self.token, ids, results, self.branch)
+
+
 def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run: bool,
-             base: str = "http://127.0.0.1:7860", mcp_token: str = "", branch: str = "") -> int:
-    orders = _read_json_file(repo, orders_path, token, branch) or {}
+             base: str = "http://127.0.0.1:7860", mcp_token: str = "", branch: str = "",
+             backend: str = "gist", gist_id: str = "",
+             on_result: Optional[Callable[[Dict[str, Any]], None]] = None) -> int:
+    """Una pasada: lee órdenes nuevas, las ejecuta y publica resultados.
+
+    `backend="gist"` (por defecto) no exige que el repo sea público: el buzón es un
+    gist privado. `backend="repo"` usa los ficheros del repositorio y solo tiene
+    sentido si el repo es público (o si el agente tiene token de lectura).
+    """
+    box = _Mailbox(backend, repo, branch, orders_path, results_path, gist_id, token)
+    orders = box.read_orders()
     queue = orders.get("orders") or []
     if not queue:
         print("Sin órdenes pendientes.")
         return 0
 
-    done = _read_json_file(repo, results_path, token, branch) or {}
+    def _publish() -> None:
+        box.write_results(sorted(executed), results)
+        if on_result:
+            try:
+                on_result(results[-1] if results else {})
+            except Exception:
+                pass
+
+    done = box.read_results()
     executed = set(done.get("executed_ids") or [])
     results: List[Dict[str, Any]] = list(done.get("results") or [])
 
@@ -189,12 +309,13 @@ def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run
         if not oid or oid in executed:
             continue
         if verb not in ALLOWED_VERBS:
-            print(f"✗ {oid}: verbo '{verb}' no permitido; se ignora.")
+            print(f"\u2717 {oid}: verbo '{verb}' no permitido; se ignora.")
             executed.add(oid)
             results.append({"id": oid, "verb": verb, "ok": False, "error": "VERB_NOT_ALLOWED"})
+            _publish()
             continue
         args = order.get("args") or {}
-        print(f"→ {oid}: {verb} {json.dumps(args, ensure_ascii=False)[:120]}")
+        print(f"\u2192 {oid}: {verb} {json.dumps(args, ensure_ascii=False)[:120]}")
         if dry_run:
             continue
         started = time.time()
@@ -213,12 +334,13 @@ def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run
             }
         except Exception as exc:  # un error se reporta, nunca tumba el canal
             entry = {"id": oid, "verb": verb, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:400]}
-        print(f"   {'✓' if entry['ok'] else '✗'} {entry.get('seconds', 0)}s {entry.get('error', '')}")
+        mark = "OK" if entry["ok"] else "FALLO"
+        print(f"   [{mark}] {entry.get('seconds', 0)}s {entry.get('error', '')}")
         results.append(entry)
         executed.add(oid)
-        _write_results(repo, results_path, token, sorted(executed), results, branch)
+        _publish()
     if not dry_run:
-        _write_results(repo, results_path, token, sorted(executed), results, branch)
+        _publish()
     return 0
 
 
@@ -273,6 +395,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Canal de control por GitHub para Studio IA.")
     ap.add_argument("--repo", default=os.environ.get("STUDIO_CHANNEL_REPO", DEFAULT_REPO))
     ap.add_argument("--branch", default=os.environ.get("STUDIO_CHANNEL_BRANCH", "arena/f0997b49-studio-ai"))
+    ap.add_argument("--backend", default=os.environ.get("STUDIO_CHANNEL_BACKEND", "gist"),
+                    choices=("gist", "repo"), help="buzón: gist privado (defecto) o ficheros del repo")
+    ap.add_argument("--gist-id", default=os.environ.get("STUDIO_CHANNEL_GIST_ID", DEFAULT_GIST_ID))
     ap.add_argument("--orders", default=DEFAULT_ORDERS)
     ap.add_argument("--results", default=DEFAULT_RESULTS)
     ap.add_argument("--once", action="store_true", help="una pasada")
@@ -290,7 +415,8 @@ def main() -> int:
 
     while True:
         run_once(args.repo, args.orders, args.results, token, args.dry_run,
-                 base=args.url.rstrip("/"), mcp_token=args.mcp_token, branch=args.branch)
+                 base=args.url.rstrip("/"), mcp_token=args.mcp_token, branch=args.branch,
+                 backend=args.backend, gist_id=args.gist_id)
         if args.poll <= 0:
             return 0
         time.sleep(max(5.0, args.poll))
