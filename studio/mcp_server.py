@@ -3827,8 +3827,14 @@ def api_mcp_github_channel(request: Request) -> Dict[str, Any]:
         "polls": state.get("polls", 0),
         "last_poll": state.get("last_poll", 0),
         "last_error": state.get("last_error", ""),
+        "token_source": channel.token_source(),
         "limits": ("Lista cerrada de verbos: sin shell, sin descargas y sin borrar pesos. "
                    "El token de GitHub nunca sale de esta máquina."),
+        "security": {
+            "scope_needed": "Contents: read/write SOLO en este repositorio",
+            "revoke": "GitHub → Settings → Developer settings → Tokens → Delete",
+            "guide": "docs/TOKEN_GH_SEGURIDAD.md",
+        },
     }
     payload["mode"] = state.get("mode") or ("activo" if token_present else "solo_lectura")
     payload["pending"] = state.get("pending", 0)

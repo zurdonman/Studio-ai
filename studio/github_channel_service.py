@@ -78,6 +78,17 @@ def _from_colab_secrets() -> str:
         return ""
 
 
+def token_source() -> str:
+    """De dónde sale el token: para poder decírselo al usuario sin exponerlo."""
+    if (os.environ.get("STUDIO_CHANNEL_GH_TOKEN") or "").strip():
+        return "entorno"
+    if _from_colab_secrets():
+        return "colab_secrets"
+    if _token_path().exists():
+        return "disco_local"
+    return "ninguna"
+
+
 def load_saved_token() -> str:
     """Token de GitHub, por orden de preferencia: entorno → Colab Secrets → disco.
 

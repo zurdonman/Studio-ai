@@ -4065,7 +4065,7 @@ async function refreshGitHubChannel() {
       if (pairInput) pairInput.value = ch.pair_url || "";
     } else {
       status.innerHTML = ch.token_present
-        ? "⚪ Apagado · token guardado: pulsa «Encender»."
+        ? `⚪ Apagado · token en <b>${ch.token_source || "?"}</b>: pulsa «Encender».`
         : "⚪ Apagado · sin token solo se pueden leer órdenes; pega uno con <code>Contents: read/write</code> para publicar resultados.";
       if (startBtn) startBtn.hidden = false;
       if (stopBtn) stopBtn.hidden = true;
