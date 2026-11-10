@@ -3436,7 +3436,8 @@
           if ($("mcp-cmd-codex-stdio")) $("mcp-cmd-codex-stdio").value = cmds.codex_cli_stdio || "";
           if ($("mcp-cmd-http")) $("mcp-cmd-http").value = cmds.claude_code_http || "";
           if ($("mcp-cmd-json")) $("mcp-cmd-json").value = cmds.mcp_servers_json || "";
-          refreshGitHubChannel();
+          // El canal se refresca aparte: si falla, el resto del panel sigue funcionando.
+          try { refreshGitHubChannel(); } catch (_e) { /* nunca rompe el modal */ }
           if (info.token_exposed === false) {
             toast("Este panel no es de confianza para ver el token: ábrelo desde este mismo dominio.");
           }
@@ -4026,129 +4027,151 @@
     startAdaptivePolling();
   }
 
-  document.addEventListener("DOMContentLoaded", () => {
-  const s = $("btn-ghc-start"); if (s) s.addEventListener("click", startGitHubChannel);
-  const t = $("btn-ghc-stop"); if (t) t.addEventListener("click", stopGitHubChannel);
-  const c = $("btn-ghc-copy");
-  if (c) c.addEventListener("click", () => {
-    const input = $("ghc-pair-url");
-    if (input && input.value) {
-      navigator.clipboard?.writeText(input.value);
-      toast("URL copiada: pégala en el chat del agente una sola vez", "success");
+  // El cableado de los botones del canal vive en un listener propio (al final del
+  // fichero) para que un fallo en cualquier otra carga de init() no los deje muertos.
+  // ── Canal GitHub para agentes sin túnel (arena.ai) ───────────────────────────
+  async function refreshGitHubChannel() {
+    const status = $("ghc-status");
+    const startBtn = $("btn-ghc-start");
+    const stopBtn = $("btn-ghc-stop");
+    const copyBtn = $("btn-ghc-copy");
+    const pairRow = $("ghc-pair-row");
+    const pairHelp = $("ghc-pair-help");
+    const pairInput = $("ghc-pair-url");
+    if (!status) return;
+    // Si el servidor no contesta en 8 s, el panel lo dice en vez de quedarse
+    // «Comprobando…» para siempre (era el síntoma del bloqueo de Colab Secrets).
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const ch = await api("/api/mcp/github-channel", {
+        headers: { "X-Studio-UI": "1" }, signal: ctrl.signal,
+      });
+      if (ch.running) {
+        const modo = ch.mode === "solo_lectura" ? "solo lectura" : "activo";
+        status.innerHTML = `🟢 <b>${modo}</b> · ${ch.polls || 0} sondeos · ${ch.pending || 0} pendientes` +
+          (ch.last_error ? ` · <span style="color:#f88">${ch.last_error}</span>` : "");
+        if (startBtn) startBtn.hidden = true;
+        if (stopBtn) stopBtn.hidden = false;
+        if (copyBtn) copyBtn.hidden = false;
+        if (pairRow) pairRow.hidden = false;
+        if (pairHelp) pairHelp.hidden = false;
+        if (pairInput) pairInput.value = ch.pair_url || "";
+      } else {
+        status.innerHTML = ch.token_present
+          ? `⚪ Apagado · token en <b>${ch.token_source || "?"}</b>: pulsa «Encender».`
+          : "⚪ Apagado · sin token solo se pueden leer órdenes; pega uno con <code>Contents: read/write</code> para publicar resultados.";
+        if (startBtn) startBtn.hidden = false;
+        if (stopBtn) stopBtn.hidden = true;
+        if (copyBtn) copyBtn.hidden = true;
+        if (pairRow) pairRow.hidden = true;
+        if (pairHelp) pairHelp.hidden = true;
+      }
+    } catch (e) {
+      const why = e.name === "AbortError"
+        ? "el servidor no respondió en 8 s"
+        : (e.message || String(e));
+      status.innerHTML = `⚠️ No se pudo leer el estado del canal: ${why}. ` +
+        `<button type="button" class="link-btn" id="ghc-retry">Reintentar</button>`;
+      const r = $("ghc-retry");
+      if (r) r.addEventListener("click", refreshGitHubChannel);
+    } finally {
+      clearTimeout(timer);
     }
-  });
-});
-document.addEventListener("DOMContentLoaded", init);
-})();
-
-// ── Canal GitHub para agentes sin túnel (arena.ai) ───────────────────────────
-async function refreshGitHubChannel() {
-  const status = $("ghc-status");
-  const startBtn = $("btn-ghc-start");
-  const stopBtn = $("btn-ghc-stop");
-  const copyBtn = $("btn-ghc-copy");
-  const pairRow = $("ghc-pair-row");
-  const pairHelp = $("ghc-pair-help");
-  const pairInput = $("ghc-pair-url");
-  if (!status) return;
-  // Si el servidor no contesta en 8 s, el panel lo dice en vez de quedarse
-  // «Comprobando…» para siempre (era el síntoma del bloqueo de Colab Secrets).
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 8000);
-  try {
-    const ch = await api("/api/mcp/github-channel", {
-      headers: { "X-Studio-UI": "1" }, signal: ctrl.signal,
-    });
-    if (ch.running) {
-      const modo = ch.mode === "solo_lectura" ? "solo lectura" : "activo";
-      status.innerHTML = `🟢 <b>${modo}</b> · ${ch.polls || 0} sondeos · ${ch.pending || 0} pendientes` +
-        (ch.last_error ? ` · <span style="color:#f88">${ch.last_error}</span>` : "");
-      if (startBtn) startBtn.hidden = true;
-      if (stopBtn) stopBtn.hidden = false;
-      if (copyBtn) copyBtn.hidden = false;
-      if (pairRow) pairRow.hidden = false;
-      if (pairHelp) pairHelp.hidden = false;
-      if (pairInput) pairInput.value = ch.pair_url || "";
-    } else {
-      status.innerHTML = ch.token_present
-        ? `⚪ Apagado · token en <b>${ch.token_source || "?"}</b>: pulsa «Encender».`
-        : "⚪ Apagado · sin token solo se pueden leer órdenes; pega uno con <code>Contents: read/write</code> para publicar resultados.";
-      if (startBtn) startBtn.hidden = false;
-      if (stopBtn) stopBtn.hidden = true;
-      if (copyBtn) copyBtn.hidden = true;
-      if (pairRow) pairRow.hidden = true;
-      if (pairHelp) pairHelp.hidden = true;
-    }
-  } catch (e) {
-    const why = e.name === "AbortError"
-      ? "el servidor no respondió en 8 s"
-      : (e.message || String(e));
-    status.innerHTML = `⚠️ No se pudo leer el estado del canal: ${why}. ` +
-      `<button type="button" class="link-btn" id="ghc-retry">Reintentar</button>`;
-    const r = $("ghc-retry");
-    if (r) r.addEventListener("click", refreshGitHubChannel);
-  } finally {
-    clearTimeout(timer);
   }
-}
 
-// Tiempo máximo por petición del canal: si el servidor no responde en 15 s,
-// se avisa en vez de dejar el panel en «comprobando» para siempre.
-async function channelFetch(url, body) {
-  const ctrl = new AbortController();
-  const ms = setTimeout(() => ctrl.abort(), 15000);
-  try {
-    return await api(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Studio-UI": "1" },
-      body: JSON.stringify(body || {}),
-      signal: ctrl.signal,
-    });
-  } catch (e) {
-    if (e.name === "AbortError") {
-      throw new Error("el servidor no respondió en 15 s (revisa la celda: puede estar ocupada)");
+  // Tiempo máximo por petición del canal: si el servidor no responde en 15 s,
+  // se avisa en vez de dejar el panel en «comprobando» para siempre.
+  async function channelFetch(url, body) {
+    const ctrl = new AbortController();
+    const ms = setTimeout(() => ctrl.abort(), 15000);
+    try {
+      return await api(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Studio-UI": "1" },
+        body: JSON.stringify(body || {}),
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      if (e.name === "AbortError") {
+        throw new Error("el servidor no respondió en 15 s (revisa la celda: puede estar ocupada)");
+      }
+      throw e;
+    } finally {
+      clearTimeout(ms);
     }
-    throw e;
-  } finally {
-    clearTimeout(ms);
   }
-}
 
-async function startGitHubChannel() {
-  const status = $("ghc-status");
-  const tokenEl = $("ghc-token");
-  const startBtn = $("btn-ghc-start");
-  const token = tokenEl ? tokenEl.value.trim() : "";
-  if (status) status.textContent = "1/2 · Comprobando el token…";
-  if (startBtn) startBtn.disabled = true;
-  try {
-    const chk = await channelFetch("/api/mcp/github-channel/probe", { gh_token: token });
-    if (!chk.ok) {
-      if (status) status.innerHTML = `⚠️ ${chk.error || chk.error_code}` +
-        (chk.user ? `<br><span style="opacity:.75">Usuario GitHub: ${chk.user}</span>` : "");
-      return;
+  async function startGitHubChannel() {
+    const status = $("ghc-status");
+    const tokenEl = $("ghc-token");
+    const startBtn = $("btn-ghc-start");
+    const token = tokenEl ? tokenEl.value.trim() : "";
+    if (status) status.textContent = "1/2 · Comprobando el token…";
+    if (startBtn) startBtn.disabled = true;
+    try {
+      const chk = await channelFetch("/api/mcp/github-channel/probe", { gh_token: token });
+      if (!chk.ok) {
+        if (status) status.innerHTML = `⚠️ ${chk.error || chk.error_code}` +
+          (chk.user ? `<br><span style="opacity:.75">Usuario GitHub: ${chk.user}</span>` : "");
+        return;
+      }
+      if (status) status.textContent = "2/2 · Encendiendo el canal…";
+      const out = await channelFetch("/api/mcp/github-channel/start", { gh_token: token });
+      if (tokenEl) tokenEl.value = "";
+      if (!out.ok) {
+        if (status) status.innerHTML = `⚠️ ${out.error || out.error_code || "no se pudo encender"}` +
+          (out.hint ? `<br><span style="opacity:.8">${out.hint}</span>` : "");
+      } else {
+        toast("Canal para arena.ai encendido", "success");
+      }
+    } catch (e) {
+      if (status) status.innerHTML = `⚠️ ${e.message}`;
+    } finally {
+      if (startBtn) startBtn.disabled = false;
+      refreshGitHubChannel();
     }
-    if (status) status.textContent = "2/2 · Encendiendo el canal…";
-    const out = await channelFetch("/api/mcp/github-channel/start", { gh_token: token });
-    if (tokenEl) tokenEl.value = "";
-    if (!out.ok) {
-      if (status) status.innerHTML = `⚠️ ${out.error || out.error_code || "no se pudo encender"}` +
-        (out.hint ? `<br><span style="opacity:.8">${out.hint}</span>` : "");
-    } else {
-      toast("Canal para arena.ai encendido", "success");
-    }
-  } catch (e) {
-    if (status) status.innerHTML = `⚠️ ${e.message}`;
-  } finally {
-    if (startBtn) startBtn.disabled = false;
+  }
+
+  async function stopGitHubChannel() {
+    try {
+      await api("/api/mcp/github-channel/stop", { method: "POST", headers: { "X-Studio-UI": "1" } });
+      toast("Canal detenido", "info");
+    } catch (_e) {}
     refreshGitHubChannel();
   }
-}
 
-async function stopGitHubChannel() {
-  try {
-    await api("/api/mcp/github-channel/stop", { method: "POST", headers: { "X-Studio-UI": "1" } });
-    toast("Canal detenido", "info");
-  } catch (_e) {}
-  refreshGitHubChannel();
-}
+// Cableado del canal GitHub, aislado de init(): si loadCatalog() o cualquier otra
+// carga falla antes, el botón «Encender» debe seguir funcionando.
+document.addEventListener("DOMContentLoaded", () => {
+  const wire = () => {
+    const startBtn = $("btn-ghc-start");
+    if (startBtn && !startBtn.dataset.wired) {
+      startBtn.dataset.wired = "1";
+      startBtn.addEventListener("click", startGitHubChannel);
+    }
+    const stopBtn = $("btn-ghc-stop");
+    if (stopBtn && !stopBtn.dataset.wired) {
+      stopBtn.dataset.wired = "1";
+      stopBtn.addEventListener("click", stopGitHubChannel);
+    }
+    const copyBtn = $("btn-ghc-copy");
+    if (copyBtn && !copyBtn.dataset.wired) {
+      copyBtn.dataset.wired = "1";
+      copyBtn.addEventListener("click", () => {
+        const input = $("ghc-pair-url");
+        if (input && input.value) {
+          navigator.clipboard?.writeText(input.value);
+          toast("URL copiada: pégala en el chat del agente una sola vez", "success");
+        }
+      });
+    }
+    try { refreshGitHubChannel(); } catch (_e) { /* silencioso a propósito */ }
+  };
+  wire();
+  const opener = $("btn-open-mcp-modal");
+  if (opener) opener.addEventListener("click", () => setTimeout(wire, 150));
+});
+
+document.addEventListener("DOMContentLoaded", init);
+})();

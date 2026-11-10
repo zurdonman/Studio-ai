@@ -3711,9 +3711,27 @@ _UI_HEADER = "x-studio-ui"
 
 
 def _request_origin(request: Request) -> str:
-    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
-    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
-    return f"{proto}://{host}".rstrip("/") if host else ""
+    """Origen con el que el navegador VE esta instancia.
+
+    Detrás del túnel (Cloudflare o el proxy de Colab) el `Host` que llega al servidor
+    puede ser `127.0.0.1`, mientras el navegador manda `Origin: https://<túnel>`.
+    Sin `x-forwarded-host`/`Referer` la comprobación fallaba y el panel recibía 403 en
+    todas las acciones del canal: el botón parecía muerto.
+    """
+    def _first(name: str) -> str:
+        return (request.headers.get(name) or "").split(",")[0].strip()
+
+    proto = _first("x-forwarded-proto") or request.url.scheme or "http"
+    host = _first("x-forwarded-host") or _first("host")
+    if host:
+        return f"{proto}://{host}".rstrip("/")
+    # Último recurso: deducir el host del navegador a partir de su propio Origin.
+    for header in ("origin", "referer"):
+        value = (request.headers.get(header) or "").strip()
+        if value.startswith(("http://", "https://")):
+            parts = value.split("/")
+            return "//".join(parts[:3]) if len(parts) >= 3 else value
+    return ""
 
 
 def _caller_is_trusted(request: Request) -> bool:
@@ -3736,12 +3754,26 @@ def _caller_is_trusted(request: Request) -> bool:
     if ui_header != "1":
         return False
     ours = _request_origin(request)
-    if not ours:
-        return False
-    for candidate in ((request.headers.get("origin") or "").strip(), (request.headers.get("referer") or "").strip()):
-        if candidate and (candidate == ours or candidate.startswith(ours + "/")):
-            return True
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    referer = (request.headers.get("referer") or "").strip()
+    # Mismo host explícito.
+    if ours and origin and origin == ours:
+        return True
+    if ours and referer and (referer == ours or referer.startswith(ours + "/")):
+        return True
+    # El proxy no reenvía el host: se acepta el `Origin` del navegador SOLO si la
+    # petición llega por loopback (el túnel termina en el propio Colab) y con la
+    # cabecera del panel, que una página ajena no puede poner sin preflight CORS.
+    if origin.startswith(("http://", "https://")) and _via_loopback(request):
+        return True
     return False
+
+
+def _via_loopback(request: Request) -> bool:
+    """¿La petición entró por el propio servidor (proxy/túnel local) y no de fuera?"""
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", "") or ""
+    return host in ("127.0.0.1", "::1", "localhost", "")
 
 
 def _redacted_connection_details(request: Request) -> Dict[str, Any]:

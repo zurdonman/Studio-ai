@@ -851,3 +851,52 @@ def test_channel_status_endpoint_never_waits_for_colab_secrets(monkeypatch):
     assert svc.has_token() is False
     assert svc.token_source() == "ninguna"
     assert time.time() - started < 1.0, "la comprobación de estado debe ser instantánea"
+
+
+def test_github_channel_ui_lives_inside_the_app_closure():
+    """Regresión: las funciones del canal deben estar dentro del IIFE donde vive api().
+
+    Si se declaran fuera, al pulsar el botón salta «api is not defined», el error se
+    lo traga el try/catch del modal y el panel se queda en «Comprobando…» para
+    siempre. Pasó exactamente eso.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "studio" / "static" / "app.js").read_text(encoding="utf-8")
+    end = js.rindex("})();")
+    for fn in ("refreshGitHubChannel", "startGitHubChannel", "stopGitHubChannel", "channelFetch"):
+        pos = js.index(f"function {fn}")
+        assert pos < end, f"{fn} está fuera del cierre y rompería el panel"
+
+    html = (root / "studio" / "static" / "index.html").read_text(encoding="utf-8")
+    # Versión en el script: sin esto el navegador reutiliza el JS viejo y el usuario
+    # sigue viendo el fallo después de arreglarlo.
+    assert 'app.js?v=' in html
+
+
+def test_channel_actions_are_trusted_behind_a_tunnel_proxy():
+    """Detrás del túnel, Host=127.0.0.1 pero Origin=https://<túnel>: debe aceptarse.
+
+    Sin esto, el panel recibe 403 en /probe y /start y el botón parece no hacer nada.
+    """
+    from starlette.requests import Request
+
+    import studio.mcp_server as srv
+
+    def make(headers):
+        raw = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+        return Request({"type": "http", "method": "POST", "path": "/", "headers": raw,
+                        "query_string": b"", "scheme": "http", "server": ("127.0.0.1", 7860)})
+
+    tunnel = "https://cambridge-comics-constraint-gather.trycloudflare.com"
+    # Caso real: el proxy no reenvía el host, pero el navegador manda Origin + X-Studio-UI.
+    assert srv._caller_is_trusted(make({"host": "127.0.0.1:7860", "origin": tunnel,
+                                        "x-studio-ui": "1"})) is True
+    # Sin la cabecera del panel, cualquiera podría: se sigue rechazando.
+    assert srv._caller_is_trusted(make({"host": "127.0.0.1:7860", "origin": tunnel})) is False
+    # Y con x-forwarded-host también.
+    assert srv._caller_is_trusted(make({"host": "127.0.0.1:7860", "x-forwarded-host":
+                                        "cambridge-comics-constraint-gather.trycloudflare.com",
+                                        "x-forwarded-proto": "https", "origin": tunnel,
+                                        "x-studio-ui": "1"})) is True

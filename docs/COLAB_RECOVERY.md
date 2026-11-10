@@ -243,3 +243,25 @@ Corregido en tres capas, porque una sola no basta:
 
 Si vuelve a pasar, el panel ahora dice **por qué**: token inválido (401), sin acceso al repo, o
 servidor ocupado.
+
+## «Pulso Encender y no hace nada»
+
+Había **cuatro** fallos encadenados, y solo juntos explican el síntoma:
+
+1. Las funciones del canal se declaraban fuera del cierre donde vive `api()`: el clic
+   lanzaba `ReferenceError`, el `try/catch` del modal lo silenciaba y no pasaba nada.
+2. El cableado de los botones estaba al final de `init()`, después de `loadCatalog()`:
+   cualquier fallo anterior dejaba el botón sin listener.
+3. **La causa que todo el mundo habría visto en la pestaña Red: 403.** Detrás del túnel,
+   `Host` llega como `127.0.0.1` y `Origin` como `https://<túnel>`, así que
+   `_caller_is_trusted` nunca coincidía y `/probe` y `/start` devolvían 403.
+4. El mensaje de error se sobrescribía al refrescar el panel en el `finally`.
+
+Arreglado así: funciones dentro del cierre, cableado en un listener propio e
+idempotente, confianza basada en el `Origin` del navegador cuando la petición entra por
+loopback (el túnel termina en el propio Colab) y siempre exigiendo la cabecera
+`X-Studio-UI`, versión en el `<script>` para romper la caché, y el estado del panel ya
+no se pisa tras un error.
+
+Verificado con un DOM real (jsdom) simulando el túnel: `probe` 200 → `start` 200 →
+panel en verde con la URL del agente generada.
