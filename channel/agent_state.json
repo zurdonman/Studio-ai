@@ -13,9 +13,20 @@
     ]
   },
   "app": {
-    "executed_ids": [],
-    "results": [],
-    "updated": "2026-11-05T00:00:00Z",
-    "note": "buzón de diagnóstico · rama de estado, no contiene código"
+    "executed_ids": [
+      "diag-1"
+    ],
+    "results": [
+      {
+        "id": "diag-1",
+        "verb": "get_state",
+        "ok": true,
+        "seconds": 0.1,
+        "result": {
+          "ok": true
+        }
+      }
+    ],
+    "updated": "2026-11-10T15:55:59Z"
   }
 }
