@@ -1,20 +1,12 @@
 {
   "schema": 1,
   "agent": {
-    "orders": [
-      {
-        "id": "diag-3",
-        "verb": "get_state",
-        "args": {
-          "include_recent_assets": true
-        },
-        "wait": false
-      }
-    ]
+    "orders": []
   },
   "app": {
     "executed_ids": [],
     "results": [],
-    "updated": "2026-11-10T16:31:17Z"
+    "updated": "2026-11-10T16:31:17Z",
+    "note": "canal en pausa: flujo manual con logs por chat"
   }
 }
