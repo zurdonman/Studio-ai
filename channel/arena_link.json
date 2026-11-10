@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "updated": "2026-11-10T15:54:19Z",
+  "arena_url": "http://127.0.0.1:7860/mcp/arena",
+  "note": "URL estable del canal. La instancia cambia de túnel en cada sesión, pero el buzón de GitHub no: el agente siempre empieza por aquí.",
+  "channel": {
+    "backend": "state",
+    "repo": "zurdonman/Studio-ai",
+    "state_branch": "studio-channel",
+    "state_path": "channel/agent_state.json",
+    "read_url": "https://api.github.com/repos/zurdonman/Studio-ai/contents/channel/agent_state.json?ref=studio-channel",
+    "anonymous_read": true,
+    "write_needs": "un token de GitHub con Contents: read/write sobre el repo",
+    "how": "GET a read_url (base64 → JSON) para leer `app.results`; PUT a la misma ruta sin ?ref para publicar `agent.orders`."
+  }
+}
