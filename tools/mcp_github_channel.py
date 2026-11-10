@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Canal de control por GitHub para Studio IA (para agentes sin acceso al túnel).
+
+El agente no puede abrir conexiones hacia tu Colab: su egreso solo permite unos
+pocos dominios. `api.github.com` SÍ está permitido, así que este agente corre en
+la celda de Colab, sondea un fichero de órdenes en el repositorio y ejecuta las
+herramientas MCP en proceso (sin pasar por la red ni por el túnel).
+
+Seguridad:
+  - Solo ejecuta VERBOS PERMITIDOS (lista cerrada). Nada de shell, nada de
+    descargas de modelos ni borrado de pesos: esas herramientas NO están.
+  - Solo lee el fichero de órdenes de la rama configurada y del repositorio
+    configurado.
+  - Escribe resultados en `state/channel/resultados.json`, sin credenciales.
+  - Las órdenes se ejecutan en orden y una sola vez por `id`.
+
+Uso en Colab:
+
+    !python3 /content/studio/tools/mcp_github_channel.py --once          # una pasada
+    !python3 /content/studio/tools/mcp_github_channel.py --once --dry-run # ver qué haría
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+DEFAULT_REPO = "zurdonman/Studio-ai"
+DEFAULT_ORDERS = "channel/ordenes.json"
+DEFAULT_RESULTS = "state/channel/resultados.json"
+
+# Lista CERRADA de verbos. Si una orden pide otra cosa, se rechaza y se reporta.
+ALLOWED_VERBS = {
+    "get_state",
+    "get_workflow_preset",
+    "get_work_state",
+    "answer_preference",
+    "generate_image",
+    "generate_video",
+    "generate_speech",
+    "generate_ambience",
+    "analyze_coherence",
+    "lipsync",
+    "render_montage",
+    "wait_for_job",
+    "export_session_log",
+}
+
+VERB_TO_TOOL = {
+    "get_state": "studio_get_state_and_manual",
+    "get_workflow_preset": "studio_get_workflow_preset",
+    "get_work_state": "studio_get_work_state",
+    "answer_preference": "studio_answer_preference",
+    "generate_image": "studio_generate_or_edit_image",
+    "generate_video": "studio_generate_video",
+    "generate_speech": "studio_generate_speech",
+    "generate_ambience": "studio_generate_music_or_sfx",
+    "analyze_coherence": "studio_analyze_coherence",
+    "lipsync": "studio_lipsync_character",
+    "render_montage": "studio_render_montage",
+    "wait_for_job": "studio_wait_for_job",
+    "export_session_log": "studio_export_session_log",
+}
+
+# Nunca se reenvían campos de credencial.
+FORBIDDEN_ARGS = {"token", "authorization", "hf_token", "password", "api_key"}
+
+
+def _api_get(repo: str, path: str, token: str) -> Optional[Dict[str, Any]]:
+    """Lee un fichero del repo por la API de contenidos (JSON base64)."""
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("User-Agent", "studio-ia-github-channel/1.0")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise SystemExit(f"GitHub {exc.code} leyendo {path}")
+
+
+def _read_json_file(repo: str, path: str, token: str) -> Optional[Dict[str, Any]]:
+    import base64
+
+    data = _api_get(repo, path, token)
+    if not data or "content" not in data:
+        return None
+    try:
+        raw = base64.b64decode(data["content"]).decode("utf-8")
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _dispatch(verb: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Ejecuta el verbo EN PROCESO, con las mismas guardas que el servidor MCP."""
+    from studio.mcp_server import _execute_mcp_tool
+
+    clean = {k: v for k, v in args.items() if k.lower() not in FORBIDDEN_ARGS}
+    if clean != args:
+        raise ValueError("argumento prohibido en la orden")
+    tool = VERB_TO_TOOL[verb]
+    result = _execute_mcp_tool(tool, clean)
+    texts = [c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text"]
+    raw = "\n".join(t for t in texts if t)
+    try:
+        return json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return {"raw": raw[:2000]}
+
+
+def _wait_job(job_id: str, budget_sec: float = 3000.0) -> Dict[str, Any]:
+    from studio.mcp_server import _wait_for_job_bounded
+
+    started = time.time()
+    while True:
+        snapshot = _wait_for_job_bounded(job_id, max_wait_seconds=80)
+        status = snapshot.get("status")
+        if status in ("completed", "failed", "cancelled"):
+            return snapshot
+        if time.time() - started > budget_sec:
+            return dict(snapshot, ok=False, error_code="CLIENT_TIMEOUT")
+
+
+def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run: bool) -> int:
+    orders = _read_json_file(repo, orders_path, token) or {}
+    queue = orders.get("orders") or []
+    if not queue:
+        print("Sin órdenes pendientes.")
+        return 0
+
+    done = _read_json_file(repo, results_path, token) or {}
+    executed = set(done.get("executed_ids") or [])
+    results: List[Dict[str, Any]] = list(done.get("results") or [])
+
+    for order in queue:
+        oid = str(order.get("id") or "").strip()
+        verb = str(order.get("verb") or "").strip()
+        if not oid or oid in executed:
+            continue
+        if verb not in ALLOWED_VERBS:
+            print(f"✗ {oid}: verbo '{verb}' no permitido; se ignora.")
+            executed.add(oid)
+            results.append({"id": oid, "verb": verb, "ok": False, "error": "VERB_NOT_ALLOWED"})
+            continue
+        args = order.get("args") or {}
+        print(f"→ {oid}: {verb} {json.dumps(args, ensure_ascii=False)[:120]}")
+        if dry_run:
+            continue
+        started = time.time()
+        try:
+            out = _dispatch(verb, args)
+            job_id = out.get("job_id") or (out.get("job") or {}).get("id")
+            if verb not in ("wait_for_job",) and job_id and order.get("wait", True):
+                out = _wait_job(str(job_id), budget_sec=float(order.get("budget_sec") or 3000))
+            entry = {
+                "id": oid,
+                "verb": verb,
+                "ok": bool(out.get("ok", True)) and out.get("status") in (None, "completed"),
+                "seconds": round(time.time() - started, 1),
+                "result": _compact(out),
+            }
+        except Exception as exc:  # un error se reporta, nunca tumba el canal
+            entry = {"id": oid, "verb": verb, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:400]}
+        print(f"   {'✓' if entry['ok'] else '✗'} {entry.get('seconds', 0)}s {entry.get('error', '')}")
+        results.append(entry)
+        executed.add(oid)
+        _write_results(repo, results_path, token, sorted(executed), results)
+    if not dry_run:
+        _write_results(repo, results_path, token, sorted(executed), results)
+    return 0
+
+
+def _compact(out: Dict[str, Any]) -> Dict[str, Any]:
+    """Resultado legible sin volcar prompts enteros ni credenciales."""
+    keys = ("ok", "status", "job_id", "error_code", "error", "progress_pct", "elapsed_seconds",
+            "rel_path", "filename", "media_url", "model_id", "video_submode")
+    result = out.get("result") if isinstance(out.get("result"), dict) else {}
+    merged = {**out, **{k: v for k, v in result.items() if k in keys}}
+    return {k: merged[k] for k in keys if k in merged}
+
+
+def _write_results(repo: str, path: str, token: str, ids: List[str], results: List[Dict[str, Any]]) -> None:
+    """Escribe el estado en el repo (lo lee el agente con GET normal)."""
+    import base64
+    import subprocess
+
+    payload = {
+        "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "executed_ids": ids,
+        "results": results[-200:],
+    }
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    if not token:
+        print(f"   (sin GH_TOKEN: resultados solo en {target})")
+        return
+    existing = _api_get(repo, path, token) or {}
+    message = {"message": f"canal: resultados {time.strftime('%H:%M:%S')}", "content": base64.b64encode(body.encode()).decode()}
+    if existing.get("sha"):
+        message["sha"] = existing["sha"]
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/contents/{path}",
+        data=json.dumps(message).encode(),
+        method="PUT",
+        headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json", "User-Agent": "studio-ia-github-channel/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+    except Exception as exc:
+        print(f"   ⚠ no se pudo publicar en GitHub ({type(exc).__name__}); queda en {target}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Canal de control por GitHub para Studio IA.")
+    ap.add_argument("--repo", default=os.environ.get("STUDIO_CHANNEL_REPO", DEFAULT_REPO))
+    ap.add_argument("--orders", default=DEFAULT_ORDERS)
+    ap.add_argument("--results", default=DEFAULT_RESULTS)
+    ap.add_argument("--once", action="store_true", help="una pasada")
+    ap.add_argument("--poll", type=float, default=0.0, help="segundos entre pasadas (0 = salir)")
+    ap.add_argument("--dry-run", action="store_true", help="muestra las órdenes sin ejecutarlas")
+    args = ap.parse_args()
+
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    if not token:
+        print("Aviso: sin GH_TOKEN solo se puede LEER el repo público (no publicar resultados).")
+
+    while True:
+        run_once(args.repo, args.orders, args.results, token, args.dry_run)
+        if args.poll <= 0:
+            return 0
+        time.sleep(max(5.0, args.poll))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

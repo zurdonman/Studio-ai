@@ -554,3 +554,84 @@ def test_invalid_lora_checkpoint_is_retried_without_orphan_alpha():
     clean = _drop_pure_alpha_keys(sd)
     assert "diffusion_model.blocks.0.self_attn.q.lora_down.weight" in clean
     assert not any(k.endswith(".alpha") for k in clean)
+
+
+def test_credits_are_labelled_as_an_estimate_and_autoshutdown_fires():
+    """Colab no expone el saldo: la app debe decirlo y apagar una GPU ociosa."""
+    import types
+
+    from studio import hardware
+
+    calls = []
+
+    class _Tracker:
+        def __init__(self, due, minutes=90, jobs=0):
+            self.due, self.minutes, self.jobs = due, minutes, jobs
+
+        def get_snapshot(self, active_jobs_count=0):
+            return {
+                "is_colab": True,
+                "credits": {
+                    "is_estimate": True,
+                    "autoshutdown_due": self.due and active_jobs_count == 0,
+                    "idle_minutes": self.minutes,
+                    "idle_autoshutdown_minutes": 45,
+                },
+            }
+
+    original = hardware.request_colab_shutdown
+    hardware.request_colab_shutdown = lambda: calls.append("shutdown")
+    try:
+        assert hardware.enforce_idle_shutdown(_Tracker(due=True), 0) is True
+        assert calls == ["shutdown"]
+        # Con trabajo en curso NO se apaga nada, aunque lleve horas.
+        assert hardware.enforce_idle_shutdown(_Tracker(due=True), 1) is False
+        assert calls == ["shutdown"]
+        # Sin vencimiento, tampoco.
+        assert hardware.enforce_idle_shutdown(_Tracker(due=False), 0) is False
+    finally:
+        hardware.request_colab_shutdown = original
+
+    snap = hardware.hardware_tracker.get_snapshot(active_jobs_count=0)
+    credits = snap["credits"]
+    assert credits["is_estimate"] is True
+    assert credits["source"] == "estimacion_local_tarifa_fija"
+    assert "no publica tu saldo" in credits["notice"]
+    assert "idle_autoshutdown_minutes" in credits
+
+
+def test_github_channel_only_runs_closed_verbs_and_never_forwards_credentials():
+    """El canal ejecuta verbos permitidos; el resto se rechaza y no toca nada."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "mcp_github_channel.py"
+    spec = importlib.util.spec_from_file_location("mcp_github_channel", path)
+    ch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ch)
+
+    # La lista es cerrada y NO incluye nada destructivo ni descargas.
+    assert "generate_video" in ch.ALLOWED_VERBS
+    for forbidden in ("prepare_model", "free_memory_or_disk", "delete_model", "shell", "download"):
+        assert forbidden not in ch.ALLOWED_VERBS
+    assert set(ch.ALLOWED_VERBS) == set(ch.VERB_TO_TOOL)
+
+    # Un argumento con credencial se rechaza antes de llegar a la herramienta.
+    original = ch._execute_mcp_tool if hasattr(ch, "_execute_mcp_tool") else None
+    called = []
+    import studio.mcp_server as srv
+
+    real = srv._execute_mcp_tool
+    srv._execute_mcp_tool = lambda name, args: called.append((name, args)) or {"content": []}
+    try:
+        try:
+            ch._dispatch("get_state", {"include_recent_assets": True, "token": "st_mcp_x"})
+            raise AssertionError("debía rechazar el token")
+        except ValueError:
+            pass
+        assert called == []
+        ch._dispatch("get_state", {"include_recent_assets": False})
+        assert called and called[0][0] == "studio_get_state_and_manual"
+        assert "token" not in called[0][1]
+    finally:
+        srv._execute_mcp_tool = real

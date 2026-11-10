@@ -160,3 +160,38 @@ trabajo, se recargan los assets (con guarda para no solapar peticiones).
 Y una decisión de capacidad: el 14B FP8 + 3 adaptadores necesita 44,47 GiB de RAM y la sesión tenía
 48,43 libres con 5,30 de reserva, así que **no** entró (`MEMORY_BUDGET_EXCEEDED`). Ese rechazo es correcto:
 bajar de 14B a 1.3B fue lo que dejó el clip en 739 s.
+
+## Créditos y sesiones olvidadas
+
+**El saldo no se puede leer.** Google Colab no publica el saldo de unidades por API. Lo que muestra la app
+es una estimación: un `initial_credits` configurable (100 por defecto) menos `horas × tarifa fija`. Ese
+número se guarda en `studio_data/state/credits_state.json` y **arrastra entre sesiones** con
+`prior_spent_credits`, así que puede alejarse mucho del real. Ahora la respuesta lo dice explícitamente
+(`is_estimate`, `source: estimacion_local_tarifa_fija`, `authoritative_source`) para que nadie lo confunda
+con una factura. La fuente de verdad es la página de Colab.
+
+**Apagado automático.** Avisar en la interfaz no sirve si el usuario está durmiendo. Con
+`idle_autoshutdown_minutes` (45 por defecto, `0` lo desactiva) el servidor libera la GPU cuando pasan esos
+minutos sin ningún trabajo activo, solo en Colab y solo con `active_jobs_count == 0`. Se puede ajustar con
+`POST /api/credits/config`:
+
+```json
+{"initial_credits": 98.3, "idle_autoshutdown_minutes": 30}
+```
+
+Y para cerrar la pestaña sin dejar la GPU encendida, `POST /api/shutdown` (botón «Liberar GPU»).
+
+## Canal de control cuando el agente no alcanza el túnel
+
+El agente de Arena no puede conectarse a `trycloudflare.com` (ni a ningún otro túnel: su egreso solo
+permite `api.github.com`, `pypi.org` y `registry.npmjs.org`), así que no puede lanzar trabajos por MCP
+contra la instancia. La vía que sí funciona invierte la dirección:
+
+```bash
+# en la celda de Colab, con un token de GitHub con permiso de escritura en el repo
+!GH_TOKEN=ghp_xxx python3 /content/studio/tools/mcp_github_channel.py --poll 20
+```
+
+El agente escribe órdenes en `channel/ordenes.json` y lee `state/channel/resultados.json`. Los verbos están
+en una lista cerrada: **no** hay shell, ni descarga de modelos, ni borrado de pesos, ni acceso al token del
+canal. Cada orden se ejecuta una vez por `id`, y un fallo se reporta sin tumbar el canal.

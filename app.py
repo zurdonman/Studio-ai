@@ -76,6 +76,7 @@ from studio.engines.video_engine import (
     load_video_model_into_memory,
 )
 from studio.hardware import (
+    enforce_idle_shutdown,
     build_full_session_log_document,
     colab_console_log,
     hardware_tracker,
@@ -140,6 +141,7 @@ class CreditsConfigReq(BaseModel):
     use_auto_gpu_rate: bool = False
     reset_session_spent: bool = False
     idle_alert_minutes: Optional[int] = None
+    idle_autoshutdown_minutes: Optional[int] = None
 
 
 class HfTokenReq(BaseModel):
@@ -371,7 +373,7 @@ def api_status() -> Dict[str, Any]:
     active_cnt = job_manager.active_count()
     hw = hardware_tracker.get_snapshot(active_jobs_count=active_cnt)
     jobs = job_manager.list_jobs(limit=25, include_logs=True)
-    return {
+    payload = {
         "hardware": hw,
         "memory": {
             "loaded_slots": memory_manager.status_summary(),
@@ -384,6 +386,12 @@ def api_status() -> Dict[str, Any]:
         "hf_auth": catalog_manager.hf_auth_status(),
         "runtime": runtime_flags.snapshot(),
     }
+    # Red de seguridad: si nadie usa la GPU mucho tiempo, se apaga sola (configurable).
+    try:
+        enforce_idle_shutdown(hardware_tracker, active_cnt)
+    except Exception:
+        pass
+    return payload
 
 
 @app.get("/api/runtime/status")
@@ -443,6 +451,7 @@ def api_update_credits(req: CreditsConfigReq) -> Dict[str, Any]:
         use_auto_gpu_rate=req.use_auto_gpu_rate,
         reset_session_spent=req.reset_session_spent,
         idle_alert_minutes=req.idle_alert_minutes,
+        idle_autoshutdown_minutes=req.idle_autoshutdown_minutes,
     )
     return {"ok": True, "hardware": snap}
 

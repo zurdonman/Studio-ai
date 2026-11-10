@@ -205,6 +205,7 @@ class HardwareAndCreditsTracker:
             "rate_auto": True,
             "prior_spent_credits": 0.0,
             "idle_alert_minutes": 10,
+            "idle_autoshutdown_minutes": 45,
         }
         if CREDITS_STATE_FILE.exists():
             try:
@@ -237,6 +238,7 @@ class HardwareAndCreditsTracker:
         use_auto_gpu_rate: bool = False,
         reset_session_spent: bool = False,
         idle_alert_minutes: Optional[int] = None,
+        idle_autoshutdown_minutes: Optional[int] = None,
     ) -> Dict[str, Any]:
         gpu = query_gpu_info()
         if initial_credits is not None:
@@ -249,6 +251,8 @@ class HardwareAndCreditsTracker:
             self._state["rate_auto"] = False
         if idle_alert_minutes is not None:
             self._state["idle_alert_minutes"] = max(1, int(idle_alert_minutes))
+        if idle_autoshutdown_minutes is not None:
+            self._state["idle_autoshutdown_minutes"] = max(0, int(idle_autoshutdown_minutes))
         if reset_session_spent:
             self.session_start_ts = time.time()
             self._state["prior_spent_credits"] = 0.0
@@ -286,6 +290,14 @@ class HardwareAndCreditsTracker:
         hours_left = (remaining / hourly_rate) if hourly_rate > 0 else None
 
         idle_threshold = int(self._state.get("idle_alert_minutes", 10))
+        # Apagado de seguridad: una celda olvidada toda la noche gasta créditos sin
+        # producir nada. Se avisa antes y se apaga solo (0 = nunca).
+        autoshutdown_min = max(0, int(self._state.get("idle_autoshutdown_minutes", 45)))
+        autoshutdown_seconds_left = None
+        autoshutdown_due = False
+        if autoshutdown_min > 0 and hourly_rate > 0 and active_jobs_count == 0:
+            autoshutdown_seconds_left = max(0, int(autoshutdown_min * 60 - idle_sec))
+            autoshutdown_due = idle_sec >= autoshutdown_min * 60
         idle_warning = bool(
             (gpu["has_gpu"] or hourly_rate > 0)
             and active_jobs_count == 0
@@ -310,18 +322,32 @@ class HardwareAndCreditsTracker:
                 "percent": round((disk.used / disk.total) * 100, 1) if disk.total > 0 else 0.0,
             },
             "credits": {
+                # Colab no expone el saldo real por API: esto es una ESTIMACIÓN con una
+                # tarifa fija y un saldo inicial que fija el usuario. La fuente de verdad
+                # es la página de Colab; aquí se dice explícitamente para no confundir.
+                "source": "estimacion_local_tarifa_fija",
+                "is_estimate": True,
+                "authoritative_source": "https://colab.research.google.com (Consumo de recursos)",
+                "notice": (
+                    "Saldo ESTIMADO: Colab no publica tu saldo por API. Se calcula con un saldo inicial "
+                    "configurable y una tarifa fija por hora; úsalo como orden de magnitud, no como factura."
+                ),
                 "initial_credits": round(initial_credits, 2),
                 "hourly_rate": round(hourly_rate, 2),
                 "detected_gpu_default_rate": round(detected_default_rate, 2),
                 "rate_auto": bool(self._state.get("rate_auto", True)),
                 "session_spent": round(session_spent, 3),
                 "remaining_credits": round(remaining, 2),
+                "estimated_remaining_credits": round(remaining, 2),
                 "estimated_hours_left": round(hours_left, 2) if hours_left is not None else None,
                 "uptime_seconds": int(uptime_sec),
                 "idle_seconds": int(idle_sec),
                 "idle_minutes": round(idle_min, 1),
                 "idle_alert_minutes": idle_threshold,
                 "idle_warning": idle_warning,
+                "idle_autoshutdown_minutes": autoshutdown_min,
+                "autoshutdown_seconds_left": autoshutdown_seconds_left,
+                "autoshutdown_due": autoshutdown_due,
                 "gpu_rates_reference": GPU_RATES_DEFAULT,
             },
         }
@@ -357,6 +383,33 @@ def request_colab_shutdown() -> Dict[str, Any]:
         "colab_disconnected": False,
         "message": "Memoria RAM/VRAM liberada. (Estás en entorno local/preview, no hay máquina de Colab facturando).",
     }
+
+
+def enforce_idle_shutdown(hardware_tracker: "HardwareAndCreditsTracker", active_jobs_count: int) -> bool:
+    """Apaga la GPU si la sesión lleva demasiado tiempo sin producir nada.
+
+    Una celda olvidada toda la noche cobra GPU sin generar nada: el aviso en la UI
+    no basta porque el usuario está durmiendo. Solo actúa en Colab, solo sin
+    trabajos activos y solo si el usuario no ha puesto `idle_autoshutdown_minutes=0`.
+    Devuelve True si disparó el apagado.
+    """
+    try:
+        snap = hardware_tracker.get_snapshot(active_jobs_count=active_jobs_count)
+    except Exception:
+        return False
+    credits = snap.get("credits") or {}
+    if not snap.get("is_colab") or active_jobs_count > 0:
+        return False
+    if not credits.get("autoshutdown_due"):
+        return False
+    limit_min = credits.get("idle_autoshutdown_minutes")
+    colab_console_log(
+        f"Apagado automático: {credits.get('idle_minutes')} min sin actividad y 0 trabajos "
+        f"(límite {limit_min} min). Liberando la GPU para dejar de consumir créditos.",
+        icon="🛑",
+    )
+    request_colab_shutdown()
+    return True
 
 
 hardware_tracker = HardwareAndCreditsTracker()
