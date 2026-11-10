@@ -1,0 +1,1 @@
+{"schema": 1, "agent": {"orders": [{"id": "r1", "verb": "get_state", "args": {"include_recent_assets": false}, "wait": false}, {"id": "r2", "verb": "get_workflow_preset", "args": {"preset_id": "coherencia_personajes_entorno_avance", "scene_description": "dos vecinos, 30 s"}, "wait": false}]}, "app": {"executed_ids": [], "results": [], "updated": "2026-11-05T10:00:00Z"}}
