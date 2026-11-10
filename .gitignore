@@ -25,3 +25,6 @@ cloudflared.exe
 *.log
 .DS_Store
 .venv
+
+# estado del canal (vive en la rama studio-channel, no en main)
+channel/agent_state.json

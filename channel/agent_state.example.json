@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "agent": {
+    "orders": [
+      {"id": "demo-1", "verb": "get_state", "args": {"include_recent_assets": false}, "wait": false}
+    ]
+  },
+  "app": {"executed_ids": [], "results": [], "updated": ""}
+}

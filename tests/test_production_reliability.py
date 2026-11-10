@@ -656,56 +656,98 @@ def test_github_channel_talks_to_the_local_server_without_duplicating_queues():
 
 def test_github_channel_starts_from_the_app_and_publishes_results(monkeypatch, tmp_path):
     """Un clic en el panel debe encender el canal, ejecutar y publicar; sin comandos."""
+    import time
+
     import studio.github_channel_service as svc
 
     store = {
-        "ordenes.json": {"orders": [
+        "agent": {"orders": [
             {"id": "x1", "verb": "get_state", "args": {"include_recent_assets": False}, "wait": False},
             {"id": "x2", "verb": "shell", "args": {"cmd": "ls"}},
         ]},
-        "resultados.json": {"executed_ids": [], "results": []},
+        "app": {"executed_ids": [], "results": []},
     }
 
-    class FakeGist:
-        def __init__(self, gist_id, token):
-            self.gist_id = gist_id
-
-        @staticmethod
-        def create(token, description=""):
-            return "gist_test"
-
-        def read(self, name):
-            return store.get(name, {})
-
-        def write(self, name, body):
-            store[name] = body
-
     ch = svc._channel_module()
-    ch.GistMailbox = FakeGist
+    real_mailbox = ch._Mailbox
+
+    class FakeMailbox:
+        def __init__(self, *a, **k):
+            self._inner = real_mailbox(*a, **k)
+            self.token = k.get("token", a[5] if len(a) > 5 else "")
+
+        def read_orders(self):
+            return {"orders": store["agent"]["orders"]}
+
+        def read_results(self):
+            return store["app"]
+
+        def write_results(self, ids, results):
+            store["app"] = {"executed_ids": ids, "results": results}
+
+    monkeypatch.setattr(ch, "_Mailbox", FakeMailbox)
     monkeypatch.setattr(svc, "_channel_module", lambda: ch)
     monkeypatch.setattr(svc, "load_saved_token", lambda: "tok")
     monkeypatch.setattr(svc, "save_token", lambda token: None)
     monkeypatch.setattr(svc, "_token_path", lambda: tmp_path / "ci.json")
 
     out = svc.start(gh_token="tok", base="http://127.0.0.1:9", mcp_token="t", interval=5)
-    # El sondeo corre en un hilo; esperamos a que procese las dos órdenes.
     for _ in range(60):
-        if len(store["resultados.json"].get("results") or []) >= 2:
+        if len(store["app"].get("results") or []) >= 2:
             break
-        import time
-
         time.sleep(0.1)
+    state = svc.snapshot()
     svc.stop()
 
-    assert out["backend"] == "gist"
-    assert out["gist_id"] == "gist_test"
-    ids = [r["id"] for r in store["resultados.json"]["results"]]
-    assert "x1" in ids and "x2" in ids
-    bad = [r for r in store["resultados.json"]["results"] if r["id"] == "x2"][0]
+    assert out["backend"] == "state"
+    ids = [r["id"] for r in store["app"]["results"]]
+    assert ids[:2] == ["x1", "x2"]
+    bad = [r for r in store["app"]["results"] if r["id"] == "x2"][0]
     assert bad["error"] == "VERB_NOT_ALLOWED"
-    state = svc.snapshot()
     assert state["executed"] == 2, "el contador no debe inflarse al republicar"
-    # Al agente se le da el buzón, nunca el token.
-    handoff = svc.agent_handoff("gist_test", "r", "b", "gist")
-    assert "tok" not in str(handoff)
-    assert handoff["gist_id"] == "gist_test"
+    handoff = svc.agent_handoff("", "zurdonman/Studio-ai", "main", "state")
+    assert handoff["write_needs"].startswith("un token")
+    assert "ghp_" not in str(handoff)
+    assert handoff["anonymous_read"] is True
+    assert "studio-channel" in handoff["read_url"]
+
+
+def test_github_channel_reads_orders_without_any_token():
+    """La app debe poder leer órdenes sin credenciales: el buzón es público."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "mcp_github_channel.py"
+    spec = importlib.util.spec_from_file_location("mcp_github_channel_state", path)
+    ch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ch)
+
+    box = ch._Mailbox("state", "zurdonman/Studio-ai", "studio-channel", "", "", token="",
+                      state_branch="studio-channel", state_path="channel/agent_state.json")
+    assert box.state is not None
+    assert box.token == ""
+
+    # Lectura anónima: la petición no lleva cabecera de autorización.
+    seen = {}
+
+    def fake_api(url, token, method="GET", payload=None):
+        seen["url"], seen["token"], seen["method"] = url, token, method
+        import base64
+
+        body = base64.b64encode(json.dumps(
+            {"agent": {"orders": [{"id": "z1", "verb": "get_state"}]}, "app": {"results": []}}
+        ).encode()).decode()
+        return {"content": body, "sha": "abc"}
+
+    ch._gh_api = fake_api
+    orders = box.read_orders()
+    assert [o["id"] for o in orders["orders"]] == ["z1"]
+    assert seen["token"] == ""
+    assert "studio-channel" in seen["url"]
+
+    # Publicar resultados sin token debe fallar explícitamente, no en silencio.
+    try:
+        box.write_results(["z1"], [{"id": "z1", "ok": True}])
+        raise AssertionError("sin token no se debe poder publicar")
+    except RuntimeError:
+        pass

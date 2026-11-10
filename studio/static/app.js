@@ -4031,10 +4031,10 @@
   const t = $("btn-ghc-stop"); if (t) t.addEventListener("click", stopGitHubChannel);
   const c = $("btn-ghc-copy");
   if (c) c.addEventListener("click", () => {
-    const box = $("ghc-handoff");
-    if (box && box.value) {
-      navigator.clipboard?.writeText(box.value);
-      toast("Datos del canal copiados: pégalos en el chat del agente", "success");
+    const input = $("ghc-pair-url");
+    if (input && input.value) {
+      navigator.clipboard?.writeText(input.value);
+      toast("URL copiada: pégala en el chat del agente una sola vez", "success");
     }
   });
 });
@@ -4047,28 +4047,31 @@ async function refreshGitHubChannel() {
   const startBtn = $("btn-ghc-start");
   const stopBtn = $("btn-ghc-stop");
   const copyBtn = $("btn-ghc-copy");
-  const box = $("ghc-handoff");
+  const pairRow = $("ghc-pair-row");
+  const pairHelp = $("ghc-pair-help");
+  const pairInput = $("ghc-pair-url");
   if (!status) return;
   try {
     const ch = await api("/api/mcp/github-channel", { headers: { "X-Studio-UI": "1" } });
     if (ch.running) {
-      status.innerHTML = `🟢 <b>Activo</b> · ${ch.polls || 0} sondeos · buzón ${ch.gist_id ? "privado (gist)" : ch.backend}` +
+      const modo = ch.mode === "solo_lectura" ? "solo lectura" : "activo";
+      status.innerHTML = `🟢 <b>${modo}</b> · ${ch.polls || 0} sondeos · ${ch.pending || 0} pendientes` +
         (ch.last_error ? ` · <span style="color:#f88">${ch.last_error}</span>` : "");
       if (startBtn) startBtn.hidden = true;
       if (stopBtn) stopBtn.hidden = false;
       if (copyBtn) copyBtn.hidden = false;
-      if (box && ch.agent) {
-        box.hidden = false;
-        box.value = JSON.stringify(ch.agent, null, 2);
-      }
+      if (pairRow) pairRow.hidden = false;
+      if (pairHelp) pairHelp.hidden = false;
+      if (pairInput) pairInput.value = ch.pair_url || "";
     } else {
       status.innerHTML = ch.token_present
-        ? "⚪ Apagado · ya hay un token guardado: basta pulsar «Encender»."
-        : "⚪ Apagado · pega un token de GitHub con permiso <code>gist</code> y pulsa «Encender».";
+        ? "⚪ Apagado · token guardado: pulsa «Encender»."
+        : "⚪ Apagado · sin token solo se pueden leer órdenes; pega uno con <code>Contents: read/write</code> para publicar resultados.";
       if (startBtn) startBtn.hidden = false;
       if (stopBtn) stopBtn.hidden = true;
       if (copyBtn) copyBtn.hidden = true;
-      if (box) box.hidden = true;
+      if (pairRow) pairRow.hidden = true;
+      if (pairHelp) pairHelp.hidden = true;
     }
   } catch (_e) {
     status.textContent = "Canal no disponible en esta versión.";

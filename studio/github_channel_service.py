@@ -4,23 +4,22 @@ Muchos agentes (arena.ai entre ellos) no pueden abrir conexiones hacia el túnel
 de Colab: su egreso solo permite unos pocos dominios, y `api.github.com` es uno
 de ellos. Este servicio invierte la dirección del control:
 
-    agente  --(API de GitHub)-->  gist privado  <--(sondeo)-->  este servicio  -->  servidor local
+    agente (token del usuario) --> estado privado en el repo <-- app (token del usuario)
 
-Todo se enciende desde el panel MCP con un botón. La UI entrega a la aplicación
-las credenciales que el usuario ya proveyó, la aplicación crea el buzón (un gist
-privado) y lanza el bucle en un hilo propio. El usuario no pega comandos.
+Decisiones que definen el comportamiento y conviene no romper:
 
-Decisiones de diseño que importan:
-
-- **Buzón en gist privado por defecto.** El repositorio puede ser privado; no hace
-  falta publicar órdenes ni resultados, y el agente solo necesita el identificador
-  del gist. `backend="repo"` queda como alternativa para repos públicos.
-- **Un solo arranque por proceso.** El estado vive en memoria y el hilo se marca
-  daemon: si el servidor cae, no queda nada vivo que no se pueda reiniciar.
-- **Lista cerrada de verbos.** La ejecución real la hace `tools/mcp_github_channel.py`,
-  que ya rechaza cualquier verbo fuera de la lista y cualquier argumento con
-  credenciales.
-- **Nunca se guarda el token en el repositorio.** Vive en
+- **Token opcional.** Si no hay token de GitHub, la app consulta el buzón en
+  MODO ANÓNIMO: la rama `studio-channel` y el estado del repo son públicos, así
+  que cualquiera puede leer órdenes y resultados, incluido el agente. Con token
+  se usa la API normal (repo privado, o rama publicada por el agente).
+- **Sin copiar y pegar.** El punto de encuentro es fijo y conocido por las dos
+  partes: rama `STUDIO_CHANNEL_STATE_BRANCH` (por defecto `studio-channel`) y
+  `channel/agent_state.json`. La app lo enseña para que se lo pases al agente una
+  vez; no hay que reconfigurar nada en cada arranque de Colab.
+- **Un solo arranque por proceso**, hilo daemon: si el servidor cae, no queda
+  nada vivo que no se pueda reiniciar desde el botón.
+- **Lista cerrada de verbos**: la ejecución real la hace `tools/mcp_github_channel.py`.
+- **El token nunca se escribe en el repo.** Vive en
   `studio_data/state/github_channel.json` con permisos 0600.
 """
 from __future__ import annotations
@@ -34,6 +33,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 _lock = threading.Lock()
+STATE_BRANCH_DEFAULT = "studio-channel"
+STATE_PATH_DEFAULT = "channel/agent_state.json"
+
 _state: Dict[str, Any] = {
     "running": False,
     "backend": "",
@@ -46,6 +48,8 @@ _state: Dict[str, Any] = {
     "executed": 0,
     "last_error": "",
     "last_verb": "",
+    "mode": "",
+    "pending": 0,
     "thread": None,
 }
 _stop = threading.Event()
@@ -91,6 +95,24 @@ def save_token(token: str) -> None:
         pass
 
 
+def _ledger_path() -> Path:
+    return _token_path().with_name("github_channel_executed.json")
+
+
+def _load_ledger() -> set:
+    try:
+        return set(json.loads(_ledger_path().read_text(encoding="utf-8")).get("ids") or [])
+    except (OSError, ValueError):
+        return set()
+
+
+def _save_ledger(ids: set) -> None:
+    try:
+        _ledger_path().write_text(json.dumps({"ids": sorted(ids)[-2000:]}), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _saved_gist() -> str:
     try:
         return str((json.loads(_token_path().read_text(encoding="utf-8")) or {}).get("gist_id", ""))
@@ -112,6 +134,78 @@ def _save_gist(gist_id: str) -> None:
         pass
 
 
+def state_branch() -> str:
+    return (os.environ.get("STUDIO_CHANNEL_STATE_BRANCH") or STATE_BRANCH_DEFAULT).strip()
+
+
+def state_path() -> str:
+    return (os.environ.get("STUDIO_CHANNEL_STATE_PATH") or STATE_PATH_DEFAULT).strip()
+
+
+def repo_slug() -> str:
+    return (os.environ.get("STUDIO_CHANNEL_REPO") or "zurdonman/Studio-ai").strip()
+
+
+def _api(url: str, token: str, method: str = "GET",
+         payload: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """GET/PUT/DELETE a api.github.com. Sin token funciona en repos públicos."""
+    import urllib.error
+    import urllib.request
+
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "studio-ia-channel/2.0")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        return json.loads(body) if body.strip() else {}
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    except (urllib.error.URLError, OSError):
+        return None
+
+
+def read_state(token: str = "") -> Dict[str, Any]:
+    """Lee el estado del canal desde el repo (anónimo si no hay token)."""
+    import base64
+
+    url = (f"https://api.github.com/repos/{repo_slug()}/contents/{state_path()}"
+           f"?ref={state_branch()}")
+    data = _api(url, token)
+    if not isinstance(data, dict) or "content" not in data:
+        return {}
+    try:
+        return json.loads(base64.b64decode(data["content"]).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {}
+
+
+def write_state(body: Dict[str, Any], token: str = "") -> Optional[str]:
+    """Publica el estado en la rama del canal. Sin token no se puede escribir."""
+    import base64
+
+    if not token:
+        return None
+    url = f"https://api.github.com/repos/{repo_slug()}/contents/{state_path()}"
+    existing = _api(f"{url}?ref={state_branch()}", token) or {}
+    payload: Dict[str, Any] = {
+        "message": f"canal: estado {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+        "content": base64.b64encode(json.dumps(body, ensure_ascii=False, indent=2).encode()).decode(),
+        "branch": state_branch(),
+    }
+    if isinstance(existing, dict) and existing.get("sha"):
+        payload["sha"] = existing["sha"]
+    out = _api(url, token, "PUT", payload)
+    return (out or {}).get("commit", {}).get("sha")
+
+
 def _channel_module():
     """Carga `tools/mcp_github_channel.py` como módulo (no está en el paquete)."""
     import importlib.util
@@ -125,10 +219,11 @@ def _channel_module():
     return module
 
 
-def _loop(interval: float, repo: str, branch: str, backend: str, gist_id: str,
+def _loop(interval: float, repo: str, branch: str, backend: str, _unused: str,
           base: str, mcp_token: str, orders: str, results: str) -> None:
     ch = _channel_module()
     counted: set = set()
+    ledger = _load_ledger()
 
     def _on_result(entry: Dict[str, Any]) -> None:
         oid = str(entry.get("id") or "")
@@ -136,6 +231,8 @@ def _loop(interval: float, repo: str, branch: str, backend: str, gist_id: str,
             if not oid or oid in counted:
                 return
             counted.add(oid)
+            ledger.add(oid)
+            _save_ledger(ledger)
             _state["executed"] += 1
             _state["last_verb"] = f"{entry.get('verb')} · {'ok' if entry.get('ok') else 'fallo'}"
 
@@ -143,8 +240,24 @@ def _loop(interval: float, repo: str, branch: str, backend: str, gist_id: str,
         try:
             with _lock:
                 _state["last_poll"] = time.time()
-            ch.run_once(repo, orders, results, load_saved_token(), False, base=base,
-                        mcp_token=mcp_token, branch=branch, backend=backend, gist_id=gist_id,
+            token = load_saved_token()
+            if not token:
+                # Sin token NO se ejecuta nada: no se podrían publicar los resultados y
+                # las órdenes se repetirían en cada sondeo (gastando créditos por nada).
+                pending = _pending_orders()
+                with _lock:
+                    _state["polls"] += 1
+                    _state["pending"] = pending
+                    _state["last_error"] = (
+                        f"{pending} orden(es) esperando. Sin token de GitHub no se publican "
+                        "resultados, y por seguridad no se ejecuta nada." if pending
+                        else "Solo lectura: pega un token de GitHub para ejecutar órdenes."
+                    )
+                _stop.wait(interval)
+                continue
+            ch.run_once(repo, orders, results, token, False, base=base,
+                        mcp_token=mcp_token, branch=branch, backend=backend,
+                        state_branch=state_branch(), state_path=state_path(),
                         on_result=_on_result)
             with _lock:
                 _state["polls"] += 1
@@ -153,6 +266,14 @@ def _loop(interval: float, repo: str, branch: str, backend: str, gist_id: str,
             with _lock:
                 _state["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
         _stop.wait(interval)
+
+
+def _pending_orders() -> int:
+    try:
+        agent = (read_state(load_saved_token()) or {}).get("agent") or {}
+        return len(agent.get("orders") or [])
+    except Exception:
+        return 0
 
 
 def start(gh_token: str = "", gist_id: str = "", backend: str = "gist",
@@ -164,40 +285,28 @@ def start(gh_token: str = "", gist_id: str = "", backend: str = "gist",
     global _state
     with _lock:
         if _state["running"]:
-            return snapshot()
+            return {**snapshot(), "ok": True}
     token = (gh_token or "").strip() or load_saved_token()
-    if not token:
-        return {"ok": False, "error_code": "NO_GITHUB_TOKEN",
-                "error": "Falta el token de GitHub (Contents: read/write o scope gist)."}
-    save_token(token)
-
-    ch = _channel_module()
-    backend = "repo" if backend == "repo" else "gist"
-    gist_id = (gist_id or "").strip() or _saved_gist()
-    if backend == "gist" and not gist_id:
-        try:
-            gist_id = ch.GistMailbox.create(token)
-        except Exception as exc:
-            return {"ok": False, "error_code": "GIST_CREATE_FAILED",
-                    "error": f"{type(exc).__name__}: {exc}"[:300],
-                    "hint": "El token necesita permiso para crear gists (o usa backend=repo)."}
-        _save_gist(gist_id)
+    if token:
+        save_token(token)
+    backend = "repo" if backend == "repo" else "state"
 
     _stop.clear()
     with _lock:
-        _state.update({"running": True, "backend": backend, "gist_id": gist_id, "repo": repo,
+        _state.update({"running": True, "backend": backend, "gist_id": "", "repo": repo,
                        "branch": branch, "started_at": time.time(), "last_error": "",
                        "polls": 0, "executed": 0})
     thread = threading.Thread(
         target=_loop,
-        args=(max(5.0, float(interval)), repo, branch, backend, gist_id,
+        args=(max(5.0, float(interval)), repo, branch, backend, "",
               base or f"http://127.0.0.1:{os.environ.get('PORT', '7860')}", mcp_token, orders, results),
         name="github-channel",
         daemon=True,
     )
     _state["thread"] = thread
+    _state["mode"] = "activo" if token else "solo_lectura"
     thread.start()
-    return snapshot()
+    return {**snapshot(), "ok": True}
 
 
 def stop() -> Dict[str, Any]:
@@ -213,17 +322,20 @@ def snapshot() -> Dict[str, Any]:
         return {k: v for k, v in _state.items() if k != "thread"}
 
 
-def agent_handoff(gist_id: str, repo: str, branch: str, backend: str) -> Dict[str, Any]:
-    """Lo que hay que darle al agente: solo el identificador del buzón, nunca el token."""
-    if backend == "gist":
+def agent_handoff(_gist_id: str, repo: str, branch: str, backend: str) -> Dict[str, Any]:
+    """Lo que hay que darle al agente: el punto de encuentro, nunca el token."""
+    if backend != "repo":
         return {
-            "backend": "gist",
-            "gist_id": gist_id,
-            "orders_url": f"https://api.github.com/gists/{gist_id}",
-            "orders_file": "ordenes.json",
-            "results_file": "resultados.json",
-            "how": ("PATCH/POST a https://api.github.com/gists/{id} con files.ordenes.json "
-                    "para dejar órdenes; GET al mismo endpoint para leer resultados.json."),
+            "backend": "state",
+            "repo": repo,
+            "state_branch": state_branch(),
+            "state_path": state_path(),
+            "read_url": (f"https://api.github.com/repos/{repo}/contents/{state_path()}"
+                         f"?ref={state_branch()}"),
+            "anonymous_read": True,
+            "write_needs": "un token de GitHub con Contents: read/write sobre el repo",
+            "how": ("GET a read_url (base64 → JSON) para leer `app.results`; "
+                    "PUT a la misma ruta sin ?ref para publicar `agent.orders`."),
         }
     return {
         "backend": "repo",

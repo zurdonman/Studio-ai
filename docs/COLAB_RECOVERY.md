@@ -184,25 +184,33 @@ Y para cerrar la pestaña sin dejar la GPU encendida, `POST /api/shutdown` (bot�
 ## Canal de control cuando el agente no alcanza el túnel
 
 El agente de Arena no puede conectarse a `trycloudflare.com` (ni a ningún otro túnel: su egreso solo
-permite `api.github.com`, `pypi.org` y `registry.npmjs.org`), así que no puede lanzar trabajos por MCP
-contra la instancia. La vía que sí funciona invierte la dirección:
+permite `api.github.com`, `pypi.org` y `registry.npmjs.org`). La vía que funciona invierte la dirección:
 
-    agente --(API de GitHub)--> buzón privado (gist) <--(sondeo)--> app --(MCP local)--> trabajos
+    agente --(API de GitHub, público)--> buzón <--(sondeo)--> app --(MCP local)--> trabajos
 
-**Se enciende desde la aplicación.** Panel MCP → «🔗 Canal para agente arena.ai» → pegar el token de
-GitHub → «Encender canal». No hay comandos que copiar a la celda: la app crea el buzón, lanza el bucle
-en un hilo y muestra el estado (sondeos, último verbo, último error) y el botón «Copiar para el agente»,
-que entrega **solo el identificador del gist**, nunca el token.
+**Buzón:** `channel/agent_state.json` en la rama `studio-channel`. Es un único JSON con dos mitades:
+`agent.orders` (lo que pide el agente) y `app.results` (lo que devuelve la app). La lectura es
+**anónima** porque el repositorio es público; escribir resultados exige un token con
+`Contents: read/write`, que aporta el usuario **una vez** y se guarda en
+`studio_data/state/github_channel.json` (0600, nunca en el repo).
 
-Por qué gist privado y no el repositorio: el repo puede ser privado y no hace falta publicar órdenes ni
-resultados. El agente solo necesita `https://api.github.com/gists/<id>`. El backend `repo`
-(`channel/ordenes.json` + `state/channel/resultados.json`) sigue disponible para repos públicos con
-`--backend repo`.
+**Emparejamiento:** el panel MCP da una URL (`/mcp/emparejar?c=…`) que contiene solo la descripción
+del buzón. Se pega en el chat del agente **una vez**; el buzón es fijo entre arranques de Colab.
 
-El canal habla con el servidor local por `http://127.0.0.1:7860/mcp` **a propósito**: importar
-`studio.mcp_server` en su propio proceso crearía una segunda cola de trabajos invisible para la
-interfaz y duplicaría el modelo en RAM. Todo lo que ejecute aparece en la app.
+**Sin token no se ejecuta nada.** No es una limitación, es una protección: si la app ejecutase sin
+poder publicar el resultado, las órdenes se repetirían en cada sondeo y gastarían créditos en trabajos
+cuya salida nadie vería. En ese modo el panel muestra «solo lectura · N pendientes».
 
-Límites, deliberados: lista cerrada de verbos (nada de shell, descargas de modelos ni borrado de pesos),
-argumentos con credenciales rechazados, cada orden se ejecuta una sola vez por `id`, y el token de GitHub
-vive en `studio_data/state/github_channel.json` con permisos 600.
+**Anti-duplicados:** además de `app.executed_ids`, la app guarda un registro local
+(`studio_data/state/github_channel_executed.json`) para que una orden nunca se repita aunque falle la
+publicación.
+
+**Aislamiento de la rama:** `studio-channel` no contiene el código y no dispara despliegues. Ventaja
+colateral: los resultados no pasan por `main`.
+
+**Privacidad, sin adornos:** el repositorio es público, así que los resultados del canal (rutas de
+media, estados de trabajo) son legibles por cualquiera que sepa la URL. Si eso importa, el modo
+`privado` (`backend=repo` sobre repo privado) requiere que el agente tenga también token de lectura.
+
+Límites: 20 s de latencia como máximo, y si la sesión de Colab muere el agente deja de recibir
+resultados. La app publica un latido en `app.updated`.

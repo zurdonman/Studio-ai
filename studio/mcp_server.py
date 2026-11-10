@@ -3776,6 +3776,23 @@ def api_get_mcp_info(request: Request) -> Dict[str, Any]:
     }
 
 
+def _pair_url(request: Request, handoff: Dict[str, Any]) -> str:
+    """URL única que el usuario pega en el chat del agente una sola vez.
+
+    Lleva la descripción del buzón y NUNCA el token de GitHub: sirve para que el
+    agente sepa dónde leer y escribir sin volver a configurar nada.
+    """
+    import base64
+
+    blob = base64.urlsafe_b64encode(
+        json.dumps(handoff, ensure_ascii=False).encode()).decode().rstrip("=")
+    base = str(request.base_url).rstrip("/")
+    ui = (request.headers.get("origin") or "").strip().rstrip("/")
+    if ui.startswith("http"):
+        base = ui
+    return f"{base}/mcp/emparejar?c={blob}"
+
+
 class GitHubChannelReq(BaseModel):
     gh_token: str = ""
     gist_id: str = ""
@@ -3813,8 +3830,50 @@ def api_mcp_github_channel(request: Request) -> Dict[str, Any]:
         "limits": ("Lista cerrada de verbos: sin shell, sin descargas y sin borrar pesos. "
                    "El token de GitHub nunca sale de esta máquina."),
     }
-    if trusted and state.get("running"):
-        payload["agent"] = channel.agent_handoff(gist_id, repo, branch, state.get("backend") or "gist")
+    payload["mode"] = state.get("mode") or ("activo" if token_present else "solo_lectura")
+    payload["pending"] = state.get("pending", 0)
+    payload["last_verb"] = state.get("last_verb", "")
+    if trusted:
+        handoff = channel.agent_handoff(gist_id, repo, branch, state.get("backend") or "state")
+        handoff["enabled"] = bool(state.get("running"))
+        handoff["mode"] = payload["mode"]
+        payload["agent"] = handoff
+        payload["pair_url"] = _pair_url(request, handoff)
+    return payload
+
+
+@mcp_router.get("/mcp/emparejar")
+def api_mcp_pair(request: Request, c: str = "") -> Dict[str, Any]:
+    """Página de emparejamiento que el agente lee: dónde está el buzón y cómo usarlo.
+
+    Es pública a propósito: quien tiene la URL puede leer los resultados del canal,
+    pero NO puede publicar órdenes (eso exige el token de GitHub del usuario) ni
+    obtener credenciales de esta instancia.
+    """
+    import base64
+
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "what": "Canal de control de Studio IA por GitHub (para agentes sin túnel).",
+        "usage": [
+            "1) GET al endpoint 'read_url' con Accept: application/vnd.github+json.",
+            "2) Decodifica content (base64) → JSON con las claves 'agent' y 'app'.",
+            "3) Los resultados de tus órdenes están en 'app.results' / 'app.executed_ids'.",
+            "4) Para escribir órdenes hace falta un token de GitHub con Contents: read/write "
+            "(lo aporta el usuario, nunca el servidor).",
+        ],
+        "verbs": ["get_state", "get_workflow_preset", "get_work_state", "answer_preference",
+                  "generate_image", "generate_video", "generate_speech", "generate_ambience",
+                  "analyze_coherence", "lipsync", "render_montage", "wait_for_job",
+                  "export_session_log"],
+        "limits": "Sin shell, sin descargas y sin borrar pesos. Una orden por id.",
+    }
+    if c:
+        try:
+            raw = c + "=" * (-len(c) % 4)
+            payload["channel"] = json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
+        except (ValueError, UnicodeDecodeError):
+            payload["channel_error"] = "parámetro c inválido"
     return payload
 
 

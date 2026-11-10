@@ -21,9 +21,10 @@ manual queda solo para depurar:
     python3 tools/mcp_github_channel.py --once --dry-run
 
 Transporte (`--backend`):
-  - `gist` (por defecto): un gist privado del usuario hace de buzón. El repo puede
-    ser privado; el agente solo necesita la URL del gist.
-  - `repo`: ficheros `channel/ordenes.json` y `state/channel/resultados.json`.
+  - `state` (por defecto): un fichero JSON en la rama `studio-channel` hace de buzón.
+    El agente escribe `agent.orders`; la app escribe `app.results`. La lectura
+    funciona sin credenciales cuando el repo es público.
+  - `repo`: ficheros `channel/ordenes.json` y `state/channel/resultados.json` (legado).
 """
 from __future__ import annotations
 
@@ -38,11 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 DEFAULT_REPO = "zurdonman/Studio-ai"
-DEFAULT_GIST_ID = ""
 
-# El canal NO depende de que el repo sea público: por defecto usa un gist privado,
-# que el agente alcanza por la misma API (api.github.com) y que no expone ni el
-# código ni los resultados del usuario en internet.
 DEFAULT_ORDERS = "channel/ordenes.json"
 DEFAULT_RESULTS = "state/channel/resultados.json"
 
@@ -116,11 +113,11 @@ def _read_json_file(repo: str, path: str, token: str, branch: str = "") -> Optio
 
 def _gh_api(url: str, token: str, method: str = "GET",
             payload: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """Llamada mínima a la API de GitHub (solo api.github.com, único dominio permitido)."""
+    """Llamada mínima a la API de GitHub (api.github.com es el único dominio que el agente alcanza)."""
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "studio-ia-github-channel/1.0")
+    req.add_header("User-Agent", "studio-ia-github-channel/2.0")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     if data is not None:
@@ -137,41 +134,60 @@ def _gh_api(url: str, token: str, method: str = "GET",
         return None
 
 
-class GistMailbox:
-    """Buzón de órdenes en un gist privado: dos ficheros, `ordenes.json` y `resultados.json`."""
+class StateMailbox:
+    """Buzón = un fichero JSON en una rama aparte del repositorio.
 
-    def __init__(self, gist_id: str, token: str) -> None:
-        self.gist_id = gist_id
+    Estructura, pensada para que dos partes escriban sin pisarse:
+
+        {"schema": 1,
+         "agent": {"orders": [{"id": "a1", "verb": "get_state", "args": {...}}]},
+         "app":   {"executed_ids": ["a1"], "results": [...], "updated": "..."}}
+
+    El agente escribe `agent`; la app escribe `app`. La lectura funciona **sin
+    credenciales** cuando el repositorio (y la rama) son públicos, así que la app
+    no necesita token para leer órdenes. Escribir resultados sí exige token.
+    """
+
+    def __init__(self, repo: str, branch: str, path: str, token: str) -> None:
+        self.repo = repo
+        self.branch = branch
+        self.path = path
         self.token = token
 
-    @staticmethod
-    def create(token: str, description: str = "Studio IA · canal de control") -> str:
-        out = _gh_api("https://api.github.com/gists", token, "POST", {
-            "description": description,
-            "public": False,
-            "files": {"ordenes.json": {"content": json.dumps({"orders": []}, indent=2)},
-                      "resultados.json": {"content": json.dumps({"results": []}, indent=2)}},
-        })
-        if not out or not out.get("id"):
-            raise RuntimeError("no se pudo crear el gist del canal")
-        return str(out["id"])
+    def _url(self) -> str:
+        return f"https://api.github.com/repos/{self.repo}/contents/{self.path}"
 
-    def read(self, name: str) -> Dict[str, Any]:
-        out = _gh_api(f"https://api.github.com/gists/{self.gist_id}", self.token)
-        if not out:
+    def read(self) -> Dict[str, Any]:
+        import base64
+
+        data = _gh_api(f"{self._url()}?ref={self.branch}", self.token)
+        if not isinstance(data, dict) or "content" not in data:
             return {}
-        f = (out.get("files") or {}).get(name) or {}
-        content = f.get("content")
-        if content is None and f.get("raw_url"):
-            content = (_gh_api(f["raw_url"], self.token) or {}).get("raw", "")
         try:
-            return json.loads(content or "{}")
-        except (TypeError, json.JSONDecodeError):
+            return json.loads(base64.b64decode(data["content"]).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
             return {}
 
-    def write(self, name: str, body: Dict[str, Any]) -> None:
-        _gh_api(f"https://api.github.com/gists/{self.gist_id}", self.token, "PATCH",
-                {"files": {name: {"content": json.dumps(body, indent=2, ensure_ascii=False)}}})
+    def write_app(self, ids: List[str], results: List[Dict[str, Any]]) -> None:
+        import base64
+
+        if not self.token:
+            raise RuntimeError("sin token de GitHub no se pueden publicar resultados")
+        current = self.read() or {"schema": 1, "agent": {"orders": []}}
+        current["app"] = {
+            "executed_ids": ids,
+            "results": results[-200:],
+            "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        existing = _gh_api(f"{self._url()}?ref={self.branch}", self.token) or {}
+        payload: Dict[str, Any] = {
+            "message": f"canal: resultados {time.strftime('%H:%M:%S')}",
+            "content": base64.b64encode(json.dumps(current, ensure_ascii=False, indent=2).encode()).decode(),
+            "branch": self.branch,
+        }
+        if isinstance(existing, dict) and existing.get("sha"):
+            payload["sha"] = existing["sha"]
+        _gh_api(self._url(), self.token, "PUT", payload)
 
 
 def _rpc(base: str, token: str, payload: Dict[str, Any], session: Dict[str, str]) -> Dict[str, Any]:
@@ -242,48 +258,48 @@ def _wait_job(base: str, token: str, session: Dict[str, str], job_id: str,
 
 
 class _Mailbox:
-    """Abstracción mínima: leer/escribir el buzón, sea gist (privado) o repo (público)."""
+    """Buzón: estado en rama aparte (defecto) o ficheros del repo (legado)."""
 
     def __init__(self, backend: str, repo: str, branch: str, orders_path: str, results_path: str,
-                 gist_id: str, token: str) -> None:
+                 token: str = "", state_branch: str = "", state_path: str = "") -> None:
         self.backend = backend
         self.repo = repo
         self.branch = branch
         self.orders_path = orders_path
         self.results_path = results_path
         self.token = token
-        self.gist = GistMailbox(gist_id, token) if backend == "gist" else None
+        self.state = (StateMailbox(repo, state_branch or branch, state_path, token)
+                      if backend == "state" else None)
 
     def read_orders(self) -> Dict[str, Any]:
-        if self.gist:
-            return self.gist.read("ordenes.json")
+        if self.state:
+            return {"orders": ((self.state.read() or {}).get("agent") or {}).get("orders") or []}
         return _read_json_file(self.repo, self.orders_path, self.token, self.branch) or {}
 
     def read_results(self) -> Dict[str, Any]:
-        if self.gist:
-            return self.gist.read("resultados.json")
+        if self.state:
+            return (self.state.read() or {}).get("app") or {}
         return _read_json_file(self.repo, self.results_path, self.token, self.branch) or {}
 
     def write_results(self, ids: List[str], results: List[Dict[str, Any]]) -> None:
-        if self.gist:
-            self.gist.write("resultados.json", {
-                "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "executed_ids": ids, "results": results[-200:]})
+        if self.state:
+            self.state.write_app(ids, results)
             return
         _write_results(self.repo, self.results_path, self.token, ids, results, self.branch)
 
 
 def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run: bool,
              base: str = "http://127.0.0.1:7860", mcp_token: str = "", branch: str = "",
-             backend: str = "gist", gist_id: str = "",
+             backend: str = "state", state_branch: str = "", state_path: str = "",
              on_result: Optional[Callable[[Dict[str, Any]], None]] = None) -> int:
     """Una pasada: lee órdenes nuevas, las ejecuta y publica resultados.
 
-    `backend="gist"` (por defecto) no exige que el repo sea público: el buzón es un
-    gist privado. `backend="repo"` usa los ficheros del repositorio y solo tiene
-    sentido si el repo es público (o si el agente tiene token de lectura).
+    `backend="state"` (por defecto) usa una rama aparte con un único JSON de estado:
+    lectura anónima si el repo es público, escritura de resultados solo con token.
+    `backend="repo"` mantiene el formato antiguo por compatibilidad.
     """
-    box = _Mailbox(backend, repo, branch, orders_path, results_path, gist_id, token)
+    box = _Mailbox(backend, repo, branch, orders_path, results_path, token,
+                   state_branch, state_path)
     orders = box.read_orders()
     queue = orders.get("orders") or []
     if not queue:
@@ -395,9 +411,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Canal de control por GitHub para Studio IA.")
     ap.add_argument("--repo", default=os.environ.get("STUDIO_CHANNEL_REPO", DEFAULT_REPO))
     ap.add_argument("--branch", default=os.environ.get("STUDIO_CHANNEL_BRANCH", "arena/f0997b49-studio-ai"))
-    ap.add_argument("--backend", default=os.environ.get("STUDIO_CHANNEL_BACKEND", "gist"),
-                    choices=("gist", "repo"), help="buzón: gist privado (defecto) o ficheros del repo")
-    ap.add_argument("--gist-id", default=os.environ.get("STUDIO_CHANNEL_GIST_ID", DEFAULT_GIST_ID))
+    ap.add_argument("--backend", default=os.environ.get("STUDIO_CHANNEL_BACKEND", "state"),
+                    choices=("state", "repo"),
+                    help="buzón: estado en rama aparte (defecto) o ficheros del repo (legado)")
+    ap.add_argument("--state-branch", default=os.environ.get("STUDIO_CHANNEL_STATE_BRANCH", "studio-channel"))
+    ap.add_argument("--state-path", default=os.environ.get("STUDIO_CHANNEL_STATE_PATH", "channel/agent_state.json"))
     ap.add_argument("--orders", default=DEFAULT_ORDERS)
     ap.add_argument("--results", default=DEFAULT_RESULTS)
     ap.add_argument("--once", action="store_true", help="una pasada")
@@ -416,7 +434,7 @@ def main() -> int:
     while True:
         run_once(args.repo, args.orders, args.results, token, args.dry_run,
                  base=args.url.rstrip("/"), mcp_token=args.mcp_token, branch=args.branch,
-                 backend=args.backend, gist_id=args.gist_id)
+                 backend=args.backend, state_branch=args.state_branch, state_path=args.state_path)
         if args.poll <= 0:
             return 0
         time.sleep(max(5.0, args.poll))

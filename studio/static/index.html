@@ -1675,20 +1675,25 @@
             una lista cerrada de acciones (sin shell, sin descargas, sin borrar pesos).
           </p>
 
-          <label class="field-label" style="font-size:11px;">1 · Token de GitHub (se guarda en esta máquina, nunca en el repo)</label>
+          <label class="field-label" style="font-size:11px;">1 · Token de GitHub <span style="opacity:.65">(opcional: solo para publicar resultados)</span></label>
           <div class="row-gap">
-            <input type="password" id="ghc-token" placeholder="ghp_… con permiso 'gist' o Contents:read/write" autocomplete="off" />
+            <input type="password" id="ghc-token" placeholder="ghp_… con Contents: read/write (déjalo vacío para probar)" autocomplete="off" />
           </div>
 
           <div class="row-gap" style="margin-top:8px;">
             <button type="button" class="btn btn-primary btn-sm" id="btn-ghc-start">🔗 Encender canal para arena.ai</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btn-ghc-stop" hidden>Detener</button>
-            <button type="button" class="btn btn-secondary btn-sm" id="btn-ghc-copy" hidden>📋 Copiar para el agente</button>
           </div>
 
           <div id="ghc-status" style="font-size:12px; opacity:.8; margin-top:8px;">Comprobando…</div>
-          <textarea id="ghc-handoff" rows="6" readonly hidden
-                    style="font-family:monospace;font-size:11px;margin-top:6px;width:100%;"></textarea>
+          <div class="row-gap" id="ghc-pair-row" hidden style="margin-top:8px;">
+            <input type="text" id="ghc-pair-url" readonly placeholder="URL de emparejamiento" />
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-ghc-copy">📋 Copiar para el agente</button>
+          </div>
+          <p id="ghc-pair-help" hidden style="font-size:11px; opacity:.7; margin:4px 0 0;">
+            Pega esa URL en el chat del agente <b>una sola vez</b>. No contiene tu token y no cambia
+            entre arranques: el buzón es fijo («canal/agent_state.json» en la rama «studio-channel»).
+          </p>
         </div>
       </div>
     </div>

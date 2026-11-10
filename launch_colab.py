@@ -303,7 +303,8 @@ def main() -> None:
     msg_channel = (
         "🔗 CANAL PARA AGENTE arena.ai: listo · enciéndelo en el panel MCP (botón «Encender canal»)"
         if gh_token else
-        "🔗 CANAL PARA AGENTE arena.ai: pega el token de GitHub en el panel MCP y pulsa «Encender»"
+        "🔗 CANAL PARA AGENTE arena.ai: en el panel MCP pega un PAT con 'Contents: read/write' "
+        "y pulsa «Encender» (se guarda y no se vuelve a pedir)"
     )
 
     hw = initial_status.get("hardware", {})
