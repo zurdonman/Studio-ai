@@ -3,10 +3,10 @@
   "agent": {
     "orders": [
       {
-        "id": "diag-1",
+        "id": "diag-2",
         "verb": "get_state",
         "args": {
-          "include_recent_assets": false
+          "include_recent_assets": true
         },
         "wait": false
       }
