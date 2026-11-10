@@ -1,51 +1,15 @@
 {
   "schema": 1,
   "agent": {
-    "orders": [
-      {
-        "id": "r1",
-        "verb": "get_state",
-        "args": {
-          "include_recent_assets": false
-        },
-        "wait": false
-      },
-      {
-        "id": "r2",
-        "verb": "get_workflow_preset",
-        "args": {
-          "preset_id": "coherencia_personajes_entorno_avance",
-          "scene_description": "dos vecinos, 30 s"
-        },
-        "wait": false
-      }
-    ]
+    "orders": []
   },
   "app": {
     "executed_ids": [
       "r1",
       "r2"
     ],
-    "results": [
-      {
-        "id": "r1",
-        "verb": "get_state",
-        "ok": true,
-        "seconds": 0.0,
-        "result": {
-          "ok": true
-        }
-      },
-      {
-        "id": "r2",
-        "verb": "get_workflow_preset",
-        "ok": true,
-        "seconds": 0.0,
-        "result": {
-          "ok": true
-        }
-      }
-    ],
-    "updated": "2026-11-10T15:35:30Z"
+    "results": [],
+    "updated": "2026-11-05T00:00:00Z",
+    "note": "canal de Studio IA \u00b7 rama de estado, no contiene c\u00f3digo"
   }
 }
