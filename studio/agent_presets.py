@@ -164,10 +164,13 @@ def _infer_clip_plan_from_text(
             amount = values[word] if word in values else float(word.replace(",", "."))
             target_seconds = amount * (60.0 if "min" in duration else 1.0)
 
-    if target_seconds > 0 and (requested_num_clips is None or int(requested_num_clips) == 2):
+    # Un número de clips explícito MANDA sobre cualquier duración mencionada en el texto:
+    # antes, pedir 2 clips se interpretaba como "sin especificar" y el texto lo sobrescribía.
+    if requested_num_clips is not None and int(requested_num_clips) > 0:
+        return max(1, min(12, int(requested_num_clips))), batch
+    if target_seconds > 0:
         return max(1, min(12, math.ceil(target_seconds / batch))), batch
-    n = int(requested_num_clips) if requested_num_clips is not None else 2
-    return max(1, min(12, n)), batch
+    return 2, batch
 
 
 _DEFAULT_STREET_DIALOGUE_POOL = [

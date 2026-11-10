@@ -464,3 +464,15 @@ def test_public_mcp_info_never_hands_the_token_to_a_stranger():
             __import__("os").environ.pop("STUDIO_MCP_TOKEN", None)
         else:
             __import__("os").environ["STUDIO_MCP_TOKEN"] = previous
+
+
+def test_explicit_clip_count_beats_a_duration_mentioned_in_the_text():
+    """Pedir 2 clips y decir '10 segundos' debe dar 2 clips, no lo que diga el texto."""
+    from studio.agent_presets import _infer_clip_plan_from_text as infer
+
+    assert infer("dos personas andando, el vídeo debe durar 10 segundos", 2) == (2, 5.0)
+    assert infer("dos vecinos, el vídeo debe durar 30 segundos", None)[0] == 6
+    assert infer("un paseo de un minuto", None)[0] == 12
+    assert infer("lo que sea, 30 segundos", 6)[0] == 6
+    assert infer("dos personas andando", None)[0] == 2
+    assert infer("x", 99)[0] == 12  # acotado al máximo del preset
