@@ -1,5 +1,0 @@
-{
-  "version": 1,
-  "note": "Órdenes para tools/mcp_github_channel.py. Solo verbos de la lista cerrada; el agente no puede ejecutar shell, descargar modelos ni borrar pesos desde aquí.",
-  "orders": []
-}

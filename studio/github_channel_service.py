@@ -455,8 +455,10 @@ def autostart_if_possible(mcp_token: str = "") -> Dict[str, Any]:
     Pensado para llamarse al iniciar el servidor: si el usuario configuró el secreto
     una vez, cada sesión de Colab queda conectada sin pulsar nada.
     """
-    if (os.environ.get("STUDIO_CHANNEL_AUTOSTART") or "1").strip() == "0":
-        return {"ok": False, "skipped": "autostart desactivado"}
+    # Por defecto NO se enciende solo: es un canal de diagnóstico, no parte del
+    # producto. Se activa con STUDIO_CHANNEL_AUTOSTART=1 o desde el panel.
+    if (os.environ.get("STUDIO_CHANNEL_AUTOSTART") or "0").strip() != "1":
+        return {"ok": False, "skipped": "autostart desactivado (por defecto) o STUDIO_CHANNEL_AUTOSTART != 1"}
     if not load_saved_token():
         return {"ok": False, "skipped": "sin credenciales guardadas"}
     return start(mcp_token=mcp_token)

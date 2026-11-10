@@ -805,6 +805,11 @@ def test_github_channel_can_autostart_without_user_actions(monkeypatch):
     assert out["ok"] is False and "skipped" in out
     assert started == {}
 
+    # Por defecto está apagado: es un canal de diagnóstico, no parte del producto.
+    monkeypatch.delenv("STUDIO_CHANNEL_AUTOSTART", raising=False)
+    monkeypatch.setattr(svc, "load_saved_token", lambda: "tok")
+    assert svc.autostart_if_possible(mcp_token="t")["ok"] is False
+
     # Y se puede desactivar explícitamente.
     monkeypatch.setenv("STUDIO_CHANNEL_AUTOSTART", "0")
     monkeypatch.setattr(svc, "load_saved_token", lambda: "tok")

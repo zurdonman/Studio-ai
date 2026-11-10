@@ -321,10 +321,10 @@ def main() -> None:
     if gh_token:
         env["STUDIO_CHANNEL_GH_TOKEN"] = gh_token
     msg_channel = (
-        "🔗 CANAL PARA AGENTE arena.ai: ACTIVO AUTOMÁTICAMENTE (credenciales encontradas)"
-        if gh_token else
-        "🔗 CANAL PARA AGENTE arena.ai: sin credenciales. Configúralas UNA vez en Colab → 🔑 Secrets "
-        "→ nombre «GH_TOKEN», y a partir de ahí se enciende solo en cada sesión."
+        "🔗 Canal para agente externo (arena.ai): APAGADO · opcional, se enciende en el panel MCP"
+        if not gh_token else
+        "🔗 Canal para agente externo (arena.ai): APAGADO · credenciales presentes, "
+        "se enciende en el panel MCP si lo necesitas"
     )
 
     hw = initial_status.get("hardware", {})
