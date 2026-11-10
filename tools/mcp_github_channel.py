@@ -365,7 +365,7 @@ def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run
                 "verb": verb,
                 "ok": bool(out.get("ok", True)) and out.get("status") in (None, "completed"),
                 "seconds": round(time.time() - started, 1),
-                "result": _compact(out),
+                "result": _compact(out, verb),
             }
         except Exception as exc:  # un error se reporta, nunca tumba el canal
             entry = {"id": oid, "verb": verb, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:400]}
@@ -379,13 +379,69 @@ def run_once(repo: str, orders_path: str, results_path: str, token: str, dry_run
     return 0
 
 
-def _compact(out: Dict[str, Any]) -> Dict[str, Any]:
-    """Resultado legible sin volcar prompts enteros ni credenciales."""
-    keys = ("ok", "status", "job_id", "error_code", "error", "progress_pct", "elapsed_seconds",
-            "rel_path", "filename", "media_url", "model_id", "video_submode")
+DIAGNOSTIC_KEYS = ("ok", "status", "job_id", "error_code", "error", "progress_pct",
+                   "elapsed_seconds", "rel_path", "filename", "media_url", "model_id",
+                   "video_submode")
+
+# Límite de tamaño de lo que se publica: el buzón es un JSON en un repo, no un log.
+MAX_PUBLISHED_CHARS = 12000
+
+
+def _summarize_state(out: Dict[str, Any]) -> Dict[str, Any]:
+    """Resumen útil del estado de la máquina.
+
+    Antes se descartaba TODO y el agente recibía `{"ok": true}`: sin GPU, sin VRAM,
+    sin disco y sin saber qué código corría. Depurar así es imposible.
+    """
+    hw = out.get("hardware") or {}
+    gpu = hw.get("gpu") or {}
+    ram = hw.get("ram") or {}
+    disk = hw.get("disk") or {}
+    credits = hw.get("credits") or {}
+    build = out.get("build") or {}
+    loaded = out.get("loaded_in_vram") or []
+    jobs = out.get("active_jobs") or []
+
+    def _names(value):
+        if isinstance(value, list):
+            return [str((v or {}).get("name") or (v or {}).get("id") or v)[:60] for v in value][:10]
+        return value
+
+    summary: Dict[str, Any] = {
+        "gpu": {k: gpu.get(k) for k in ("gpu_name", "has_gpu", "vram_total_gb", "vram_free_gb",
+                                        "measurement_source") if k in gpu},
+        "ram": {k: ram.get(k) for k in ("total_gb", "available_gb", "used_gb") if k in ram},
+        "disk": {k: disk.get(k) for k in ("free_gb", "total_gb", "used_gb") if k in disk},
+        "credits": {k: credits.get(k) for k in ("hourly_rate", "is_estimate", "notice",
+                                                "source", "autoshutdown_seconds_left") if k in credits},
+        "build": {k: build.get(k) for k in ("commit", "short_commit", "branch", "dirty") if k in build},
+        "loaded_in_vram": _names(loaded),
+        "active_jobs": [{"id": (j or {}).get("id"), "status": (j or {}).get("status"),
+                         "progress_pct": (j or {}).get("progress_pct")} for j in jobs][:5],
+        "payload_keys": sorted(out.keys()),
+    }
+    return summary
+
+
+def _compact(out: Dict[str, Any], verb: str = "") -> Dict[str, Any]:
+    """Resultado legible sin volcar prompts enteros ni credenciales... pero sin cegar."""
     result = out.get("result") if isinstance(out.get("result"), dict) else {}
-    merged = {**out, **{k: v for k, v in result.items() if k in keys}}
-    return {k: merged[k] for k in keys if k in merged}
+    merged = {**out, **result}
+    compact = {k: merged[k] for k in DIAGNOSTIC_KEYS if k in merged}
+    if verb == "get_state":
+        compact["state"] = _summarize_state(merged)
+    elif verb == "get_workflow_preset":
+        plan = merged.get("plan") if isinstance(merged.get("plan"), dict) else {}
+        compact["plan_keys"] = sorted(plan.keys())[:20]
+        for key in ("phases", "steps", "video_lora_id", "mode", "submode"):
+            if key in merged:
+                compact[key] = merged[key]
+    text = json.dumps(compact, ensure_ascii=False)
+    if len(text) > MAX_PUBLISHED_CHARS:
+        compact = {"ok": compact.get("ok", True), "truncated": True,
+                   "note": f"resultado de {len(text)} caracteres recortado",
+                   "keys": sorted(merged.keys())}
+    return compact
 
 
 def _write_results(repo: str, path: str, token: str, ids: List[str], results: List[Dict[str, Any]],

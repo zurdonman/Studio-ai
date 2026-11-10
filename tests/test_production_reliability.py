@@ -900,3 +900,53 @@ def test_channel_actions_are_trusted_behind_a_tunnel_proxy():
                                         "cambridge-comics-constraint-gather.trycloudflare.com",
                                         "x-forwarded-proto": "https", "origin": tunnel,
                                         "x-studio-ui": "1"})) is True
+
+
+def test_channel_result_keeps_the_diagnostics_that_matter():
+    """Regresión: get_state devolvía sólo {"ok": true} y dejaba al agente ciego."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "mcp_github_channel.py"
+    spec = importlib.util.spec_from_file_location("mcp_gh_compact", path)
+    ch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ch)
+
+    fake_state = {
+        "ok": True,
+        "hardware": {
+            "gpu": {"gpu_name": "Tesla T4", "has_gpu": True, "vram_free_gb": 14.2,
+                    "measurement_source": "nvidia_smi_driver"},
+            "ram": {"total_gb": 12.7, "available_gb": 9.1},
+            "disk": {"free_gb": 60.5},
+            "credits": {"hourly_rate": 1.2, "is_estimate": True},
+        },
+        "build": {"commit": "c6d7271", "branch": "arena/x", "dirty": False},
+        "loaded_in_vram": [{"name": "qwen-image"}],
+        "active_jobs": [{"id": "j1", "status": "running", "progress_pct": 40}],
+        "manual_index": [{"uri": "x", "name": "y"}] * 50,
+        "golden_rules": ["regla"] * 20,
+    }
+    out = ch._compact(fake_state, "get_state")
+    state = out["state"]
+    assert state["gpu"]["gpu_name"] == "Tesla T4"
+    assert state["gpu"]["vram_free_gb"] == 14.2
+    assert state["build"]["commit"] == "c6d7271"
+    assert state["loaded_in_vram"] == ["qwen-image"]
+    assert state["active_jobs"][0]["status"] == "running"
+    assert "manual_index" in state["payload_keys"]  # se sabe que existe, sin volcarlo
+
+
+def test_channel_result_is_capped_so_the_buzon_stays_small():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "mcp_github_channel.py"
+    spec = importlib.util.spec_from_file_location("mcp_gh_cap", path)
+    ch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ch)
+
+    huge = {"ok": True, "phases": ["x" * 500] * 200}
+    out = ch._compact(huge, "get_workflow_preset")
+    assert len(json.dumps(out, ensure_ascii=False)) < ch.MAX_PUBLISHED_CHARS
+    assert out.get("truncated") is True
