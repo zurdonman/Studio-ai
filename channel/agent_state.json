@@ -23,7 +23,8 @@
   },
   "app": {
     "executed_ids": [
-      "r1"
+      "r1",
+      "r2"
     ],
     "results": [
       {
@@ -34,8 +35,17 @@
         "result": {
           "ok": true
         }
+      },
+      {
+        "id": "r2",
+        "verb": "get_workflow_preset",
+        "ok": true,
+        "seconds": 0.0,
+        "result": {
+          "ok": true
+        }
       }
     ],
-    "updated": "2026-11-10T15:35:10Z"
+    "updated": "2026-11-10T15:35:12Z"
   }
 }
