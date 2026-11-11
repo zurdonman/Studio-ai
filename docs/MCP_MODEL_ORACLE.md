@@ -147,6 +147,22 @@ En `flf2v` están prohibidos los modelos de una sola imagen y los LoRAs causales
 
 Las importaciones manuales se guardan como `validation_state=candidate`. Se conservan sus archivos/definiciones, pero no se inventa `qwen_lora`, `kokoro_tts`, `video_modes` ni compatibilidad a partir del nombre. Descarga/carga y enums MCP de ejecución excluyen esos candidatos hasta que exista receta revisada.
 
+### Prueba acelerada I2V: búsqueda, ejecución y aprobación
+
+Una búsqueda vacía de `studio_search_models`, especialmente con `only_compatible=true`, no prueba que falte un LoRA: el índice agrupa por repositorio y el filtro elimina encajes no estimados compatibles. Consulta también `studio_list_models` por categoría `lora` e inspecciona el ID exacto. Ejemplo de candidato, no de ejecución GPU validada:
+
+```json
+{"name":"studio_inspect_model","arguments":{"model_id":"lora-wan22-ti2v-5b-fastwan"}}
+{"name":"studio_inspect_model","arguments":{"model_id":"wan22-ti2v-5b"}}
+{"name":"studio_recommend_pipeline","arguments":{"task":"video_i2v","priority":"balanced_fast","require_fast":true}}
+```
+
+FastWan es un archivo del repositorio `Kijai/WanVideo_comfy`, no su nombre de repositorio. La receta de catálogo lo declara para `wan22-ti2v-5b` en I2V, no FLF2V. Comprueba hardware real, base + LoRA, dependencias, acceso y presupuesto; `compatible`/`reviewed_recipe` son estimaciones, no prueba de descarga, carga, velocidad o calidad. No prepares ni descargues alternativas automáticamente tras un fallo.
+
+Si el usuario pide aceleración, usa `require_fast=true` tanto al recomendar como en `studio_generate_video` (o activa la preferencia `use_fast_loras`). Para esta pareja pasa también `video_lora_id="lora-wan22-ti2v-5b-fastwan"` y `video_submode="i2v"`, una ruta de imagen real y `use_official_defaults=true`. `require_fast` admite modelos destilados sin LoRA, pero si el usuario exige un LoRA, no lo sustituyas por un destilado sin su autorización. No desactives la preferencia para saltarte el requisito. Si el LoRA falta, es incompatible o falla la carga, para e informa; no generes con la base sola.
+
+Si se pidió aprobación previa, ejecutar un solo clip de prueba. Esperar el mismo job, pasar los logs al usuario y comprobar en el resultado `active_lora_id`, `steps`, duración y tiempos realmente disponibles; no inferir valores ausentes. Esperar aprobación antes de los clips restantes, voces y montaje. No hay garantía de mejor anatomía, movimiento o tiempo; no confundir valores recomendados de pasos con mediciones reales.
+
 ## 7. Parámetros, entradas y límites de cada motor
 
 - **Imagen**: `studio_generate_or_edit_image`, `use_official_defaults=true`. Cada familia tiene pasos/CFG propios: no usar los 4 pasos Lightning de Qwen en SDXL Base, PixArt o SANA. Lumina 2 sigue como candidato: falta el cargador explícito de su transformer `.pth`/GGUF; no se habilita un loader genérico. FLUX Schnell usa CFG 0; Z-Image Turbo usa 9 pasos (8 NFE); Klein destilado tiene su propia receta. No enviar imagen gris a un pipeline opcional de referencia cuando se pretende T2I. Los T2I puros rechazan referencias, no las ignoran silenciosamente.
@@ -197,7 +213,7 @@ El agente no debe renegociar el encargo ni preguntar en cada paso. `studio_get_w
 
 | Clave | Recomendado | Efecto |
 |---|---|---|
-| `use_fast_loras` | `true` | `true` → stack con `lora-wan21-14b-fusionx-phantom` (6 pasos). `false` → mismo modelo base y adaptadores de coherencia sin LoRA rápido (más lento por clip). |
+| `use_fast_loras` | `true` | Exige LoRA de velocidad compatible con modelo/submodo o modelo destilado; no garantiza tiempos. Si el usuario exige LoRA, no sustituirlo por un modelo destilado sin permiso. |
 | `clip_duration_sec` | `5.0` | Tramo por clip; 30 s = 6 clips, 60 s = 12. |
 | `aspect_ratio` | `16:9` | Bucket nativo de la receta; `9:16` y `1:1` si el usuario los pide. |
 | `voice_pair` | Álvaro / Elvira | Dos voces distintas para alternar turnos y LipSync por personaje. |

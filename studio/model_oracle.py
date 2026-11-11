@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from studio.model_compatibility import assess_definition, assessment_context
+from studio.model_compatibility import assess_definition, assess_model_stack, assessment_context
 from studio.model_recipes import ENGINE_CONTRACTS, image_defaults
 
 TASKS = ("video_flf2v", "video_i2v", "video_t2v", "consistent_keyframes", "coherence_check",
@@ -45,9 +45,35 @@ def _preference(task: str, priority: str) -> List[str]:
             "consistent_keyframes": ["qwen-image-edit-2511-pack"]}.get(task, [])
 
 
+# Explicit, reviewed acceleration recipes. This list is planning metadata, not
+# proof of successful loading, speed, or visual quality on the user's GPU.
+FAST_VIDEO_RECIPES = {
+    "wan21-flf2v-14b-fp8": "lora-wan21-14b-fusionx-i2v",
+    "wan21-vace-14b-fp8": "lora-wan21-14b-fusionx-phantom",
+    "wan22-ti2v-5b": "lora-wan22-ti2v-5b-fastwan",
+    "wan21-vace-1.3b": "lora-wan21-1.3b-bidirect2",
+    "ltx-video-13b-distilled": None,
+    "wan22-ti2v-5b-turbo": None,
+}
+
+def fast_video_recipe(definition: Dict[str, Any], submode: str, catalog: Any) -> Optional[Dict[str, Any]]:
+    mid = definition.get("id")
+    if mid not in FAST_VIDEO_RECIPES or submode not in definition.get("video_modes", []):
+        return None
+    adapter_id = FAST_VIDEO_RECIPES[mid]
+    if adapter_id is None:
+        return {"kind": "distilled", "adapter": None}
+    adapter = catalog.get_definition(adapter_id)
+    if (not adapter or adapter.get("validation_state") == "candidate" or adapter.get("lora_group") != "speed"
+            or mid not in adapter.get("compatible_models", []) or submode in adapter.get("incompatible_submodes", [])
+            or (submode == "flf2v" and adapter.get("causal_attention"))):
+        return None
+    return {"kind": "speed_lora", "adapter": adapter}
+
+
 def recommend_pipeline(task: str, priority: str, *, catalog: Any,
                        snapshot: Optional[Dict[str, Any]] = None,
-                       context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       context: Optional[Dict[str, Any]] = None, require_fast: bool = False) -> Dict[str, Any]:
     if task not in TASKS or priority not in PRIORITIES:
         raise ValueError("Tarea o prioridad no reconocida: consulta el esquema de studio_recommend_pipeline.")
     context = context or assessment_context(snapshot=snapshot)
@@ -62,7 +88,26 @@ def recommend_pipeline(task: str, priority: str, *, catalog: Any,
         if task in ("video_i2v", "video_flf2v"):
             candidates = [d for d in definitions if d["id"] == "ffmpeg-motion-cpu"]
     preferences = _preference(task, priority)
-    scored = [(d, assess_definition(d, context, catalog=catalog)) for d in candidates]
+    fast_recipes: Dict[str, Dict[str, Any]] = {}
+    if require_fast and task.startswith("video_"):
+        submode = task[6:]
+        for definition in candidates:
+            recipe = fast_video_recipe(definition, submode, catalog)
+            if recipe:
+                fast_recipes[definition["id"]] = recipe
+        candidates = [d for d in candidates if d["id"] in fast_recipes]
+        if priority == "max_quality_14b":
+            # Do not silently downgrade a quality-first job to the 1.3B draft.
+            candidates = [d for d in candidates if d["id"] != "wan21-vace-1.3b"]
+        scored = [(d, assess_model_stack(d, [fast_recipes[d["id"]]["adapter"]], context, catalog=catalog)
+                   if fast_recipes[d["id"]]["adapter"] else assess_definition(d, context, catalog=catalog))
+                  for d in candidates]
+        if priority == "max_quality_14b":
+            # Prefer larger reviewed candidates, not a pre-downloaded 1.3B draft.
+            preferences = ["wan21-vace-14b-fp8", "wan21-flf2v-14b-fp8",
+                           "ltx-video-13b-distilled", "wan22-ti2v-5b", "wan22-ti2v-5b-turbo"]
+    else:
+        scored = [(d, assess_definition(d, context, catalog=catalog)) for d in candidates]
 
     def rank(row: Any) -> Any:
         definition, assessment = row
@@ -75,6 +120,9 @@ def recommend_pipeline(task: str, priority: str, *, catalog: Any,
                 reduced_scope = 1
             if task == "music_and_ambience" and priority == "max_quality_14b" and definition.get("engine") == "procedural_dsp":
                 reduced_scope = 1
+        quality_order = preferences.index(definition["id"]) if definition["id"] in preferences else 100
+        if require_fast and priority == "max_quality_14b" and task.startswith("video_"):
+            return (not assessment["compatible"], quality_order, not assessment["runnable_now"], definition["id"])
         return (not assessment["compatible"], reduced_scope, not assessment["runnable_now"], not catalog.is_downloaded(definition["id"]),
                 preferences.index(definition["id"]) if definition["id"] in preferences else 100,
                 definition.get("min_vram_gb", 0), definition["id"])
@@ -90,7 +138,7 @@ def recommend_pipeline(task: str, priority: str, *, catalog: Any,
             "manual_uri": "studio://manual/model-oracle"}
     if not feasible:
         return {**base, "status": "no_compatible_recipe", "executable_now": False, "recommended_tool": None,
-                "recommended_arguments": {}, "why_this_choice": "Ninguna receta revisada satisface la tarea y los recursos conocidos. No se inventa compatibilidad ni se cambia silenciosamente a otro tipo de generación.",
+                "recommended_arguments": {}, "why_this_choice": "Ninguna receta revisada satisface la tarea, prioridad y recursos conocidos (incluida aceleración si se solicitó). No se cambia silenciosamente de modelo ni de tarea.",
                 "next_actions": ["Leer reasons/resources/runtime de alternatives. Revisar GPU/RAM/disco reales y no sumar la VRAM de varias GPU.",
                                  "Buscar candidatos con studio_search_models e inspeccionar con studio_inspect_model; descubrirlos no habilita su ejecución.",
                                  "Para imagen/vídeo generativo sin GPU no hay equivalencia automática con filtros o movimiento FFmpeg."],
@@ -104,6 +152,14 @@ def recommend_pipeline(task: str, priority: str, *, catalog: Any,
         tool = "studio_generate_video"
         submode = task[6:]
         args.update(mode="ffmpeg_motion" if mid == "ffmpeg-motion-cpu" else "ai", video_submode=submode, use_official_defaults=True)
+        if require_fast and mid != "ffmpeg-motion-cpu":
+            fast_recipe = fast_recipes[mid]
+            args["require_fast"] = True
+            if fast_recipe["adapter"]:
+                args["video_lora_id"] = fast_recipe["adapter"]["id"]
+            base["acceleration"] = {"kind": fast_recipe["kind"], "video_lora_id": args.get("video_lora_id"),
+                                    "gpu_tested": False}
+            caveats.append("Receta rápida estimada, no medida: confirmar carga real del adaptador y pasos; no garantiza velocidad ni calidad.")
         required_inputs = ["prompt"] + (["image_rel"] if submode in ("i2v", "flf2v") else []) + (["end_image_rel"] if submode == "flf2v" else [])
         if mid == "ffmpeg-motion-cpu":
             args.update(motion_style="zoom_in", duration_sec=4.5)

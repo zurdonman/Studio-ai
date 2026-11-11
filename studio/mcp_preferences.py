@@ -26,8 +26,8 @@ PREFERENCE_QUESTIONS: Dict[str, Dict[str, Any]] = {
         "recommended": True,
         "options": [True, False],
         "why": (
-            "En una L4 reduce cada clip de ~3 minutos a ~1,6 minutos sin perder la coherencia de "
-            "identidad que aportan UniAnimate/MoviiGen. Solo aplica a arquitecturas compatibles."
+            "Puede reducir los pasos en recetas compatibles, pero la velocidad y calidad deben medirse "
+            "en la GPU real; un LoRA no garantiza identidad ni tiempo de generación."
         ),
         "ask_once": "¿Quieres que use los LoRAs de generación rápida (FusionX Phantom 6 pasos) en los clips?",
     },

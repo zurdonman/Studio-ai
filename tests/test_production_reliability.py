@@ -976,3 +976,38 @@ def test_compat_patches_never_block_boot(tmp_path, monkeypatch):
     monkeypatch.setattr(cp, "_patch_peft_integrations", boom)
     monkeypatch.setattr(hooks, "install_memory_safety_hooks", boom)
     cp.apply_runtime_compatibility_patches()  # no debe lanzar
+
+
+def test_i2v_fast_preference_rejects_omitted_accelerator(temp_studio_env, colab_memory, monkeypatch):
+    import io
+    from PIL import Image
+    from studio.mcp_server import _execute_mcp_tool
+    import studio.mcp_preferences as prefs
+    colab_memory(ram=64, available=52, gpu=True, vram=22, vram_free=21)
+    client, _ = temp_studio_env
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (30, 60, 90)).save(buf, format="PNG")
+    rel = client.post("/api/assets/upload", files={"file": ("a.png", buf.getvalue(), "image/png")}).json()["asset"]["rel_path"]
+    monkeypatch.setattr(prefs, "PREF_FILE", prefs.PREF_FILE.parent / "fast-only-test.json")
+    prefs.set_preferences({"use_fast_loras": True})
+    result = _execute_mcp_tool("studio_generate_video", {"video_submode": "i2v", "mode": "ai",
+        "model_id": "wan21-vace-1.3b", "image_rel": rel, "prompt": "two people boxing"})
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["error_code"] == "SPEED_LORA_MISSING"
+    assert "lora-wan21-1.3b-bidirect2" in payload["speed_lora_candidates"]
+
+
+def test_i2v_explicit_fast_rejects_full_steps(temp_studio_env, colab_memory):
+    import io
+    from PIL import Image
+    from studio.mcp_server import _execute_mcp_tool
+    colab_memory(ram=64, available=52, gpu=True, vram=22, vram_free=21)
+    client, _ = temp_studio_env
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64)).save(buf, format="PNG")
+    rel = client.post("/api/assets/upload", files={"file": ("a.png", buf.getvalue(), "image/png")}).json()["asset"]["rel_path"]
+    result = _execute_mcp_tool("studio_generate_video", {"video_submode": "i2v", "mode": "ai",
+        "model_id": "wan21-vace-1.3b", "video_lora_id": "lora-wan21-1.3b-bidirect2", "require_fast": True,
+        "use_official_defaults": False, "steps": 30, "image_rel": rel, "prompt": "two people boxing"})
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["error_code"] == "FAST_STEPS_EXCEEDED"

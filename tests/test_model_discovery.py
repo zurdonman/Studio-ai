@@ -814,3 +814,49 @@ def test_cpu_capable_tts_matches_actual_automatic_device_policy(catalog):
     assert chosen["model_id"] == model_id and chosen["executable_now"] is True
     zero = recommend_pipeline("tts", "zero_vram_cpu", catalog=catalog, context=ctx)
     assert zero["model_id"] != model_id
+
+
+def test_fast_oracle_recommends_assessed_speed_stack_not_downloaded_draft(catalog):
+    from studio.model_oracle import recommend_pipeline
+    catalog.downloaded.add("wan21-vace-1.3b")
+    result = recommend_pipeline("video_i2v", "max_quality_14b", catalog=catalog,
+                                context=context(ram=64, ram_free=56, disk=200), require_fast=True)
+    assert result["model_id"] != "wan21-vace-1.3b"
+    args = result["recommended_arguments"]
+    assert args["require_fast"] is True
+    if result["acceleration"]["kind"] == "speed_lora":
+        assert args["video_lora_id"] in result["assessment"]["stack"]["adapter_ids"]
+    assert result["gpu_validation"] == "No ejecutada por este oráculo"
+
+
+def test_fast_oracle_never_recommends_causal_lora_for_flf2v(catalog):
+    from studio.model_oracle import recommend_pipeline
+    result = recommend_pipeline("video_flf2v", "max_quality_14b", catalog=catalog,
+                                context=context(ram=64, ram_free=56, disk=200), require_fast=True)
+    assert result["status"] != "no_compatible_recipe"
+    args = result["recommended_arguments"]
+    if args.get("video_lora_id"):
+        lora = catalog.get_definition(args["video_lora_id"])
+        assert not lora.get("causal_attention")
+        assert "flf2v" not in lora.get("incompatible_submodes", [])
+
+
+def test_fast_quality_oracle_refuses_silent_1_3b_downgrade(catalog):
+    from studio.model_oracle import recommend_pipeline
+    catalog.definitions = [d for d in catalog.definitions if d["id"] in {
+        "wan21-vace-1.3b", "lora-wan21-1.3b-bidirect2"}]
+    result = recommend_pipeline("video_i2v", "max_quality_14b", catalog=catalog,
+                                context=context(ram=64, ram_free=56), require_fast=True)
+    assert result["status"] == "no_compatible_recipe"
+    assert not result["recommended_arguments"]
+
+
+def test_search_finds_named_lora_within_shared_repository(tmp_path, catalog):
+    service = store(tmp_path, catalog, ProviderStub([]))
+    for term in ("fastwan", "lora-wan22-ti2v-5b-fastwan", "Wan2_2_5B_FastWanFullAttn"):
+        result = service.search(query=term, category="lora", only_compatible=True,
+                                context=context(ram=64, ram_free=56, disk=200))
+        target = [x for x in result["items"] if x["repo_id"] == "Kijai/WanVideo_comfy"]
+        assert target, term
+        assert target[0]["catalog_model_ids"] == ["lora-wan22-ti2v-5b-fastwan"]
+        assert not target[0]["access"]["weights_access_verified"]

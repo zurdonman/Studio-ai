@@ -1482,16 +1482,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "default_cfg": 5.0,
             "flow_shift": 5.0,
             "prompt_lang": "es_en",
-            "official_note": "720P nativo (1280×704 / 704×1280) · Especialista 1 Foto→Vídeo y Texto→Vídeo · 6p con LoRA Turbo (~1.2 min en L4). Para Frame a Frame usa Wan 2.1 VACE 14B FP8",
+            "official_note": "720P nativo (1280×704 / 704×1280) · Especialista 1 Foto→Vídeo y Texto→Vídeo · 6 pasos recomendados con LoRA Turbo; rendimiento real sin validar",
         },
         "description": (
             "Modelo HD 720P@24fps de Alibaba Wan 2.2 entrenado para animar 1 Imagen Inicial o generar desde Texto (no entrenado para 2 poses Frame a Frame). "
-            "Con su LoRA Turbo (332 MB) genera en 6 pasos (~1.2 min en L4). Al cambiar a Frame a Frame, Studio IA selecciona automáticamente Wan 2.1 VACE 14B FP8 (o 1.3B en T4)."
+            "Con LoRA Turbo o FastWan se recomiendan 6 pasos; tiempo y calidad deben medirse. No admite Frame a Frame en esta receta."
         ),
         "estimated_gb": 31.9,
         "min_vram_gb": 13.5,
         "recommended_vram_gb": 19.5,
-        "l4_seconds_hint": "~1.2 min con LoRA Turbo (6p) · ~18 min base (45p)",
+        "l4_seconds_hint": "Sin benchmark real; medir tiempo con LoRA y sin LoRA",
         "engine": "wan_ti2v",
         "artifacts": [
             {
@@ -1810,7 +1810,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "wan21-vace-1.3b",
-        "name": "Wan 2.1 VACE 1.3B Oficial (Ligero T4/L4 · Frame a Frame + LoRA 8p ~25s)",
+        "name": "Wan 2.1 VACE 1.3B Oficial (Ligero T4/L4 · Frame a Frame + LoRA opcional)",
         "category": "video",
         "is_default": False,
         "badge": "Ligero 1.3B · Ideal T4/L4 + LoRA Bidireccional",
@@ -1835,16 +1835,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "default_cfg": 5.0,
             "flow_shift": 3.0,
             "prompt_lang": "es_en",
-            "official_note": "★ Especialista oficial Alibaba VACE para Frame a Frame (poses distintas como saltos/giros) · 30 pasos @ CFG 5.0 sin LoRA (~1.3 min en L4) · 81 frames @ 16 fps",
+            "official_note": "Especialista VACE para Frame a Frame · 30 pasos @ CFG 5.0 sin LoRA · 81 frames @ 16 fps; tiempo real no validado",
         },
         "description": (
             "Modelo oficial de Alibaba Wan-AI con 15 capas bidireccionales VACE entrenadas específicamente para interpolar poses complejas de Inicio → Fin "
-            "(ej. guardia → patada voladora) sin saltos bruscos al final. Pesa solo 17.7 GB y tarda ~1.3 min en L4 a máxima calidad (30 pasos, CFG 5.0, sin LoRA)."
+            "(ej. guardia → patada voladora); no garantiza calidad o continuidad. Pesa 17.7 GB; tiempo real no validado (30 pasos, CFG 5.0, sin LoRA)."
         ),
         "estimated_gb": 17.7,
         "min_vram_gb": 8.0,
         "recommended_vram_gb": 13.5,
-        "l4_seconds_hint": "~1.1–1.5 min / clip (30 pasos sin LoRA)",
+        "l4_seconds_hint": "No validado en L4; medir cada fase (30 pasos sin LoRA)",
         "engine": "wan_vace",
         "artifacts": [
             {

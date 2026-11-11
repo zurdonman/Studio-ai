@@ -97,7 +97,7 @@ from studio.mcp_preferences import (
     set_preferences,
 )
 from studio.model_recipes import ENGINE_CONTRACTS, image_defaults
-from studio.model_oracle import recommend_pipeline
+from studio.model_oracle import FAST_VIDEO_RECIPES, recommend_pipeline
 
 apply_runtime_compatibility_patches()
 
@@ -239,13 +239,13 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
      `DURATION_EXCEEDS_SINGLE_CLIP` con `max_seconds_per_clip` y `recommended_clips`: es una explicación, no un fallo.
      Nunca digas que el vídeo dura 30 s si el montaje no lo mide (`probe_media_info` te da la duración real).
    - Recetas oficiales `flf2v` en GPU L4 (22.5 GB):
-     a) Máxima textura y anatomía (14B FP8 + LoRA 6 pasos, ~1.6 min):
+     a) Candidato 14B FP8 + LoRA (sin tiempo ni calidad garantizados):
         `model_id="wan21-vace-14b-fp8"` + `video_lora_id="lora-wan21-14b-fusionx-phantom"`
-     b) Especialista puro 14B HD 720P Frame a Frame (~1.8 min):
+     b) Candidato 14B Frame a Frame (sin tiempo ni calidad garantizados):
         `model_id="wan21-flf2v-14b-fp8"` + `video_lora_id="lora-wan21-14b-fusionx-i2v"` (o `"lora-wan21-14b-lightx2v-i2v"`)
-     c) 13B destilado de fábrica en 8 pasos sin LoRA (~45 s, prompt en inglés):
+     c) Candidato 13B destilado sin LoRA (prompt en inglés):
         `model_id="ltx-video-13b-distilled"`
-     d) Prototipo rápido o GPU T4 (~25 s):
+     d) Candidato 1.3B con LoRA (no sustituye sin autorización una petición de mayor calidad):
         `model_id="wan21-vace-1.3b"` + `video_lora_id="lora-wan21-1.3b-bidirect2"`
 
 4. CONSISTENCIA ESTRICTA DE PERSONAJES Y AVANCE ESPACIAL REAL (PROHIBIDO EL MOVIMIENTO ESTÁTICO):
@@ -277,11 +277,10 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
    - Haz como máximo UNA pregunta de producción en toda la tarea, y solo si `studio_get_workflow_preset` devuelve
      `production_preferences.pending_questions` no vacío. Usa `studio_ask_user(preference_key=...)` para obtener el texto
      exacto con la opción recomendada ya marcada y guarda la respuesta con `studio_answer_preference`.
-   - Caso típico: **LoRAs de generación rápida** (`use_fast_loras`). Si el usuario los quiere y están guardados, incluye
-     SIEMPRE el `video_lora_id` rápido que devuelve el plan (`lora-wan21-14b-fusionx-phantom` en 14B) JUNTO a los
-     `extra_video_lora_ids`. Si los omites, Studio IA responde `SPEED_LORA_MISSING`: no es un fallo del motor, es la
-     petición de "rápido" sin el LoRA que la hace rápida. Si el usuario prefiere máxima calidad, guarda `use_fast_loras=false`
-     y deja `video_lora_id=""`.
+   - Si el usuario pide aceleración, pasa `require_fast=true` al oráculo y a cada generación de vídeo, o guarda
+     `use_fast_loras=true`. Elige el LoRA de velocidad compatible con el modelo Y submodo, no uno fijo para todos.
+     Studio también acepta un modelo destilado; si el usuario pidió específicamente un LoRA, NO lo sustituyas por
+     un destilado sin permiso. No desactives una preferencia ni cambies de modelo para evitar una guarda.
    - No bloquees la fase de imágenes esperando la respuesta: pídesela en el chat mientras generas los keyframes.
    - Si una réplica de diálogo es más larga que su tramo, recórtala o divídela ANTES del TTS; nunca inventes diálogos nuevos
      ni cambies el tema que pidió el usuario.
@@ -408,7 +407,9 @@ MCP_SERVER_INSTRUCTIONS += """
 
 7. DESCUBRIMIENTO Y ORÁCULO DE MODELOS (REGLAS PRIORITARIAS SOBRE TABLAS HISTÓRICAS):
    - Lee `studio://manual/model-oracle` o `studio_get_model_guide(guide='operations')`.
-   - `studio_search_models` busca metadatos públicos con cache/fecha y filtro de recursos; `studio_inspect_model` explica receta, formato y límites. Un repo HF NO es un model_id de ejecución.
+   - `studio_search_models` busca repositorios y recetas conocidas con cache/fecha y filtro de recursos; un resultado vacío, especialmente con `only_compatible=true`, NO demuestra que falte un LoRA. Consulta `studio_list_models(category="lora")` e inspecciona el `model_id` exacto con `studio_inspect_model`. Un repo HF NO es un model_id de ejecución.
+   - Ejemplo candidato I2V: `wan22-ti2v-5b` + `lora-wan22-ti2v-5b-fastwan` (archivo dentro de `Kijai/WanVideo_comfy`), no FLF2V. Inspecciona receta, recursos y dependencias reales; no confundas existencia en catálogo con carga validada. Para ejecutarlo pasa el ID del LoRA y `require_fast=true`; si falla, para y explica el error, nunca continúes sin él sin autorización.
+   - Si se solicita prueba y aprobación, genera solo un clip, espera al job y comunica logs, `active_lora_id` y pasos reales si aparecen, duración y tiempo medidos. Datos ausentes = no verificados. Espera aprobación antes de los demás clips, diálogo o montaje. No prometas velocidad/calidad ni borres pesos ante fallos.
    - `reviewed_recipe` = receta implementada, NO GPU validada. `candidate` = sin receta; `unsupported` = backend/formato/código remoto no autorizado. Nunca promover un candidato ni inventar un cargador por el nombre o número de parámetros.
    - `memory_guardian` vigila RAM/VRAM y libera modelos inactivos automáticamente; los slots en uso están protegidos. La admisión suma base + TODOS los LoRA residentes + reserva adicional. MEMORY_BUDGET_EXCEEDED / MEMORY_SAFETY_STOP requieren leer el diagnóstico y parar, no borrar pesos ni descargar otra receta. Un preset `ok=true` solo está compilado: respetar `do_not_execute` y `selected_video_stack.memory_assessment`.
    - `compatible` es encaje ESTIMADO de VRAM/RAM/disco; `runnable_now` exige preparación actual y GPU real. Simular L4 no convierte la CPU real en una L4. No sumar VRAM de varias GPU.
@@ -753,6 +754,8 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                         ],
                         "description": "Tipo exacto de tarea multimedia que quieres ejecutar.",
                     },
+                    "require_fast": {"type": "boolean", "default": False,
+                        "description": "Exige receta acelerada (LoRA o modelo destilado), evaluando el conjunto completo; no garantiza tiempo ni calidad."},
                     "priority": {
                         "type": "string",
                         "enum": [
@@ -1090,6 +1093,8 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                             "(ej. `wan21-vace-14b-fp8` en L4 para `flf2v`, `wan21-vace-1.3b` en T4, `wan22-ti2v-5b` para `i2v`/`t2v`)."
                         ),
                     },
+                    "require_fast": {"type": "boolean", "default": False,
+                        "description": "Rechaza generación IA sin LoRA de velocidad compatible o modelo destilado. También se aplica si la preferencia guardada use_fast_loras es true."},
                     "video_lora_id": {
                         "type": "string",
                         "enum": video_lora_ids,
@@ -1635,9 +1640,9 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
 # ==================== LÓGICA DEL ORÁCULO Y EJECUTORES DE HERRAMIENTAS ====================
 
 
-def _compute_recommendation(task: str, priority: str) -> Dict[str, Any]:
+def _compute_recommendation(task: str, priority: str, require_fast: bool = False) -> Dict[str, Any]:
     snapshot = hardware_tracker.get_snapshot(active_jobs_count=job_manager.active_count())
-    result = recommend_pipeline(task, priority, catalog=catalog_manager, snapshot=snapshot)
+    result = recommend_pipeline(task, priority, catalog=catalog_manager, snapshot=snapshot, require_fast=require_fast)
     result["discovery_status"] = model_discovery.status()
     return result
 
@@ -1806,7 +1811,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         task = str(args.get("task") or "video_flf2v")
         priority = str(args.get("priority") or "max_quality_14b")
         try:
-            return _ok_result({"ok": True, **_compute_recommendation(task=task, priority=priority)})
+            return _ok_result({"ok": True, **_compute_recommendation(task=task, priority=priority, require_fast=bool(args.get("require_fast")) or get_preference("use_fast_loras", False) is True)})
         except ValueError as exc:
             return _guided_error("INVALID_TASK_OR_PRIORITY", str(exc), "Consulta el enum de studio_recommend_pipeline; no se descargan pesos.")
 
@@ -2195,11 +2200,17 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             )
 
         model_id = str(args.get("model_id") or "").strip()
+        require_fast = bool(args.get("require_fast")) or get_preference("use_fast_loras", False) is True
+        auto_speed_lora = None
+        if mode == "ffmpeg_motion" and require_fast:
+            return _guided_error("FAST_GENERATIVE_MODEL_REQUIRED", "FFmpeg no es un modelo de vídeo generativo acelerado.",
+                                 "Elige una receta IA rápida o desactiva explícitamente la preferencia rápida.")
         if mode == "ffmpeg_motion":
             model_id = "ffmpeg-motion-cpu"
         elif not model_id:
-            rec = _compute_recommendation(task=f"video_{sub}", priority="max_quality_14b")
+            rec = _compute_recommendation(task=f"video_{sub}", priority="max_quality_14b", require_fast=require_fast)
             model_id = str((rec.get("recommended_arguments") or {}).get("model_id") or "")
+            auto_speed_lora = (rec.get("recommended_arguments") or {}).get("video_lora_id") if require_fast else None
             if not model_id:
                 return _guided_error(
                     "NO_COMPATIBLE_VIDEO_RECIPE",
@@ -2218,7 +2229,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
         if m_defn.get("category") != "video" or m_defn.get("validation_state") == "candidate":
             return _guided_error("MODEL_RECIPE_UNVALIDATED", "No es una receta de vídeo revisada.", "Usa studio_inspect_model; no se descargan ni cargan candidatos.")
-        lora_id = str(args.get("video_lora_id") or "").strip() or None
+        lora_id = str(args.get("video_lora_id") or auto_speed_lora or "").strip() or None
         lora_defn = catalog_manager.get_definition(lora_id) if lora_id else None
         extra_raw = [str(x).strip() for x in (args.get("extra_video_lora_ids") or []) if str(x).strip()]
         if mode == "ai" and sub == "flf2v" and extra_raw:
@@ -2240,8 +2251,7 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 ]
                 return _guided_error(
                     "SPEED_LORA_MISSING",
-                    "Estás apilando LoRAs creativos sin el LoRA rápido: los pasos serían los completos "
-                    "(~3 min por clip) y la petición de 'generación rápida' no se cumpliría.",
+                    "Estás apilando LoRAs creativos sin el LoRA rápido: la petición de generación rápida no se cumpliría.",
                     (
                         f"Repite la llamada INCLUYENDO `video_lora_id` con uno de {speed_ids or ['lora-wan21-14b-fusionx-phantom']} "
                         "y los mismos `extra_video_lora_ids`. Si el usuario prefiere calidad máxima sin LoRA rápido, "
@@ -2249,6 +2259,23 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                     ),
                 extra={"detected_extra_loras": extra_raw, "speed_lora_candidates": speed_ids},
             )
+
+        if mode == "ai" and require_fast:
+            distilled = model_id in FAST_VIDEO_RECIPES and FAST_VIDEO_RECIPES[model_id] is None
+            if not distilled and (not lora_defn or lora_defn.get("lora_group") != "speed"):
+                speed_ids = [x["id"] for x in catalog_manager.get_all_definitions()
+                    if x.get("category") == "lora" and x.get("lora_target") == "video"
+                    and x.get("lora_group") == "speed" and model_id in (x.get("compatible_models") or [])
+                    and sub not in (x.get("incompatible_submodes") or [])
+                    and not (sub == "flf2v" and x.get("causal_attention"))]
+                return _guided_error("SPEED_LORA_MISSING", "Se pidió generación rápida pero falta un LoRA de velocidad compatible.",
+                    "Indica video_lora_id de velocidad compatible o elige explícitamente un modelo destilado; no se inicia el trabajo.",
+                    extra={"speed_lora_candidates": speed_ids, "model_id": model_id, "video_submode": sub})
+            if not bool(args.get("use_official_defaults", True)):
+                limit = (lora_defn or {}).get("max_steps") if not distilled else (m_defn.get("default_steps") or 8)
+                if limit and int(args.get("steps") or m_defn.get("default_steps") or 30) > int(limit):
+                    return _guided_error("FAST_STEPS_EXCEEDED", "Los pasos manuales exceden la receta rápida.",
+                        "Usa use_official_defaults=true o pasos compatibles con el LoRA/modelo, tras comprobar la receta.")
 
         if lora_id and not lora_defn:
             return _guided_error(

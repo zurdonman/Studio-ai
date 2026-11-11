@@ -517,6 +517,12 @@ class ModelDiscovery:
                     records[key]["category"] = definition["category"]
                 else:
                     records[key].setdefault("category", "lora" if "lora" in str(artifact.get("role")) else definition["category"])
+                # A repository may contain many named adapters (e.g. Kijai/WanVideo_comfy).
+                # Searching only its repository name makes a known file-backed recipe invisible.
+                aliases = records[key].setdefault("catalog_search_aliases", [])
+                for value in (definition.get("id"), definition.get("name"), artifact.get("filename")):
+                    if value and value not in aliases:
+                        aliases.append(value)
         return records
 
     def _known_definitions(self, repo_id: str) -> tuple[List[Dict[str, Any]], List[str]]:
@@ -531,10 +537,22 @@ class ModelDiscovery:
                 components.append(definition["id"])
         return primary, components
 
-    def decorate(self, record: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    def decorate(self, record: Dict[str, Any], context: Dict[str, Any], query: str = "") -> Dict[str, Any]:
         item = copy.deepcopy(record)
         definitions, component_of = self._known_definitions(item["repo_id"])
         definitions = [d for d in definitions if d["category"] == item.get("category")]
+        # If the query names a particular file/recipe within a shared repository,
+        # do not report an unrelated adapter as the matching recipe.
+        if query:
+            compact = lambda value: re.sub(r"[^a-z0-9]", "", str(value).lower())
+            def recipe_matches(definition: Dict[str, Any]) -> bool:
+                parts = [item.get("repo_id", ""), *item.get("families", []), definition.get("id", ""),
+                         definition.get("name", ""), *(a.get("filename", "") or "" for a in definition.get("artifacts", []))]
+                text = compact(" ".join(parts))
+                return all(compact(term) in text for term in query.split() if compact(term))
+            narrowed = [d for d in definitions if recipe_matches(d)]
+            if narrowed:
+                definitions = narrowed
         recipes = [{"model_id": d["id"], "engine": d.get("engine"), "video_modes": d.get("video_modes"),
                     "capabilities": d.get("capabilities"), "assessment": assess_definition(d, context, catalog=self.catalog)} for d in definitions]
         recipes.sort(key=lambda row: (not row["assessment"]["compatible"], not self.catalog.is_downloaded(row["model_id"]), row["assessment"]["tier_rank"]))
@@ -602,7 +620,8 @@ class ModelDiscovery:
         if category != "all" and record.get("category") != category:
             return False
         compact = lambda s: re.sub(r"[^a-z0-9]", "", str(s).lower())
-        text = compact(record.get("repo_id", "") + " " + " ".join(record.get("families", [])))
+        text = compact(record.get("repo_id", "") + " " + " ".join(record.get("families", [])) + " "
+                       + " ".join(record.get("catalog_search_aliases", [])))
         return all(compact(term) in text for term in query.split() if compact(term))
 
     def _remember_error(self, exc: MetadataError) -> None:
@@ -710,7 +729,7 @@ class ModelDiscovery:
                     if self._state["queries"][key].get("display_ids") != order:
                         self._state["queries"][key]["display_ids"] = order
                         self._save()
-        items = [self.decorate(matched[rid], context) for rid in order]
+        items = [self.decorate(matched[rid], context, query=query) for rid in order]
         if only_compatible:
             items = [i for i in items if i["compatibility"]["compatible"]]
         page_items = items[offset:offset + limit]
