@@ -2244,6 +2244,32 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                        "allow_patterns": _DIFFUSERS_VIDEO_ALLOW + ["duration_head/*"]}],
     },
     {
+        "id": "minimax-h3-local-candidate",
+        "name": "MiniMax H3 local · Audio+Vídeo (candidato, no ejecutable)",
+        "category": "video",
+        "is_default": False,
+        "badge": "Candidato · backend modular pendiente · no descargar",
+        "video_modes": ["t2v", "i2v", "flf2v"],
+        "description": (
+            "Referencia informativa: MiniMax H3 genera vídeo y audio juntos localmente. "
+            "Studio aún no implementa su backend ModularPipeline ni ha probado inferencia GPU; "
+            "no se puede descargar ni ejecutar desde este registro. Revisar licencia territorial."
+        ),
+        "validation_state": "candidate", "gpu_tested": False,
+        "engine": "unvalidated", "min_ram_gb": None, "min_vram_gb": None,
+        "estimated_gb": None,
+        "l4_seconds_hint": "No probado; el ejemplo int8 oficial requiere ~75 GB de RAM",
+        "official_spec": {
+            "default_fps": 24, "frame_rule": "17n+5", "mod_value": 32,
+            "official_note": "Referencia upstream: 5–15 s, audio conjunto, sin negative prompt ni CFG; no es una receta de Studio.",
+            "upstream_workflows": ["t2va", "fl2va"],
+            "license_url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+            "license_note": "La licencia comunitaria excluye UE, Reino Unido, EE. UU. y Corea del Sur; consultar licencia separada.",
+            "upstream_docs": "https://github.com/huggingface/diffusers/blob/d3d8af89e5b08a352cf47bba3a451c5fed9a49b1/docs/source/en/api/pipelines/minimax_h3.md",
+        },
+        "artifacts": [{"role": "reference_only", "repo_id": "MiniMaxAI/MiniMax-H3", "subdir": "base", "filename": None, "verify_file": "modular_model_index.json"}],
+    },
+    {
         "id": "wan21-i2v-14b-480p",
         "name": "Wan 2.1 I2V 14B 480P (Imagen a Vídeo y Frame a Frame · A100)",
         "category": "video",

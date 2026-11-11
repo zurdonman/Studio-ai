@@ -212,6 +212,8 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
    - En tu primera acción de la sesión, llama SIEMPRE a `studio_get_state_and_manual`.
    - Comprueba la GPU activa (ej. T4 15 GB, L4 22.5 GB, A100 40/80 GB), la VRAM libre, el disco libre (`free_disk_gb`) y los archivos existentes.
 
+1b. MINIMAX H3 LOCAL: `minimax-h3-local-candidate` es solo una referencia informativa, NO un motor ejecutable en Studio. Inspecciónalo con `studio_inspect_model`; no prepares, descargues ni generes con ese ID ni inventes un backend. Su licencia comunitaria excluye UE, Reino Unido, EE. UU. y Corea del Sur: se necesita una licencia separada donde corresponda. No hay prueba de ejecución en GPU ni de compatibilidad con L4. El ejemplo int8 upstream cita ~75 GB RAM y no está integrado aquí. No confundirlo con la receta BF16 ni con FreeVideo. Solicita autorización antes de proponer cualquier alternativa.
+
 2. PRESETS OFICIALES DE FLUJO Y CERO INVENCIÓN DE PARÁMETROS (OBLIGATORIO):
    - **SIEMPRE QUE EL USUARIO PIDA UNA ESCENA COHERENTE, PERSONAJES ANDANDO/AVANZANDO, DIÁLOGO O VARIOS PLANOS**, llama PRIMERO a `studio_get_workflow_preset` pasando la descripción de la escena (`scene_description`) y el `preset_id` adecuado:
      * `"coherencia_personajes_entorno_avance"` → **OBLIGATORIO cuando los personajes van andando/caminando por la calle, pasillo o parque hablando** (evita el error de movimiento estático forzando avance real metro a metro con LoRA `Next Scene`, zancada alterna, paralaje de calle y prompt de vídeo en 3 vectores).
