@@ -415,7 +415,8 @@ MANUAL_RESOURCES["studio://manual/audiovisual"] = {
 3. Si y solo si una receta audiovisual está disponible y el usuario autoriza el gasto y la descarga, utiliza `studio_generate_video` con su ID exacto, `video_submode='i2v'`, `image_rel` existente, `duration_sec=5` y `use_official_defaults=true`. Para audio nativo no pases `audio_rel`: el motor usaría el audio externo en vez de la salida generada. No añadas LoRAs de otras familias. Espera el mismo `job_id` con `studio_wait_for_job`, informa de los logs y confirma el vídeo y su pista de audio antes de continuar. Un archivo no demuestra inteligibilidad o calidad de voz.
 4. Para una producción de 12 planos, genera primero solo un clip de prueba y espera aprobación antes de seguir si el usuario la solicita. Describe acción rápida, movimiento corporal y gestos visibles sin pedir cámara lenta; conservar caras, ropa y escenario. No prometas coherencia perfecta. No cambies el modelo ni hagas TTS, lip-sync o vídeo mudo como sustituto sin autorización.
 5. `minimax-h3-local-candidate` es un registro informativo: Studio NO implementa todavía su backend modular y bloquea preparación y generación. Inspecciona el ID con `studio_inspect_model`, no con `studio_prepare_model`. La implementación upstream admite generación conjunta y keyframes, pero no está validada aquí; el ejemplo int8 con offload cita ~75 GB RAM y no acredita compatibilidad L4. La licencia comunitaria excluye UE, Reino Unido, EE. UU. y Corea del Sur; revisar [licencia completa](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) y autorización separada cuando corresponda.
-6. Si faltan recursos o hay error, detente y consulta `studio_get_work_state`; conserva los pesos y muestra el motivo. No hagas descargas alternativas en cascada, no desactives las guardas y exporta logs con `studio_export_session_log(format='md')` cuando se soliciten o tras fallos repetidos. Pruebas reales GPU/MCP: pendientes para estas recetas.
+6. ID-LoRA de LTX-2.3 (`lora-ltx23-id-talkvid-candidate`) es solo un candidato informativo: Studio todavía no implementa el acondicionamiento de voz. No lo cargues como LoRA normal, no prometas voces constantes ni digas que `audio_rel` o `reference_voice_rel` activan el método. El primero reemplaza la banda sonora y el segundo está reservado y se rechaza antes de generar. La receta upstream usa una voz y primer frame; dos voces simultáneas y frame final no están validados aquí.
+7. Si faltan recursos o hay error, detente y consulta `studio_get_work_state`; conserva los pesos y muestra el motivo. No hagas descargas alternativas en cascada, no desactives las guardas y exporta logs con `studio_export_session_log(format='md')` cuando se soliciten o tras fallos repetidos. Pruebas reales GPU/MCP: pendientes para estas recetas.
 """,
 }
 MCP_SERVER_INSTRUCTIONS += """
@@ -1153,7 +1154,11 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                     },
                     "audio_rel": {
                         "type": "string",
-                        "description": "Opcional: `rel_path` de un audio para ajustar duración y muxear sonido en el MP4.",
+                        "description": "Opcional: audio para muxear en el MP4; sustituye el sonido nativo. NO es referencia de voz y no condiciona lipsync.",
+                    },
+                    "reference_voice_rel": {
+                        "type": "string",
+                        "description": "Reservado para identidad de voz mediante ID-LoRA. Todavía no implementado: la petición se rechaza sin generar ni descargar.",
                     },
                     "orientation": {
                         "type": "string",
@@ -2175,6 +2180,12 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
     # 9. Generar vídeo (T2V, I2V, Frame a Frame FLF2V o FFmpeg)
     if name == "studio_generate_video":
+        if args.get("reference_voice_rel"):
+            return _guided_error(
+                "VOICE_REFERENCE_BACKEND_UNAVAILABLE",
+                "ID-LoRA y la referencia de voz no están implementados en Studio; no se ha generado ni descargado nada.",
+                "No sustituyas la referencia por audio_rel: solo pega audio al MP4. Inspecciona lora-ltx23-id-talkvid-candidate y explica la limitación.",
+            )
         sub = str(args.get("video_submode") or "").strip().lower()
         mode = str(args.get("mode") or "ai").strip().lower()
         prompt = _sanitize_visual_scene_description(str(args.get("prompt") or ""))

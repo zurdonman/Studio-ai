@@ -2231,6 +2231,7 @@ def generate_video_clip(
     seed: int = 0,
     motion_style: str = "zoom_in",
     job: Optional[JobRecord] = None,
+    reference_voice_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Genera un clip de vídeo respetando los parámetros oficiales de cada arquitectura y apilado Multi-LoRA:
@@ -2238,6 +2239,8 @@ def generate_video_clip(
       - Imagen a Vídeo simple (i2v)
       - Frame a Frame: Inicio → Fin (flf2v)
     """
+    if reference_voice_path is not None:
+        raise RuntimeError("VOICE_REFERENCE_BACKEND_UNAVAILABLE: ID-LoRA no está implementado; audio_path solo muxea una pista, no condiciona la voz.")
     if duration_seconds is not None:
         duration_sec = float(duration_seconds)
     t0 = time.time()

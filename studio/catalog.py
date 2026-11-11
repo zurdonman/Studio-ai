@@ -1360,6 +1360,28 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "lora-ltx23-id-talkvid-candidate",
+        "name": "ID-LoRA LTX 2.3 · voz de referencia (candidato, no ejecutable)",
+        "category": "lora", "lora_target": "video", "lora_group": "identity",
+        "is_default": False, "validation_state": "candidate", "gpu_tested": False,
+        "engine": "unvalidated", "estimated_gb": 1.1,
+        "min_ram_gb": None, "min_vram_gb": None,
+        "compatible_models": [],
+        "badge": "Voz de referencia · implementación pendiente",
+        "description": (
+            "Referencia de ID-LoRA TalkVid para LTX-2.3. La ejecución requiere codificar voz, "
+            "añadir latentes con posiciones negativas y adaptar el denoiser; cargar solamente "
+            "el LoRA no habilita clonación de voz. Studio aún no implementa ese flujo."
+        ),
+        "official_spec": {
+            "upstream_base": "Lightricks/LTX-2.3 22B",
+            "upstream_workflow": "una voz de referencia (~5 s) y primer fotograma; fotograma final y dos voces no verificados",
+            "upstream_source": "https://github.com/ID-LoRA/ID-LoRA/tree/13dc9c286a2d3c1a21a7781f9ac0fe7727ec56cd/ID-LoRA-2.3",
+            "license_note": "Revisar la licencia y permisos del adaptador, del modelo base y de la muestra de voz antes de usarlo.",
+        },
+        "artifacts": [{"role": "reference_only", "repo_id": "AviadDahan/LTX-2.3-ID-LoRA-TalkVid-3K", "subdir": "id_lora", "filename": "lora_weights.safetensors", "verify_file": "lora_weights.safetensors"}],
+    },
+    {
         "id": "lora-ltx2-detailer-ic",
         "name": "💎 LoRA Oficial Lightricks IC-Detailer para LTX-2 19B Audio+Vídeo",
         "category": "lora",

@@ -232,6 +232,7 @@ class VideoGenReq(BaseModel):
     image_rel: Optional[str] = None
     end_image_rel: Optional[str] = None
     audio_rel: Optional[str] = None
+    reference_voice_rel: Optional[str] = None  # Reserved for ID-LoRA; not the muxed soundtrack.
     width: int = 1280
     height: int = 704
     duration_sec: float = 5.0
@@ -943,6 +944,8 @@ def api_generate_image(req: ImageGenReq) -> Dict[str, Any]:
 
 @app.post("/api/video/generate")
 def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
+    if req.reference_voice_rel:
+        raise HTTPException(status_code=400, detail="VOICE_REFERENCE_BACKEND_UNAVAILABLE: ID-LoRA todavía no está implementado; no se generó ni descargó nada. audio_rel es una pista de salida, no una referencia de identidad.")
     img_p = _resolve_media_rel(req.image_rel)
     end_img_p = _resolve_media_rel(req.end_image_rel)
     aud_p = _resolve_media_rel(req.audio_rel)
