@@ -144,8 +144,9 @@
         <span class="step-num">2</span> Vídeo · Clips IA / FFmpeg
       </button>
       <button class="tab-btn" data-tab="tab-tts">
-        <span class="step-num">3</span> Voces · Texto a Voz
+        <span class="step-num">3</span> Estudio de Voz
       </button>
+      <button class="tab-btn" data-tab="tab-music">🎵 DAW · Música</button>
       <button class="tab-btn" data-tab="tab-montage">
         <span class="step-num">4</span> Montaje Final · MP4
       </button>
@@ -718,7 +719,7 @@
         <div class="two-col-studio">
           <div class="card">
             <div class="card-header">
-              <h3>Generador de Voz (TTS) o Audio Propio</h3>
+              <h3>Estudio de Voz · Locución y Audio</h3>
               <label class="btn btn-secondary btn-sm file-btn">
                 🎵 Subir MP3 / WAV
                 <input type="file" id="input-upload-audio" accept="audio/*" hidden />
@@ -755,42 +756,7 @@
                 🎙️ Generar Locución
               </button>
 
-              <!-- NUEVO: Generador de Música Instrumental y Ambiente de Fondo -->
-              <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 10px;" />
-              <h4 class="sub-heading" style="margin-top:0;">🎵 Música Instrumental y Ambiente de Fondo (Restaurante / Lluvia / Cine)</h4>
-              <div class="params-grid-2">
-                <div>
-                  <label class="field-label">Motor de Música / Ambiente</label>
-                  <select id="bgm-model-select">
-                    <option value="procedural-ambience-cpu">Sintetizador Acústico Estéreo (0 GB · 0.2s Instantáneo CPU)</option>
-                    <option value="musicgen-small-bgm">Meta MusicGen Small (Música IA · 2.0 GB)</option>
-                    <option value="audioldm2-sfx">AudioLDM 2 Foley & Ambiente IA (3.8 GB)</option>
-                  </select>
-                </div>
-                <div>
-                  <label class="field-label">Preset Acústico (para 0 GB CPU)</label>
-                  <select id="bgm-preset-select">
-                    <option value="restaurant_warm_murmur">🍽️ Restaurante / Cafetería Cálida</option>
-                    <option value="cinematic_warm_pad">🎹 Pad Cinematográfico Cálido</option>
-                    <option value="rain_cozy">🌧️ Lluvia Suave en Cristal</option>
-                    <option value="wind_nature">🌿 Brisa Exterior Natural</option>
-                    <option value="room_tone_clean">🎙️ Room-Tone Limpio de Sala</option>
-                  </select>
-                </div>
-              </div>
-              <div class="params-grid-2">
-                <div>
-                  <label class="field-label">Prompt musical / sonoro</label>
-                  <input type="text" id="bgm-prompt" value="warm smooth acoustic jazz piano in a cozy restaurant" />
-                </div>
-                <div>
-                  <label class="field-label">Duración (segundos)</label>
-                  <input type="number" id="bgm-duration" value="10" min="2" max="30" step="1" />
-                </div>
-              </div>
-              <button class="btn btn-secondary" id="btn-run-bgm">
-                🎶 Generar Música / Ambiente Sonoro
-              </button>
+              <p class="muted">Los motores actuales generan locuciones, pero no clonan voces de referencia. La coherencia de voz nativa ID-LoRA para LTX sigue pendiente.</p>
 
               <!-- NUEVO: LipSync HD + Auto-Ducking -->
               <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 10px;" />
@@ -844,6 +810,72 @@
               <h3>Biblioteca de Voces y Pistas de Audio</h3>
             </div>
             <div id="audio-list-container" class="audio-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-music" class="view-panel">
+        <div class="music-workspace">
+          <div class="card"><div class="card-header"><h3>Estudio de Música · Generador</h3></div>
+            <p class="muted">Primera versión: música instrumental con MusicGen, efectos y ambiente. MusicGen y AudioLDM2 requieren descargar el modelo; no generan canciones con letra ni incluyen ACE-Step.</p>
+            <div class="form-stack">
+
+
+              <h4 class="sub-heading" style="margin-top:0;">🎵 Música Instrumental y Ambiente de Fondo (Restaurante / Lluvia / Cine)</h4>
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Motor de Música / Ambiente</label>
+                  <select id="bgm-model-select">
+                    <option value="musicgen-small-bgm">Meta MusicGen Small (Música IA instrumental · requiere descarga)</option>
+                    <option value="procedural-ambience-cpu">Ambiente sintético (CPU · sin descarga)</option>
+                    <option value="audioldm2-sfx">AudioLDM 2 Foley & Ambiente IA (3.8 GB)</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label">Preset Acústico (para 0 GB CPU)</label>
+                  <select id="bgm-preset-select">
+                    <option value="restaurant_warm_murmur">🍽️ Restaurante / Cafetería Cálida</option>
+                    <option value="cinematic_warm_pad">🎹 Pad Cinematográfico Cálido</option>
+                    <option value="rain_cozy">🌧️ Lluvia Suave en Cristal</option>
+                    <option value="wind_nature">🌿 Brisa Exterior Natural</option>
+                    <option value="room_tone_clean">🎙️ Room-Tone Limpio de Sala</option>
+                  </select>
+                </div>
+              </div>
+              <div class="params-grid-2">
+                <div>
+                  <label class="field-label">Prompt musical / sonoro</label>
+                  <input type="text" id="bgm-prompt" value="warm smooth acoustic jazz piano in a cozy restaurant" />
+                </div>
+                <div>
+                  <label class="field-label">Duración (segundos)</label>
+                  <input type="number" id="bgm-duration" value="10" min="2" max="30" step="1" />
+                </div>
+              </div>
+              <button class="btn btn-ghost" id="btn-download-bgm">Descargar el modelo seleccionado</button>
+              <button class="btn btn-secondary" id="btn-run-bgm">
+                🎶 Generar Música / Ambiente Sonoro
+              </button>
+
+            </div>
+            <hr />
+            <h4>🎹 MIDI a instrumento sintético</h4>
+            <p class="muted">Importa un MIDI de hasta 120 s y conviértelo en audio con osciladores de CPU. No son instrumentos acústicos: no se interpretan batería, pedal, cambios de instrumento ni automatización.</p>
+            <div class="form-stack">
+              <label class="field-label" for="midi-file">Archivo MIDI (.mid, .midi)</label><input type="file" id="midi-file" accept=".mid,.midi,audio/midi" />
+              <label class="field-label" for="midi-instrument">Instrumento sintético</label><select id="midi-instrument"><option value="piano">Piano sintético</option><option value="bass">Bajo sintético</option><option value="strings">Cuerdas sintéticas</option><option value="synth">Sintetizador</option></select>
+              <button class="btn btn-secondary" id="midi-render">Convertir MIDI a WAV</button>
+            </div>
+          </div>
+          <div class="card"><div class="card-header"><h3>Mezcla multipista</h3>
+            <label class="btn btn-secondary btn-sm file-btn">Subir audio<input type="file" id="music-upload" accept="audio/*" hidden /></label></div>
+            <p class="muted">Añade pistas de la biblioteca, define su entrada, recorte y volumen y exporta un WAV. Máximo 10 minutos por mezcla; sin edición de formas de onda, automatización ni reproducción simultánea en vivo. La suma puede saturar.</p>
+            <div class="quick-picker-bar"><select id="music-picker" class="flex-1"></select><button class="btn btn-secondary" id="music-add">+ Añadir pista</button></div>
+            <div id="music-overview" aria-label="Vista aproximada de las pistas en el tiempo"></div>
+            <div id="music-tracks" class="music-tracks"></div>
+            <button class="btn btn-primary" id="music-export">Exportar mezcla WAV</button>
+            <p class="muted">El resultado aparece en la biblioteca de audio. Las pistas originales no se modifican; la disposición se guarda en este navegador, pero depende de que los archivos sigan en el servidor (Colab puede borrarlos al desconectarse).</p>
+            <div id="music-result" hidden><h4>Último audio creado</h4><audio id="music-result-player" controls preload="none" style="width:100%"></audio><a id="music-result-download" class="btn btn-ghost btn-sm" download>Descargar WAV</a></div>
           </div>
         </div>
       </section>

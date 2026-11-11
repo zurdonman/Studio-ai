@@ -2286,3 +2286,15 @@ select:focus {
 /* Automatic model-cache governance: the telemetry is also actionable at safe points. */
 .memory-guardian .metric-val { color: #86efac; }
 .memory-guardian.memory-warning .metric-val { color: #fbbf24; }
+
+/* Estudio de música: mezcla sencilla sin alterar el material original. */
+.music-workspace { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(300px, 1.4fr); gap: 16px; }
+.music-tracks { display: grid; gap: 10px; margin: 14px 0; }
+.music-track { border: 1px solid var(--border); border-radius: 8px; padding: 12px; display: grid; gap: 8px; min-width: 0; }
+.music-track audio { width: 100%; }
+.music-track strong { overflow-wrap: anywhere; }
+@media (max-width: 900px) { .music-workspace { grid-template-columns: 1fr; } }
+.music-ruler { display: flex; justify-content: space-between; color: var(--text-muted, #a8b4c6); font-size: 11px; margin: 16px 0 4px; }
+.music-lane { position: relative; height: 28px; margin-bottom: 5px; border-radius: 5px; background: rgba(128, 145, 180, .12); overflow: hidden; }
+.music-region { position: absolute; height: 100%; background: #6554c0; border: 1px solid #9c8ff2; color: white; border-radius: 5px; padding: 4px 6px; overflow: hidden; white-space: nowrap; font-size: 11px; }
+.music-region.estimated { border-style: dashed; }

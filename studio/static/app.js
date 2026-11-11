@@ -31,6 +31,7 @@
     videoMode: "ai", // "ai" | "ffmpeg_motion"
     videoSubmode: "i2v", // "i2v" | "flf2v" | "t2v" | "ffmpeg"
     lastVidUploadStartRel: null,
+    musicTracks: [],
     timeline: [], // [{ media_rel, media_url, filename, type, duration, motion, audio_rel, fit_to_audio }]
     mask: {
       enabled: false,
@@ -482,7 +483,17 @@
       toast("Clip de vídeo MP4 listo.", "success");
     } else if (job.kind === "tts" && res.media_url) {
       toast(`Locución lista (${res.duration_seconds}s).`, "success");
+    } else if (["music_mix", "midi_render"].includes(job.kind) && res.media_url) {
+      $("music-result").hidden = false;
+      $("music-result-player").src = res.media_url;
+      $("music-result-download").href = res.media_url;
+      $("music-result-download").download = res.filename || "audio.wav";
+      toast(`Mezcla WAV lista (${res.duration_seconds}s), en la biblioteca de audio.`, "success");
     } else if (job.kind === "audio_bgm" && res.media_url) {
+      $("music-result").hidden = false;
+      $("music-result-player").src = res.media_url;
+      $("music-result-download").href = res.media_url;
+      $("music-result-download").download = res.filename || "audio.wav";
       toast(`Pista musical/ambiental lista (${res.duration_seconds}s).`, "success");
     } else if ((job.kind === "lipsync" || job.kind === "audio_mix") && res.media_url) {
       if (res.type === "video") {
@@ -1944,6 +1955,7 @@
     renderImageGallery();
     renderVideoSelectsAndGallery();
     renderAudioList();
+    renderMusicPicker();
     renderLipSyncSelects();
     renderHiggsfieldAssetSelects();
     renderMontagePickers();
@@ -2494,6 +2506,65 @@
         toast(`Pista «${a.filename}» asignada como audio global del montaje.`);
       })
     );
+  }
+
+  // El proyecto guarda referencias locales, no copia los audios ni sobrevive a la pérdida del almacenamiento de Colab.
+  const MUSIC_PROJECT_KEY = "studio-music-project-v1";
+  function saveMusicProject() {
+    try { localStorage.setItem(MUSIC_PROJECT_KEY, JSON.stringify(state.musicTracks)); } catch (_e) {}
+  }
+  function restoreMusicProject() {
+    try {
+      const items = JSON.parse(localStorage.getItem(MUSIC_PROJECT_KEY) || "[]");
+      if (!Array.isArray(items)) return;
+      state.musicTracks = items.slice(0, 16).filter(t => t && typeof t.rel_path === "string" && typeof t.media_url === "string" && t.media_url.startsWith("/media/")).map(t => ({
+        rel_path: t.rel_path, media_url: t.media_url, filename: String(t.filename || "audio"),
+        duration_seconds: Number(t.duration_seconds) || 0, start_sec: Number(t.start_sec) || 0,
+        volume: Number.isFinite(Number(t.volume)) ? Number(t.volume) : 1,
+        trim_start: Number(t.trim_start) || 0, trim_end: t.trim_end === "" || t.trim_end == null ? "" : Number(t.trim_end)
+      }));
+    } catch (_e) { state.musicTracks = []; }
+  }
+  function renderMusicTimeline() {
+    const box = $("music-overview");
+    if (!state.musicTracks.length) { box.innerHTML = ""; return; }
+    const estimates = state.musicTracks.map(t => {
+      const start = Math.max(0, Number(t.start_sec) || 0);
+      const trim = Math.max(0, Number(t.trim_start) || 0);
+      const knownEnd = t.trim_end !== "" ? Number(t.trim_end) : Number(t.duration_seconds);
+      return {start, length: Math.max(.1, knownEnd > trim ? knownEnd - trim : 4), unknown: !(knownEnd > trim)};
+    });
+    const total = Math.max(5, ...estimates.map(t => t.start + t.length));
+    box.innerHTML = `<div class="music-ruler"><span>0 s</span><span>${total.toFixed(1)} s</span></div>` + estimates.map((t, i) =>
+      `<div class="music-lane" title="${t.unknown ? "Duración estimada hasta conocer el archivo" : "Posición y duración aproximadas"}"><div class="music-region${t.unknown ? " estimated" : ""}" style="left:${(t.start/total*100).toFixed(2)}%;width:${(t.length/total*100).toFixed(2)}%">${escapeHtml(state.musicTracks[i].filename)}</div></div>`).join("");
+  }
+
+  function renderMusicPicker() {
+    const picker = $("music-picker");
+    if (!picker) return;
+    const previous = picker.value;
+    const all = [...state.assets.audio, ...state.assets.uploads.filter(a => a.type === "audio")];
+    picker.innerHTML = '<option value="">Selecciona una pista de audio</option>' + all.map(a =>
+      `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
+    if (all.some(a => a.rel_path === previous)) picker.value = previous;
+  }
+
+  function renderMusicTracks() {
+    const box = $("music-tracks");
+    box.innerHTML = state.musicTracks.length ? state.musicTracks.map((t, i) => `
+      <div class="music-track"><strong>${escapeHtml(t.filename)}</strong>
+        <audio controls preload="none" src="${escapeHtml(t.media_url)}"></audio>
+        <div class="params-grid-2"><label>Entrada (segundos)<input type="number" data-music-start="${i}" min="0" max="3600" step="0.1" value="${t.start_sec}"></label>
+        <label>Volumen (0–2)<input type="number" data-music-volume="${i}" min="0" max="2" step="0.05" value="${t.volume}"></label></div>
+        <div class="params-grid-2"><label>Recorte desde (s)<input type="number" data-music-trim-start="${i}" min="0" max="3600" step="0.1" value="${t.trim_start}"></label>
+        <label>Recorte hasta (s; vacío = final)<input type="number" data-music-trim-end="${i}" min="0" max="3600" step="0.1" value="${t.trim_end}"></label></div>
+        <button class="btn btn-ghost btn-sm" data-music-remove="${i}">Quitar pista</button></div>`).join("") : '<p class="muted">No hay pistas en esta mezcla.</p>';
+    renderMusicTimeline();
+    box.querySelectorAll("[data-music-start]").forEach(el => el.addEventListener("change", () => { state.musicTracks[Number(el.dataset.musicStart)].start_sec = el.value; saveMusicProject(); renderMusicTimeline(); }));
+    box.querySelectorAll("[data-music-volume]").forEach(el => el.addEventListener("change", () => { state.musicTracks[Number(el.dataset.musicVolume)].volume = el.value; saveMusicProject(); renderMusicTimeline(); }));
+    box.querySelectorAll("[data-music-trim-start]").forEach(el => el.addEventListener("change", () => { state.musicTracks[Number(el.dataset.musicTrimStart)].trim_start = el.value; saveMusicProject(); renderMusicTimeline(); }));
+    box.querySelectorAll("[data-music-trim-end]").forEach(el => el.addEventListener("change", () => { state.musicTracks[Number(el.dataset.musicTrimEnd)].trim_end = el.value; saveMusicProject(); renderMusicTimeline(); }));
+    box.querySelectorAll("[data-music-remove]").forEach(el => el.addEventListener("click", () => { state.musicTracks.splice(Number(el.dataset.musicRemove), 1); saveMusicProject(); renderMusicTracks(); }));
   }
 
   // ==================== MONTAJE FINAL (TIMELINE FFMPEG) ====================
@@ -3292,6 +3363,38 @@
       } catch (e) {
         toast(e.message, "error");
       }
+    });
+
+    $("music-upload").addEventListener("change", async ev => {
+      const file = ev.target.files[0];
+      if (file) { try { const a = await uploadFile(file); toast(`Audio subido: ${a.filename}`, "success"); } catch (e) { toast(e.message, "error"); } }
+      ev.target.value = "";
+    });
+    $("music-add").addEventListener("click", () => {
+      const a = [...state.assets.audio, ...state.assets.uploads.filter(x => x.type === "audio")].find(x => x.rel_path === $("music-picker").value);
+      if (!a) return toast("Selecciona una pista.", "error");
+      if (state.musicTracks.length >= 16) return toast("Máximo 16 pistas.", "error");
+      state.musicTracks.push({ ...a, start_sec: 0, volume: 1, trim_start: 0, trim_end: "" }); saveMusicProject(); renderMusicTracks();
+    });
+    $("music-export").addEventListener("click", async () => {
+      if (!state.musicTracks.length) return toast("Añade al menos una pista.", "error");
+      const tracks = state.musicTracks.map(t => ({audio_rel: t.rel_path, start_sec: Number(t.start_sec), volume: Number(t.volume), trim_start: Number(t.trim_start), trim_end: t.trim_end === "" ? null : Number(t.trim_end)}));
+      if (tracks.some(t => !Number.isFinite(t.start_sec) || t.start_sec < 0 || t.start_sec > 3600 || !Number.isFinite(t.volume) || t.volume < 0 || t.volume > 2 || !Number.isFinite(t.trim_start) || t.trim_start < 0 || t.trim_start > 3600 || (t.trim_end !== null && (!Number.isFinite(t.trim_end) || t.trim_end <= t.trim_start || t.trim_end > 3600)))) return toast("Revisa la entrada, el volumen y el recorte de las pistas.", "error");
+      try { const res = await api("/api/audio/music-mix", {method: "POST", body: JSON.stringify({tracks})}); watchJob(res.job); } catch (e) { toast(e.message, "error"); }
+    });
+    restoreMusicProject();
+    renderMusicTracks();
+
+    $("btn-download-bgm").addEventListener("click", () => {
+      const id = $("bgm-model-select").value;
+      if (id === "procedural-ambience-cpu") return toast("El sintetizador ya está disponible sin descarga.");
+      downloadModel(id);
+    });
+    $("midi-render").addEventListener("click", async () => {
+      const f = $("midi-file").files[0];
+      if (!f) return toast("Selecciona un archivo MIDI.", "error");
+      const body = new FormData(); body.append("file", f); body.append("instrument", $("midi-instrument").value);
+      try { const res = await api("/api/audio/midi-render", {method: "POST", body}); watchJob(res.job); } catch (e) { toast(e.message, "error"); }
     });
 
     if ($("btn-run-bgm")) {

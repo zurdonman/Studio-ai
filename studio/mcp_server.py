@@ -355,6 +355,9 @@ MANUAL_RESOURCES: Dict[str, Dict[str, str]] = {
             "## 2. Voz TTS (`studio_generate_speech`)\n"
             "- Motor instantáneo 0 GB: `engine_id='edge-tts-cloud'` (ej. `es-ES-AlvaroNeural`, `es-ES-ElviraNeural`, `es-MX-DaliaNeural`).\n"
             "- Motores locales (según runtime y RAM/GPU): `kokoro-82m-tts`, `mms-tts-spa`, `bark-small-tts`.\n\n"
+            "- Ninguno clona una voz de referencia. ID-LoRA para LTX sigue sin backend.\n\n"
+            "## DAW básico\n"
+            "- `studio_generate_music_or_sfx` genera MusicGen instrumental, AudioLDM2 o ambiente DSP. `studio_render_midi_synth` convierte MIDI a osciladores CPU, sin batería ni pedal; no son instrumentos acústicos. `studio_mix_music_tracks` recorta y mezcla hasta 16 pistas WAV, sin reproducción de sesión en vivo. La suma puede saturar. ACE-Step y clonación de voz aún no están integrados.\n\n"
             "## 3. Montaje Final (`studio_render_montage`)\n"
             "- Combina planos (`images` y/o `videos`) con su `audio_rel` individual (`fit_to_audio=true` ajusta la duración del plano a la locución), `global_audio_rel` (música de fondo) y `fade_seconds`.\n"
         ),
@@ -1474,6 +1477,23 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                 },
                 "required": ["media_rel"],
             },
+        },
+        {
+            "name": "studio_render_midi_synth",
+            "description": "Convierte MIDI tipo 0/1 a WAV con sintetizadores simples de CPU. Respeta tempos y notas melódicas; no interpreta percusión ni pedal y no son instrumentos acústicos muestreados.",
+            "inputSchema": {"type": "object", "properties": {
+                "midi_base64": {"type": "string", "description": "Archivo MIDI completo en Base64 (máximo 2 MiB decodificado)."},
+                "instrument": {"type": "string", "enum": ["piano", "bass", "strings", "synth"], "default": "piano"},
+                "wait": {"type": "boolean", "default": True}}, "required": ["midi_base64"]},
+        },
+        {
+            "name": "studio_mix_music_tracks",
+            "description": "Exporta de 1 a 16 pistas musicales a WAV, con entrada y volumen individuales. Hasta 10 minutos por mezcla, sin filtro de voz ni ducking; la suma puede saturar. No es un DAW completo.",
+            "inputSchema": {"type": "object", "properties": {
+                "tracks": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "object", "properties": {
+                    "audio_rel": {"type": "string"}, "start_sec": {"type": "number", "minimum": 0, "maximum": 3600, "default": 0},
+                    "volume": {"type": "number", "minimum": 0, "maximum": 2, "default": 1}, "trim_start": {"type": "number", "minimum": 0, "maximum": 3600, "default": 0}, "trim_end": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}}, "required": ["audio_rel"]}},
+                "wait": {"type": "boolean", "default": True}}, "required": ["tracks"]},
         },
         {
             "name": "studio_mix_audio_tracks",
@@ -2830,6 +2850,48 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             ),
         )
         if not wait_flag:
+            return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
+        return _ok_result(_wait_for_job_bounded(job.id))
+
+    if name == "studio_render_midi_synth":
+        from studio.engines.midi_synth import INSTRUMENTS, MAX_MIDI_BYTES, synthesize_midi
+        try:
+            raw = str(args.get("midi_base64") or "")
+            if len(raw) > (MAX_MIDI_BYTES + 2) // 3 * 4:
+                raise ValueError("MIDI demasiado grande.")
+            data = base64.b64decode(raw, validate=True)
+            instrument = str(args.get("instrument") or "piano")
+            if not data or len(data) > MAX_MIDI_BYTES or instrument not in INSTRUMENTS:
+                raise ValueError("MIDI o instrumento inválido.")
+        except (ValueError, TypeError) as exc:
+            return _guided_error("INVALID_MIDI", str(exc), "Usa un MIDI tipo 0/1 de hasta 2 MiB en Base64 e instrumento válido.")
+        job = job_manager.submit(kind="midi_render", title="[MCP] MIDI a sintetizador", fn=lambda j: synthesize_midi(data, instrument, j))
+        return _ok_result(_wait_for_job_bounded(job.id) if bool(args.get("wait", True)) else {"ok": True, "job_id": job.id, "status": job.status})
+
+    if name == "studio_mix_music_tracks":
+        from studio.engines.music_mix import mix_music_tracks
+        import math
+        try:
+            items = args.get("tracks")
+            if not isinstance(items, list) or not 1 <= len(items) <= 16:
+                raise ValueError("Indica entre 1 y 16 pistas.")
+            tracks = []
+            for item in items:
+                if not isinstance(item, dict) or not item.get("audio_rel"):
+                    raise ValueError("Cada pista necesita audio_rel.")
+                start = float(item.get("start_sec", 0))
+                volume = float(item.get("volume", 1))
+                if not math.isfinite(start) or not 0 <= start <= 3600 or not math.isfinite(volume) or not 0 <= volume <= 2:
+                    raise ValueError("Inicio o volumen fuera de rango.")
+                trim_start = float(item.get("trim_start", 0))
+                trim_end = float(item["trim_end"]) if item.get("trim_end") is not None else None
+                if not math.isfinite(trim_start) or not 0 <= trim_start <= 3600 or (trim_end is not None and (not math.isfinite(trim_end) or not trim_start < trim_end <= 3600)):
+                    raise ValueError("Recorte inválido.")
+                tracks.append({"path": _resolve_rel_safe(item["audio_rel"]), "start_sec": start, "volume": volume, "trim_start": trim_start, "trim_end": trim_end})
+        except (ValueError, TypeError, FileNotFoundError) as exc:
+            return _guided_error("INVALID_MUSIC_TRACKS", str(exc), "Verifica las rutas y los valores de entrada y volumen.")
+        job = job_manager.submit(kind="music_mix", title="[MCP] Mezcla musical multipista", fn=lambda j: mix_music_tracks(tracks, j))
+        if not bool(args.get("wait", True)):
             return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
         return _ok_result(_wait_for_job_bounded(job.id))
 

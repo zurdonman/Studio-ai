@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1188,6 +1188,40 @@ def api_generate_bgm(req: AudioBgmReq) -> Dict[str, Any]:
             seed=req.seed,
         ),
     )
+    return {"ok": True, "job": job.to_dict()}
+
+
+class MusicTrackItem(BaseModel):
+    audio_rel: str = Field(min_length=1)
+    start_sec: float = Field(default=0, ge=0, le=3600, allow_inf_nan=False)
+    volume: float = Field(default=1, ge=0, le=2, allow_inf_nan=False)
+    trim_start: float = Field(default=0, ge=0, le=3600, allow_inf_nan=False)
+    trim_end: Optional[float] = Field(default=None, gt=0, le=3600, allow_inf_nan=False)
+
+
+class MusicMixReq(BaseModel):
+    tracks: List[MusicTrackItem] = Field(min_length=1, max_length=16)
+
+
+@app.post("/api/audio/music-mix")
+def api_music_mix(req: MusicMixReq) -> Dict[str, Any]:
+    from studio.engines.music_mix import mix_music_tracks
+    tracks = [{"path": _resolve_media_rel(t.audio_rel), "start_sec": t.start_sec, "volume": t.volume, "trim_start": t.trim_start, "trim_end": t.trim_end} for t in req.tracks]
+    job = job_manager.submit(kind="music_mix", title="Mezcla musical multipista", fn=lambda j: mix_music_tracks(tracks, j))
+    return {"ok": True, "job": job.to_dict()}
+
+
+@app.post("/api/audio/midi-render")
+async def api_midi_render(file: UploadFile = File(...), instrument: str = Form("piano")) -> Dict[str, Any]:
+    from studio.engines.midi_synth import INSTRUMENTS, MAX_MIDI_BYTES, synthesize_midi
+    if instrument not in INSTRUMENTS:
+        raise HTTPException(status_code=400, detail="Instrumento sintético desconocido.")
+    if Path(file.filename or "").suffix.lower() not in (".mid", ".midi"):
+        raise HTTPException(status_code=400, detail="Selecciona un archivo .mid o .midi.")
+    data = await file.read(MAX_MIDI_BYTES + 1)
+    if not data or len(data) > MAX_MIDI_BYTES:
+        raise HTTPException(status_code=400, detail="El MIDI debe ocupar entre 1 byte y 2 MiB.")
+    job = job_manager.submit(kind="midi_render", title="Convertir MIDI a instrumento sintético", fn=lambda j: synthesize_midi(data, instrument, j))
     return {"ok": True, "job": job.to_dict()}
 
 

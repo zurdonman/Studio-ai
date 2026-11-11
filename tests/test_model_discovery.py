@@ -484,11 +484,12 @@ def test_mcp_discovery_schemas_dispatch_resources_and_invalid_arguments(temp_stu
     monkeypatch.setattr(mcp, "assessment_context", lambda **_kw: context())
     monkeypatch.setattr(mcp, "catalog_manager", catalog)
     hdr = {"X-Studio-MCP-Key": client.get("/api/mcp/info").json()["token"]}
-    schema = {tool["name"]: tool for tool in mcp._build_mcp_tools_schema()}
+    tools = mcp._build_mcp_tools_schema()
+    schema = {tool["name"]: tool for tool in tools}
     expected = {"studio_search_models", "studio_inspect_model", "studio_refresh_model_index", "studio_model_index_status", "studio_get_model_guide"}
     assert expected <= schema.keys()
-    assert {"studio_ask_user", "studio_answer_preference", "studio_get_work_state"} <= schema.keys()
-    assert len(schema) == 30
+    assert {"studio_ask_user", "studio_answer_preference", "studio_get_work_state", "studio_mix_music_tracks", "studio_render_midi_synth"} <= schema.keys()
+    assert len(schema) == len(tools)  # No duplicate tool names.
     assert schema["studio_inspect_model"]["inputSchema"]["oneOf"]
     assert "SANA" in schema["studio_generate_or_edit_image"]["inputSchema"]["properties"]["use_official_defaults"]["description"]
     search = mcp_payload(mcp._execute_mcp_tool("studio_search_models", {"query": "metadata-only", "category": "image"}))
