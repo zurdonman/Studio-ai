@@ -212,7 +212,7 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
    - En tu primera acción de la sesión, llama SIEMPRE a `studio_get_state_and_manual`.
    - Comprueba la GPU activa (ej. T4 15 GB, L4 22.5 GB, A100 40/80 GB), la VRAM libre, el disco libre (`free_disk_gb`) y los archivos existentes.
 
-1b. MINIMAX H3 LOCAL: `minimax-h3-local-candidate` es solo una referencia informativa, NO un motor ejecutable en Studio. Inspecciónalo con `studio_inspect_model`; no prepares, descargues ni generes con ese ID ni inventes un backend. Su licencia comunitaria excluye UE, Reino Unido, EE. UU. y Corea del Sur: se necesita una licencia separada donde corresponda. No hay prueba de ejecución en GPU ni de compatibilidad con L4. El ejemplo int8 upstream cita ~75 GB RAM y no está integrado aquí. No confundirlo con la receta BF16 ni con FreeVideo. Solicita autorización antes de proponer cualquier alternativa.
+1b. VÍDEO CON AUDIO NATIVO Y MINIMAX H3: lee el manual integrado `studio_get_model_guide(guide='av')` o `studio://manual/audiovisual`. Si el usuario pide vídeo con audio nativo, no lo sustituyas sin autorización por vídeo mudo, FastWan, TTS ni montaje; las recetas LTX-2.3 y 2.5 destiladas son experimentales y no han sido probadas en GPU. Comprueba RAM, VRAM, disco, acceso y licencia antes de ofrecerlas. Si el usuario ya aporta los fotogramas, no generes otros. `minimax-h3-local-candidate` es solo una referencia informativa, NO un motor ejecutable en Studio: inspecciónalo con `studio_inspect_model`, pero no lo descargues ni lo uses para generar. Su licencia comunitaria excluye UE, Reino Unido, EE. UU. y Corea del Sur; consultar licencia separada cuando corresponda. El ejemplo int8 upstream cita ~75 GB RAM y no está integrado aquí. No se ha validado L4; no confundirlo con la receta BF16 ni con FreeVideo. Solicita autorización antes de proponer otra alternativa.
 
 2. PRESETS OFICIALES DE FLUJO Y CERO INVENCIÓN DE PARÁMETROS (OBLIGATORIO):
    - **SIEMPRE QUE EL USUARIO PIDA UNA ESCENA COHERENTE, PERSONAJES ANDANDO/AVANZANDO, DIÁLOGO O VARIOS PLANOS**, llama PRIMERO a `studio_get_workflow_preset` pasando la descripción de la escena (`scene_description`) y el `preset_id` adecuado:
@@ -223,10 +223,10 @@ SIGUE OBLIGATORIAMENTE ESTE MANUAL OPERATIVO Y NO INVENTES NINGÚN ID NI PARÁME
      * `"edicion_fotografica_relight_cine"` → edición fotográfica pro, re-iluminación (`AnyLight` + `Relight`) y piel realista.
    - Si dudas qué modelo suelto elegir, llama también a `studio_recommend_pipeline(task=..., priority=...)`.
    - Ejecuta el `execution_plan` EN ORDEN y espera cada job hasta `completed` con `studio_wait_for_job` y el MISMO `job_id`. Una respuesta `running`/`queued` o un timeout HTTP NO es un error; no repitas `studio_prepare_model`.
-   - FASES SIN INTERCALAR: TODOS los keyframes → auditoría y reparaciones hasta `all_consistent=true` → TODOS los clips de vídeo → sonido/LipSync/montaje. No prepares el modelo de vídeo antes de terminar y auditar los keyframes.
-   - Imagen y vídeo auto-descargan/auto-cargan el modelo elegido y sus LoRAs. No los prepares por separado. En 4-bit precarga los LoRAs futuros desde la primera imagen con escala 0.0 en los inactivos.
+   - Si el usuario aporta los keyframes, usa sus imágenes existentes: no crees ni modifiques otras sin autorización. Si se necesitan imágenes nuevas, termina los keyframes y su auditoría antes de preparar vídeo. Genera sonido adicional/LipSync solo si procede; no reemplaces audio nativo sin autorización.
+   - Imagen y vídeo pueden auto-descargar/auto-cargar el modelo elegido y sus LoRAs: antes verifica recursos y acceso, y respeta la autorización del usuario. En 4-bit precarga los LoRAs futuros desde la primera imagen con escala 0.0 en los inactivos.
    - Ante errores de carga/compatibilidad/meta tensor, DETENTE e informa del error conservando los pesos en disco. PROHIBIDO descargar modelos alternativos 14B/13B/1.3B en cascada sin autorización del usuario.
-   - Los prompts de imagen/vídeo describen SOLO la escena física; no copies 'crear los diálogos', 'clip de un minuto', 'utiliza LoRAs rápido' dentro del prompt. La duración/diálogos son parámetros del plan.
+   - Los prompts de imagen/vídeo describen la escena física y la acción; no copies instrucciones de proceso como 'clip de un minuto' o 'utiliza LoRAs rápido'. Si el modelo genera audio nativo y el usuario lo solicita, describe también voz, diálogo y sonidos de la escena en el prompt; no inventes réplicas ni las sustituyas por TTS sin autorización.
    - En `studio_generate_video` y `studio_generate_or_edit_image` mantén `use_official_defaults=true` (valor por defecto): Studio IA aplica automáticamente `steps`, `guidance_scale`, `video_lora_scale`, `width`, `height` y `fps` óptimos del fabricante.
 
 3. REGLAS ESTRICTAS DE VÍDEO Y «FRAME A FRAME» (INICIO → FIN):
@@ -404,6 +404,19 @@ MANUAL_RESOURCES["studio://manual/model-oracle"] = {
 MANUAL_RESOURCES["studio://manual/model-research"] = {
     "name": "Investigación de familias/modelos y fuentes oficiales fijadas",
     "mimeType": "text/markdown", "content": MODEL_RESEARCH_PATH.read_text(encoding="utf-8"),
+}
+MANUAL_RESOURCES["studio://manual/audiovisual"] = {
+    "name": "Guía MCP integrada: vídeo con audio nativo y MiniMax H3",
+    "mimeType": "text/markdown",
+    "content": """# Vídeo y audio nativos — guía para el agente
+
+1. Consulta `studio_get_state_and_manual` e inspecciona hardware real, disco, trabajos, archivos y `memory_guardian`. Usa `studio_list_assets` para localizar los fotogramas ya aportados; no inventes sus rutas ni generes imágenes nuevas si el usuario ya las proporciona.
+2. Para una petición de audio y vídeo conjuntos, inspecciona `ltx-2.3-distilled-av` y `ltx-2.5-distilled-av` con `studio_inspect_model` y comprueba modo, acceso/licencia, espacio y diagnóstico de memoria. Son recetas experimentales de una etapa (8 pasos, CFG 1), no probadas en GPU; 80 GB de RAM es un presupuesto de planificación, no una prueba de encaje. No prometas L4, tiempo ni calidad. El oráculo general puede recomendar vídeo sin audio nativo: comprueba el modelo elegido, no lo sustituyas silenciosamente.
+3. Si y solo si una receta audiovisual está disponible y el usuario autoriza el gasto y la descarga, utiliza `studio_generate_video` con su ID exacto, `video_submode='i2v'`, `image_rel` existente, `duration_sec=5` y `use_official_defaults=true`. Para audio nativo no pases `audio_rel`: el motor usaría el audio externo en vez de la salida generada. No añadas LoRAs de otras familias. Espera el mismo `job_id` con `studio_wait_for_job`, informa de los logs y confirma el vídeo y su pista de audio antes de continuar. Un archivo no demuestra inteligibilidad o calidad de voz.
+4. Para una producción de 12 planos, genera primero solo un clip de prueba y espera aprobación antes de seguir si el usuario la solicita. Describe acción rápida, movimiento corporal y gestos visibles sin pedir cámara lenta; conservar caras, ropa y escenario. No prometas coherencia perfecta. No cambies el modelo ni hagas TTS, lip-sync o vídeo mudo como sustituto sin autorización.
+5. `minimax-h3-local-candidate` es un registro informativo: Studio NO implementa todavía su backend modular y bloquea preparación y generación. Inspecciona el ID con `studio_inspect_model`, no con `studio_prepare_model`. La implementación upstream admite generación conjunta y keyframes, pero no está validada aquí; el ejemplo int8 con offload cita ~75 GB RAM y no acredita compatibilidad L4. La licencia comunitaria excluye UE, Reino Unido, EE. UU. y Corea del Sur; revisar [licencia completa](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) y autorización separada cuando corresponda.
+6. Si faltan recursos o hay error, detente y consulta `studio_get_work_state`; conserva los pesos y muestra el motivo. No hagas descargas alternativas en cascada, no desactives las guardas y exporta logs con `studio_export_session_log(format='md')` cuando se soliciten o tras fallos repetidos. Pruebas reales GPU/MCP: pendientes para estas recetas.
+""",
 }
 MCP_SERVER_INSTRUCTIONS += """
 
@@ -636,8 +649,8 @@ def _model_discovery_tools_schema() -> List[Dict[str, Any]]:
             "interval_minutes": {"type": "integer", "minimum": 15, "maximum": 1440, "default": 360},
         }),
         tool("studio_model_index_status", "Estado ligero de frescura, último éxito/error, límites, cooldown y actualizador. No genera consultas a HF ni importa GPU.", {}),
-        tool("studio_get_model_guide", "Manual detallado para CLI: hardware/VRAM/RAM/disco, fuentes, formatos, LoRA, recipes/candidates, oráculo y recuperación. No es una promesa de GPU validada.", {
-            "guide": {"type": "string", "enum": ["operations", "research"], "default": "operations"},
+        tool("studio_get_model_guide", "Manual detallado: operations, research o av (vídeo con audio nativo y MiniMax H3). No promete GPU validada.", {
+            "guide": {"type": "string", "enum": ["operations", "research", "av"], "default": "operations"},
         }),
     ]
     tools[1]["inputSchema"]["oneOf"] = [{"required": ["model_id"]}, {"required": ["repo_id"]}]
@@ -659,9 +672,10 @@ def _execute_model_discovery_tool(name: str, args: Dict[str, Any]) -> Dict[str, 
         return model_discovery.status()
     if name == "studio_get_model_guide":
         guide = str(args.get("guide", "operations"))
-        if guide not in ("operations", "research"):
-            raise ValueError("guide debe ser operations o research.")
-        uri = "studio://manual/model-oracle" if guide == "operations" else "studio://manual/model-research"
+        guide_uris = {"operations": "studio://manual/model-oracle", "research": "studio://manual/model-research", "av": "studio://manual/audiovisual"}
+        if guide not in guide_uris:
+            raise ValueError("guide debe ser operations, research o av.")
+        uri = guide_uris[guide]
         return {"ok": True, "uri": uri, "markdown": MANUAL_RESOURCES[uri]["content"]}
     if name == "studio_search_models":
         return model_discovery.search(query=str(args.get("query", "")), category=str(args.get("category", "video")),
@@ -1699,7 +1713,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "ANTES de generar escenas de personajes caminando/hablando, secuencias coherentes o cortos, llama SIEMPRE a `studio_get_workflow_preset` (ej. `preset_id='coherencia_personajes_entorno_avance'`).",
                 "En escenas donde los personajes avanzan (ej. andando por la calle), NUNCA congeles el fondo entre fotogramas: usa `qwen-lora-next-scene` + zancada alterna + `expect_spatial_progression=true` en `studio_analyze_coherence`.",
                 "En `studio_generate_video` deja `use_official_defaults=true` e incluye los 3 vectores de movimiento (cámara + locomoción de personajes + paralaje de entorno).",
-                "FASES: todos los keyframes → auditoría y reparaciones → todos los vídeos → audio/LipSync/montaje. No prepares vídeo antes de acabar los keyframes.",
+                "Si el usuario ya aporta los fotogramas no generes otros. Para vídeo con audio nativo, consulta studio_get_model_guide(guide='av'); no sustituyas el audio nativo por TTS sin autorización.",
+                "FASES: usa los keyframes aportados o autorizados → auditoría y reparaciones si corresponden → vídeos → sonido adicional/montaje solo si procede. No prepares vídeo antes de acabar los keyframes.",
                 "Un job running/queued requiere esperar el mismo job_id, no volver a preparar. Ante un fallo no descargues modelos alternativos en cascada.",
                 "La memoria se gestiona automáticamente: solo se expulsan modelos inactivos, nunca sus archivos. MEMORY_SAFETY_STOP o MEMORY_BUDGET_EXCEEDED requieren revisar memory_guardian; no repetir ciegamente ni borrar pesos.",
                 "Revisa `production_preferences.pending_questions` al pedir el plan: haz UNA pregunta (recomendada ya marcada) y guárdala con `studio_answer_preference`; no vuelvas a preguntar lo guardado.",
