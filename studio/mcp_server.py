@@ -2238,7 +2238,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             # leaving it out of the call (as the log shows) silently disables the speed
             # recipe and runs the full CFG loop, which is why a "fast" attempt ran slow.
             speed_ready = bool(
-                lora_defn and (lora_defn.get("recommended_steps") or lora_defn.get("flf2v_recommended_steps"))
+                (model_id in FAST_VIDEO_RECIPES and FAST_VIDEO_RECIPES[model_id] is None)
+                or (lora_defn and (lora_defn.get("recommended_steps") or lora_defn.get("flf2v_recommended_steps")))
             )
             if not speed_ready:
                 speed_ids = [

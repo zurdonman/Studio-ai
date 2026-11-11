@@ -1731,7 +1731,7 @@ def _instantiate_video_pipeline(
             "active_mode": "unified",
         }
 
-    if engine == "ltx2_av":
+    if engine in ("ltx2_av", "ltx2_distilled_av"):
         from diffusers import LTX2ConditionPipeline, LTX2Pipeline  # type: ignore
 
         pipe_cond = guarded_model_load(LTX2ConditionPipeline.from_pretrained, bdir, torch_dtype=torch.bfloat16)
@@ -1822,6 +1822,28 @@ def load_video_model_into_memory(
     )
 
 
+def _ltx_distilled_call_settings(pipe: Any, call_sig: Any) -> Dict[str, Any]:
+    """One-stage LTX distilled schedule; fail closed rather than silently use linear sigmas."""
+    required = {"sigmas", "guidance_scale"}
+    if not required.issubset(call_sig):
+        raise RuntimeError("LTX_DISTILLED_RUNTIME_INCOMPATIBLE: Diffusers sin soporte para sigmas destilados.")
+    from diffusers import FlowMatchEulerDiscreteScheduler  # type: ignore
+    from diffusers.pipelines.ltx2.utils import DISTILLED_SIGMA_VALUES  # type: ignore
+
+    pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+        pipe.scheduler.config, use_dynamic_shifting=False, shift_terminal=None
+    )
+    settings: Dict[str, Any] = {"sigmas": list(DISTILLED_SIGMA_VALUES), "guidance_scale": 1.0}
+    # Recent LTX2 pipelines default to extra audio/STG/modality guidance. Disable it
+    # as well, otherwise CFG=1 is not actually the distilled one-forward recipe.
+    for key, value in (("audio_guidance_scale", 1.0), ("stg_scale", 0.0),
+                       ("audio_stg_scale", 0.0), ("modality_scale", 1.0),
+                       ("audio_modality_scale", 1.0)):
+        if key in call_sig:
+            settings[key] = value
+    return settings
+
+
 def _load_video_model_into_memory_locked(
     model_id: str = "wan22-ti2v-5b",
     auto_download: bool = False,
@@ -1872,6 +1894,15 @@ def _load_video_model_into_memory_locked(
         raise RuntimeError(
             f"Faltan librerías de vídeo/GPU ({exc}). En Colab se instalan automáticamente."
         ) from exc
+
+    if defn.get("ltx_distilled"):
+        # Validate the runtime before starting a many-gigabyte download.
+        try:
+            from diffusers import LTX2ConditionPipeline, LTX2Pipeline, FlowMatchEulerDiscreteScheduler  # noqa: F401
+            from diffusers.pipelines.ltx2.utils import DISTILLED_SIGMA_VALUES  # noqa: F401
+            from transformers import Gemma4UnifiedForConditionalGeneration  # noqa: F401
+        except (ImportError, AttributeError) as exc:
+            raise RuntimeError("LTX_DISTILLED_RUNTIME_INCOMPATIBLE: faltan componentes de Diffusers/Transformers; reinicia Studio para instalar las dependencias de Colab.") from exc
 
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -1965,11 +1996,14 @@ def _load_video_model_into_memory_locked(
         vram_total = float(gpu_info.get("vram_total_gb", 0.0))
         min_vram = float(defn.get("min_vram_gb", 14.0))
 
-        _apply_best_offload(pipe, vram_total, min_vram, job=job, pct=_map_pct(0.92))
+        # Model CPU offload would attempt to move the entire >40 GB BF16
+        # denoiser onto smaller cards. Prefer sequential offload for this recipe.
+        offload_threshold = max(min_vram, vram_total) if defn.get("ltx_distilled") else min_vram
+        _apply_best_offload(pipe, vram_total, offload_threshold, job=job, pct=_map_pct(0.92))
 
         vram_gb = query_gpu_info()["vram_used_gb"]
         bundle["engine"] = engine
-        bundle["min_vram_gb"] = min_vram
+        bundle["min_vram_gb"] = offload_threshold
         bundle["defn"] = defn
         memory_manager.register_loaded(
             slot="video",
@@ -2461,6 +2495,11 @@ def generate_video_clip(
     num_frames = eff["num_frames"]
     steps = eff["steps"]
     eff_cfg = eff["guidance_scale"]
+    if defn.get("ltx_distilled"):
+        # Fixed schedule: do not silently honour incompatible UI/manual settings.
+        steps, eff_cfg = 8, 1.0
+        if job:
+            job.log("Receta LTX destilada: 8 pasos, CFG 1 y sigmas fijos; una etapa sin refinado.", progress=infer_pct_start - 1.0)
 
     if eff["adjusted_notes"] and job:
         job.log(
@@ -2546,7 +2585,7 @@ def generate_video_clip(
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["wan"]
     elif engine == "sana_video":
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["sana"]
-    elif engine in ("ltx_video", "ltx_video_distilled", "ltx2_av"):
+    elif engine in ("ltx_video", "ltx_video_distilled", "ltx2_av", "ltx2_distilled_av"):
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["ltx"]
     else:
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["default"]
@@ -2559,6 +2598,8 @@ def generate_video_clip(
         "guidance_scale": float(eff_cfg),
         "generator": generator,
     }
+    if defn.get("ltx_distilled"):
+        kwargs.update(_ltx_distilled_call_settings(pipe, call_sig))
     if "negative_prompt" in call_sig:
         kwargs["negative_prompt"] = eff_neg
     if "frames" in call_sig and "num_frames" not in call_sig:
@@ -2566,7 +2607,7 @@ def generate_video_clip(
     elif "num_frames" in call_sig:
         kwargs["num_frames"] = num_frames
     if "frame_rate" in call_sig:
-        kwargs["frame_rate"] = float(fps) if engine == "ltx2_av" else int(fps)
+        kwargs["frame_rate"] = float(fps) if engine in ("ltx2_av", "ltx2_distilled_av") else int(fps)
     if engine == "cogvideox_i2v" and "use_dynamic_cfg" in call_sig:
         kwargs["use_dynamic_cfg"] = True
     if "callback_on_step_end" in call_sig:
@@ -2620,7 +2661,7 @@ def generate_video_clip(
                 LTXVideoCondition(image=img_pil, frame_index=0),
                 LTXVideoCondition(image=end_pil, frame_index=num_frames - 1),
             ]
-    elif engine == "ltx2_av":
+    elif engine in ("ltx2_av", "ltx2_distilled_av"):
         if submode in ("i2v", "flf2v") and img_pil is not None:
             from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition  # type: ignore
 
@@ -2640,12 +2681,14 @@ def generate_video_clip(
     generated_audio_wav: Optional[Path] = None
     checkpoint_current_operation(job=job, force=True)
     try:
-        if engine == "ltx2_av":
+        if engine in ("ltx2_av", "ltx2_distilled_av"):
             kwargs["output_type"] = "np"
             kwargs["return_dict"] = False
             res_tuple = pipe(**kwargs)
             video_out = res_tuple[0]
             audio_out = res_tuple[1] if len(res_tuple) > 1 else None
+            if audio_out is None and not (audio_path and audio_path.exists()):
+                raise RuntimeError("LTX_AUDIO_MISSING: el pipeline no devolvió audio; no se guardará un clip silencioso como audiovisual.")
             frames = video_out[0]
             if audio_out is not None and not (audio_path and audio_path.exists()):
                 sr = int(

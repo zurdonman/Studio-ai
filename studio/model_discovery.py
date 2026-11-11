@@ -571,6 +571,7 @@ class ModelDiscovery:
             "sdxl_turbo": {"StableDiffusionXLPipeline"},
             "ltx_video": {"LTXPipeline"}, "ltx_video_distilled": {"LTXPipeline"},
             "ltx2_av": {"LTX2Pipeline"},
+            "ltx2_distilled_av": {"LTX2Pipeline"},
         }
         if recipes and item.get("quantization") and not any(ENGINE_CONTRACTS.get(r["engine"], {}).get("quantization") for r in recipes):
             unsupported.append("El repositorio declara una cuantización no incluida en la receta de precisión completa; requiere revisión.")

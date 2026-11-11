@@ -53,6 +53,8 @@ FAST_VIDEO_RECIPES = {
     "wan22-ti2v-5b": "lora-wan22-ti2v-5b-fastwan",
     "wan21-vace-1.3b": "lora-wan21-1.3b-bidirect2",
     "ltx-video-13b-distilled": None,
+    "ltx-2.3-distilled-av": None,
+    "ltx-2.5-distilled-av": None,
     "wan22-ti2v-5b-turbo": None,
 }
 

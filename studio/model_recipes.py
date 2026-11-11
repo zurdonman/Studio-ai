@@ -34,6 +34,7 @@ ENGINE_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "ltx_video": {"classes": ["LTXConditionPipeline"], "diffusers": "0.33.0", "ram_gb": 32},
     "ltx_video_distilled": {"classes": ["LTXConditionPipeline"], "diffusers": "0.35.0", "ram_gb": 48, "quantization": "FP8 layerwise casting of denoiser; BF16 companions"},
     "ltx2_av": {"classes": ["LTX2ConditionPipeline", "LTX2Pipeline"], "diffusers": "0.36.0", "ram_gb": 80},
+    "ltx2_distilled_av": {"classes": ["LTX2ConditionPipeline", "LTX2Pipeline"], "diffusers": "0.42.0.dev0", "transformers": "5.5.0", "ram_gb": 80},
     "sana_video": {"classes": ["SanaImageToVideoPipeline", "SanaVideoPipeline"], "diffusers": "0.36.0", "ram_gb": 28},
     "skyreels_v2": {"classes": ["SkyReelsV2ImageToVideoPipeline"], "diffusers": "0.35.0", "ram_gb": 36},
     "cogvideox_i2v": {"classes": ["CogVideoXImageToVideoPipeline"], "diffusers": "0.31.0", "ram_gb": 32},
