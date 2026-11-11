@@ -970,6 +970,12 @@ def test_wan22_ti2v_native_flf2v_prepare_latents_and_fast_mp4(temp_studio_env, m
     )
     fake_torch.randn = lambda shape, **_kw: FakeTensor(np.full(shape, 0.25, dtype=np.float32))
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    # This unit test supplies fake tensors/VAE, so don't call real Diffusers'
+    # device inspection when the optional package happens to be installed.
+    fake_torch_utils = types.ModuleType("diffusers.utils.torch_utils")
+    fake_torch_utils.get_module_execution_device = lambda _module: "cpu"
+    fake_torch_utils.randn_tensor = lambda shape, **kwargs: fake_torch.randn(shape, **kwargs)
+    monkeypatch.setitem(sys.modules, "diffusers.utils.torch_utils", fake_torch_utils)
 
     class FakeDist:
         def __init__(self, val):

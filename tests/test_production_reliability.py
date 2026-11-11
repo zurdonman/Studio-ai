@@ -1011,3 +1011,126 @@ def test_i2v_explicit_fast_rejects_full_steps(temp_studio_env, colab_memory):
         "use_official_defaults": False, "steps": 30, "image_rel": rel, "prompt": "two people boxing"})
     payload = json.loads(result["content"][0]["text"])
     assert payload["error_code"] == "FAST_STEPS_EXCEEDED"
+
+
+def _tiny_wan_mixed_fixture(tmp_path):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("diffusers")
+    pytest.importorskip("peft")
+    from diffusers import WanImageToVideoPipeline, WanTransformer3DModel
+    from safetensors.torch import save_file
+
+    model = WanTransformer3DModel(patch_size=(1, 2, 2), num_attention_heads=2,
+        attention_head_dim=8, in_channels=4, out_channels=4, text_dim=16,
+        freq_dim=8, ffn_dim=32, num_layers=1, cross_attn_norm=True)
+    pipe = WanImageToVideoPipeline(tokenizer=None, text_encoder=None, vae=None,
+                                    scheduler=None, transformer=model)
+    raw = {
+        "diffusion_model.blocks.0.self_attn.q.lora_down.weight": torch.full((2, 16), 0.1),
+        "diffusion_model.blocks.0.self_attn.q.lora_up.weight": torch.full((16, 2), 0.2),
+        "diffusion_model.blocks.0.self_attn.q.diff_b": torch.full((16,), 0.4),
+        "diffusion_model.blocks.0.self_attn.norm_q.diff": torch.full((16,), 0.3),
+        "diffusion_model.blocks.0.norm3.diff": torch.full((16,), 0.2),
+        "diffusion_model.patch_embedding.diff_b": torch.full((16,), 0.25),
+    }
+    path = tmp_path / "mixed.safetensors"
+    save_file(raw, str(path))
+    return torch, pipe, raw, path
+
+
+def test_wan_ti2v_mixed_lora_real_diffusers_and_peft(tmp_path):
+    """LoRA + full-rank deltas must both affect the output and be reversible."""
+    from studio.engines.video_engine import (_load_single_video_lora_onto_pipe,
+        _apply_wan_direct_deltas, _restore_wan_direct_deltas)
+
+    torch, pipe, raw, path = _tiny_wan_mixed_fixture(tmp_path)
+    model = pipe.transformer
+    originals = {name: param.detach().clone() for name, param in model.named_parameters()}
+    x = torch.ones((1, 16))
+    base_output = model.blocks[0].attn1.to_q(x).detach().clone()
+    deltas = _load_single_video_lora_onto_pipe(pipe, "wan_ti2v", path, "test", False, None)
+    pipe.set_adapters(["test"], adapter_weights=[0.75])
+    handle = {}
+    assert _apply_wan_direct_deltas(handle, pipe, [(deltas, 0.75)]) == 4
+    assert torch.allclose(model.blocks[0].attn1.to_q(x), base_output + 0.75 * (0.4 + 16 * 0.1 * 2 * 0.2))
+    assert torch.allclose(model.blocks[0].attn1.norm_q.weight, originals["blocks.0.attn1.norm_q.weight"] + 0.75 * 0.3)
+    assert torch.allclose(model.blocks[0].norm2.weight, originals["blocks.0.norm2.weight"] + 0.75 * 0.2)
+    assert torch.allclose(model.patch_embedding.bias, originals["patch_embedding.bias"] + 0.75 * 0.25)
+    _restore_wan_direct_deltas(handle, pipe)
+    pipe.unload_lora_weights()
+    assert all(torch.equal(param, originals[name]) for name, param in model.named_parameters())
+
+
+def test_wan_direct_deltas_reject_bad_target_before_modifying_model(tmp_path):
+    from studio.engines.video_engine import _apply_wan_direct_deltas
+    torch, pipe, _, _ = _tiny_wan_mixed_fixture(tmp_path)
+    before = pipe.transformer.patch_embedding.bias.detach().clone()
+    handle = {}
+    with pytest.raises(ValueError, match="WAN_LORA_DELTA_SHAPE_MISMATCH"):
+        _apply_wan_direct_deltas(handle, pipe, [({"patch_embedding.bias": torch.ones(16),
+                                                  "blocks.0.attn1.norm_q.weight": torch.ones(3)}, 0.75)])
+    assert torch.equal(before, pipe.transformer.patch_embedding.bias)
+    assert not handle.get("wan_direct_delta_originals")
+
+
+def test_wan_ti2v_mixed_lora_rejects_unknown_or_incomplete_weights(tmp_path):
+    from studio.engines.video_engine import _split_wan_ti2v_direct_deltas, _wan_ti2v_expected_lora_modules
+    torch, _, raw, _ = _tiny_wan_mixed_fixture(tmp_path)
+    low_rank, _ = _split_wan_ti2v_direct_deltas(raw)
+    incomplete = dict(low_rank)
+    incomplete.pop("diffusion_model.blocks.0.self_attn.q.lora_up.weight")
+    with pytest.raises(ValueError, match="WAN_LORA_INCOMPLETE"):
+        _wan_ti2v_expected_lora_modules(incomplete)
+    with pytest.raises(ValueError, match="WAN_LORA_UNSUPPORTED_KEY"):
+        _wan_ti2v_expected_lora_modules({**low_rank, "diffusion_model.unknown.weight": torch.ones(1)})
+
+
+def test_wan_ti2v_delta_stack_scale_change_unload_and_failure_roll_back(tmp_path, monkeypatch):
+    from studio.engines import video_engine as engine
+    from safetensors.torch import save_file
+    torch, pipe, raw, path = _tiny_wan_mixed_fixture(tmp_path)
+    original = {name: param.detach().clone() for name, param in pipe.transformer.named_parameters()}
+    lora = {"id": "test-fast", "name": "Fast test", "category": "lora", "compatible_models": ["base"], "max_steps": 6}
+    monkeypatch.setattr(engine.catalog_manager, "get_definition", lambda lid: lora if lid == "test-fast" else {"id": "base"})
+    monkeypatch.setattr(engine.catalog_manager, "is_downloaded", lambda lid: True)
+    monkeypatch.setattr(engine.memory_manager, "prepare_for_adapters", lambda *a, **k: None)
+    monkeypatch.setattr(engine.memory_manager, "update_adapters", lambda *a, **k: None)
+    monkeypatch.setattr(engine, "query_gpu_info", lambda: {"vram_total_gb": 22})
+    monkeypatch.setattr(engine, "_apply_best_offload", lambda *a, **k: None)
+    monkeypatch.setattr(engine, "_resolve_lora_safetensors_file", lambda lid: path)
+    handle = {"engine": "wan_ti2v", "defn": {"id": "base"}, "min_vram_gb": 1}
+    engine._sync_video_lora_on_handle(handle, pipe, "test-fast", 0.75)
+    assert torch.allclose(pipe.transformer.patch_embedding.bias, original["patch_embedding.bias"] + 0.75 * 0.25)
+    engine._sync_video_lora_on_handle(handle, pipe, "test-fast", 0.25)
+    assert torch.allclose(pipe.transformer.patch_embedding.bias, original["patch_embedding.bias"] + 0.25 * 0.25)
+    engine._sync_video_lora_on_handle(handle, pipe, None)
+    assert all(torch.equal(param, original[name]) for name, param in pipe.transformer.named_parameters())
+    assert not handle.get("wan_direct_delta_originals")
+    broken = dict(raw)
+    broken["diffusion_model.patch_embedding.diff_b"] = torch.ones(3)
+    save_file(broken, str(path))
+    with pytest.raises(ValueError, match="WAN_LORA_DELTA_SHAPE_MISMATCH"):
+        engine._sync_video_lora_on_handle(handle, pipe, "test-fast", 0.75)
+    assert not handle.get("active_lora_id")
+    assert all(torch.equal(param, original[name]) for name, param in pipe.transformer.named_parameters())
+
+
+def test_wan_ti2v_restores_deltas_if_offload_fails(tmp_path, monkeypatch):
+    from studio.engines import video_engine as engine
+    torch, pipe, _, path = _tiny_wan_mixed_fixture(tmp_path)
+    original = {name: param.detach().clone() for name, param in pipe.transformer.named_parameters()}
+    lora = {"id": "test-fast", "name": "Fast test", "compatible_models": ["base"], "max_steps": 6}
+    monkeypatch.setattr(engine.catalog_manager, "get_definition", lambda lid: lora if lid == "test-fast" else {"id": "base"})
+    monkeypatch.setattr(engine.catalog_manager, "is_downloaded", lambda lid: True)
+    monkeypatch.setattr(engine.memory_manager, "prepare_for_adapters", lambda *a, **k: None)
+    monkeypatch.setattr(engine.memory_manager, "update_adapters", lambda *a, **k: None)
+    monkeypatch.setattr(engine, "query_gpu_info", lambda: {"vram_total_gb": 22})
+    def broken_offload(*args, **kwargs):
+        raise RuntimeError("offload failed")
+    monkeypatch.setattr(engine, "_apply_best_offload", broken_offload)
+    monkeypatch.setattr(engine, "_resolve_lora_safetensors_file", lambda lid: path)
+    handle = {"engine": "wan_ti2v", "defn": {"id": "base"}}
+    with pytest.raises(RuntimeError, match="offload failed"):
+        engine._sync_video_lora_on_handle(handle, pipe, "test-fast", 0.75)
+    assert not handle.get("wan_direct_delta_originals")
+    assert all(torch.equal(param, original[name]) for name, param in pipe.transformer.named_parameters())

@@ -971,6 +971,123 @@ def _drop_pure_alpha_keys(sd: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _split_wan_ti2v_direct_deltas(raw_sd: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Separate ComfyUI full-rank deltas from LoRA matrices, retaining every delta.
+
+    Diffusers' LoRA loader rejects these keys; they are not metadata. Map them
+    using the same conversion as the base Wan checkpoint. Shape and target checks
+    happen before any base parameter is changed.
+    """
+    direct = {}
+    low_rank = {}
+    for key, tensor in raw_sd.items():
+        if key.startswith("diffusion_model.") and key.endswith((".diff", ".diff_b")):
+            bare = key[len("diffusion_model."):]
+            suffix = ".bias" if bare.endswith(".diff_b") else ".weight"
+            base = bare[: -len(".diff_b" if suffix == ".bias" else ".diff")]
+            original = base + suffix
+            if original in direct:
+                raise ValueError(f"WAN_LORA_DUPLICATE_DELTA: {original}")
+            direct[original] = tensor
+        else:
+            low_rank[key] = tensor
+    if not direct:
+        return low_rank, {}
+    from diffusers.loaders.single_file_utils import convert_wan_transformer_to_diffusers
+    mapped = convert_wan_transformer_to_diffusers(dict(direct))
+    if len(mapped) != len(direct):
+        raise ValueError("WAN_LORA_DELTA_MAPPING_COLLISION: conversión incompleta de deltas")
+    return low_rank, mapped
+
+
+def _wan_ti2v_expected_lora_modules(raw_sd: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Preflight mixed files; never silently drop low-rank or other tensors."""
+    from diffusers.loaders.single_file_utils import convert_wan_transformer_to_diffusers
+    pairs: Dict[str, Dict[str, Any]] = {}
+    alphas = set()
+    for key, value in raw_sd.items():
+        if not key.startswith("diffusion_model."):
+            raise ValueError(f"WAN_LORA_UNSUPPORTED_KEY: {key}")
+        bare = key[len("diffusion_model."):]
+        suffix = next((x for x in (".lora_down.weight", ".lora_up.weight", ".lora_A.weight", ".lora_B.weight", ".alpha") if bare.endswith(x)), None)
+        if suffix is None or bare.startswith("vace_blocks."):
+            raise ValueError(f"WAN_LORA_UNSUPPORTED_KEY: {key}")
+        base = bare[:-len(suffix)]
+        if suffix == ".alpha":
+            alphas.add(base)
+            continue
+        side = "lora_A" if suffix in (".lora_down.weight", ".lora_A.weight") else "lora_B"
+        if side in pairs.setdefault(base, {}):
+            raise ValueError(f"WAN_LORA_DUPLICATE_KEY: {key}")
+        pairs[base][side] = value
+    if not pairs or not alphas.issubset(pairs) or any(set(pair) != {"lora_A", "lora_B"} for pair in pairs.values()):
+        raise ValueError("WAN_LORA_INCOMPLETE: faltan pares de matrices LoRA o hay alpha huérfanos")
+    converted = convert_wan_transformer_to_diffusers({base + ".weight": base for base in pairs})
+    if len(converted) != len(pairs) or any(not key.endswith(".weight") for key in converted):
+        raise ValueError("WAN_LORA_MAPPING_COLLISION: conversión incompleta de matrices")
+    return {key[:-len(".weight")]: pairs[base] for key, base in converted.items()}
+
+
+def _verify_wan_ti2v_lora_modules(pipe: Any, adapter_name: str, expected: Dict[str, Dict[str, Any]]) -> None:
+    for module_name, sides in expected.items():
+        try:
+            module = pipe.transformer.get_submodule(module_name)
+            for side, tensor in sides.items():
+                layer = getattr(module, side)[adapter_name]
+                if tuple(layer.weight.shape) != tuple(tensor.shape):
+                    raise ValueError(f"shape {tuple(layer.weight.shape)} != {tuple(tensor.shape)}")
+        except Exception as exc:
+            raise ValueError(f"WAN_LORA_INCOMPLETE: {module_name} no se acopló por completo: {exc}") from exc
+
+
+def _wan_delta_parameter(transformer: Any, name: str) -> Any:
+    """Resolve a base parameter whether or not PEFT has wrapped its module."""
+    module_name, _, param_name = name.rpartition(".")
+    module = transformer.get_submodule(module_name) if module_name else transformer
+    module = getattr(module, "base_layer", module)
+    param = getattr(module, param_name, None)
+    if param is None or getattr(param, "device", None) is None or str(param.device) == "meta":
+        raise ValueError(f"WAN_LORA_DELTA_TARGET_UNAVAILABLE: {name}")
+    return param
+
+
+def _apply_wan_direct_deltas(handle: Dict[str, Any], pipe: Any, deltas: List[Tuple[Dict[str, Any], float]]) -> int:
+    """Apply exact scaled deltas with a bit-exact CPU backup for safe rollback."""
+    import torch  # type: ignore
+    transformer = pipe.transformer
+    originals: Dict[str, Any] = {}
+    planned = []
+    for mapping, scale in deltas:
+        for name, delta in mapping.items():
+            param = _wan_delta_parameter(transformer, name)
+            if tuple(param.shape) != tuple(delta.shape):
+                raise ValueError(f"WAN_LORA_DELTA_SHAPE_MISMATCH: {name}: {tuple(delta.shape)} != {tuple(param.shape)}")
+            if not param.is_floating_point() or not delta.is_floating_point():
+                raise ValueError(f"WAN_LORA_DELTA_DTYPE_UNSUPPORTED: {name}")
+            if name not in originals:
+                originals[name] = param.detach().cpu().clone()
+            planned.append((name, delta, float(scale)))
+    # Record the complete backup before the first mutation so exceptions roll back.
+    handle["wan_direct_delta_originals"] = originals
+    with torch.no_grad():
+        for name, delta, scale in planned:
+            param = _wan_delta_parameter(transformer, name)
+            param.add_(delta.to(device=param.device, dtype=param.dtype), alpha=scale)
+    return len(planned)
+
+
+def _restore_wan_direct_deltas(handle: Dict[str, Any], pipe: Any) -> None:
+    import torch  # type: ignore
+    originals = handle.get("wan_direct_delta_originals") or {}
+    with torch.no_grad():
+        for name, original in originals.items():
+            param = _wan_delta_parameter(pipe.transformer, name)
+            if tuple(param.shape) != tuple(original.shape):
+                raise ValueError(f"WAN_LORA_RESTORE_SHAPE_MISMATCH: {name}")
+            param.copy_(original.to(device=param.device, dtype=param.dtype))
+    handle.pop("wan_direct_delta_originals", None)
+
+
 def _load_single_video_lora_onto_pipe(
     pipe: Any,
     engine: str,
@@ -978,7 +1095,8 @@ def _load_single_video_lora_onto_pipe(
     adapter_name: str,
     is_fp8_lc: bool,
     torch_mod: Any,
-) -> None:
+) -> Dict[str, Any]:
+    direct_deltas: Dict[str, Any] = {}
     if engine in (
         "wan_ti2v",
         "wan_t2v",
@@ -991,7 +1109,14 @@ def _load_single_video_lora_onto_pipe(
         import safetensors.torch  # type: ignore
 
         raw_sd = guarded_model_load(safetensors.torch.load_file, str(lora_file), device="cpu")
+        if engine == "wan_ti2v":
+            raw_sd, direct_deltas = _split_wan_ti2v_direct_deltas(raw_sd)
+        expected_modules = _wan_ti2v_expected_lora_modules(raw_sd) if direct_deltas else {}
+        _LORA_REPORT.ignored = []
+        _LORA_REPORT.dropped_from_file = []
         clean_sd = _prepare_wan_lora_state_dict(raw_sd)
+        if direct_deltas and (getattr(_LORA_REPORT, "ignored", []) or getattr(_LORA_REPORT, "dropped_from_file", [])):
+            raise ValueError("WAN_LORA_INCOMPLETE: claves del LoRA sin conversión; no se aplica parcialmente")
         if is_fp8_lc and torch_mod is not None:
             clean_sd = {
                 k: (v.to(torch_mod.bfloat16) if hasattr(v, "dtype") and v.is_floating_point() else v)
@@ -1000,7 +1125,7 @@ def _load_single_video_lora_onto_pipe(
             try:
                 guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name, low_cpu_mem_usage=True)
             except ValueError as exc:
-                if not _is_invalid_lora_checkpoint(exc):
+                if direct_deltas or not _is_invalid_lora_checkpoint(exc):
                     raise
                 clean_sd = _drop_pure_alpha_keys(clean_sd)
                 guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name, low_cpu_mem_usage=True)
@@ -1008,10 +1133,12 @@ def _load_single_video_lora_onto_pipe(
             try:
                 guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name)
             except ValueError as exc:
-                if not _is_invalid_lora_checkpoint(exc):
+                if direct_deltas or not _is_invalid_lora_checkpoint(exc):
                     raise
                 clean_sd = _drop_pure_alpha_keys(clean_sd)
                 guarded_model_load(pipe.load_lora_weights, clean_sd, adapter_name=adapter_name)
+        if expected_modules:
+            _verify_wan_ti2v_lora_modules(pipe, adapter_name, expected_modules)
     else:
         lora_kw: Dict[str, Any] = {
             "weight_name": lora_file.name,
@@ -1020,6 +1147,7 @@ def _load_single_video_lora_onto_pipe(
         if is_fp8_lc:
             lora_kw["low_cpu_mem_usage"] = True
         guarded_model_load(pipe.load_lora_weights, str(lora_file.parent), **lora_kw)
+    return direct_deltas
 
 
 _VIDEO_ADAPTER_LOCK = threading.RLock()
@@ -1034,6 +1162,12 @@ def _adapter_names_in_use(pipe: Any) -> set:
 def _clear_video_adapters(handle: Dict[str, Any], pipe: Any) -> List[str]:
     """Remove every adapter Studio added, keeping the base transformer intact."""
     errors: List[str] = []
+    if handle.get("wan_direct_delta_originals"):
+        try:
+            _restore_wan_direct_deltas(handle, pipe)
+        except Exception as exc:
+            # Never proceed or claim the base is clean if restoration is uncertain.
+            raise RuntimeError(f"WAN_LORA_RESTORE_FAILED: reiniciar el proceso conservando pesos: {exc}") from exc
     for name in sorted(_adapter_names_in_use(pipe)):
         try:
             pipe.delete_adapters([name])
@@ -1048,6 +1182,7 @@ def _clear_video_adapters(handle: Dict[str, Any], pipe: Any) -> List[str]:
         "active_lora_id",
         "active_lora_scale",
         "active_lora_signature",
+        "active_lora_weights",
         "active_lora_defns",
         "lora_load_partial",
     ):
@@ -1088,7 +1223,7 @@ def _sync_video_lora_on_handle(
     min_vram = float(handle.get("min_vram_gb", 14.0))
 
     if not requested_pairs:
-        if (handle.get("active_lora_id") or cur_sig) and hasattr(pipe, "unload_lora_weights"):
+        if (handle.get("active_lora_id") or cur_sig or handle.get("wan_direct_delta_originals")) and hasattr(pipe, "unload_lora_weights"):
             if job:
                 job.log("Desactivando LoRAs de vídeo para volver al modelo limpio...", progress=pct_base)
             if hasattr(pipe, "remove_all_hooks"):
@@ -1096,7 +1231,7 @@ def _sync_video_lora_on_handle(
                     pipe.remove_all_hooks()
                 except Exception:
                     pass
-            pipe.unload_lora_weights()
+            _clear_video_adapters(handle, pipe)
             _maybe_set_wan_flow_shift(pipe, handle.get("base_flow_shift"))
             _apply_best_offload(pipe, vram_total, min_vram)
             handle["active_lora_id"] = None
@@ -1138,7 +1273,7 @@ def _sync_video_lora_on_handle(
     adapter_weights = [x[2] for x in resolved_specs]
     all_defns = [x[3] for x in resolved_specs]
 
-    if cur_sig == new_ids_tuple:
+    if cur_sig == new_ids_tuple and (not handle.get("wan_direct_delta_originals") or handle.get("active_lora_weights") == adapter_weights):
         if hasattr(pipe, "set_adapters"):
             pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
         handle["active_lora_scale"] = adapter_weights[0]
@@ -1217,7 +1352,7 @@ def _apply_video_lora_stack(
 
     # Retire the previous stack (including adapters the handle never recorded, the
     # exact cause of `Adapter name ... already in use`) before attaching the new one.
-    if handle.get("active_lora_id") or handle.get("active_lora_signature") or _adapter_names_in_use(pipe):
+    if handle.get("active_lora_id") or handle.get("active_lora_signature") or handle.get("wan_direct_delta_originals") or _adapter_names_in_use(pipe):
         cleanup_errors = _clear_video_adapters(handle, pipe)
         if job and cleanup_errors:
             job.log(
@@ -1237,8 +1372,9 @@ def _apply_video_lora_stack(
 
     engine = handle.get("engine", "")
     loaded_names: List[str] = []
+    direct_delta_stack = []
     try:
-        for lid, ad_name, _, ldef in resolved_specs:
+        for lid, ad_name, adapter_weight, ldef in resolved_specs:
             if ad_name in _adapter_names_in_use(pipe):
                 # Same name from an earlier partial attempt: never raise a bare
                 # "already in use"; clear that adapter and reload the file.
@@ -1247,7 +1383,9 @@ def _apply_video_lora_stack(
                 except Exception:
                     pass
             l_file = _resolve_lora_safetensors_file(lid)
-            _load_single_video_lora_onto_pipe(pipe, engine, l_file, ad_name, is_fp8_lc, torch_mod)
+            direct = _load_single_video_lora_onto_pipe(pipe, engine, l_file, ad_name, is_fp8_lc, torch_mod)
+            if direct:
+                direct_delta_stack.append((direct, adapter_weight))
             loaded_names.append(ad_name)
             ignored = getattr(_LORA_REPORT, "ignored", []) or []
             dropped = getattr(_LORA_REPORT, "dropped_from_file", []) or []
@@ -1260,6 +1398,10 @@ def _apply_video_lora_stack(
                 )
         if hasattr(pipe, "set_adapters"):
             pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
+        if direct_delta_stack:
+            count = _apply_wan_direct_deltas(handle, pipe, direct_delta_stack)
+            if job:
+                job.log(f"Aplicados {count} deltas Wan directos con escala; se restaurarán al retirar el LoRA.")
     except BaseException as exc:
         errors = _clear_video_adapters(handle, pipe)
         handle["lora_load_partial"] = {
@@ -1296,14 +1438,23 @@ def _apply_video_lora_stack(
     elif handle.get("base_flow_shift") is not None:
         _maybe_set_wan_flow_shift(pipe, float(handle["base_flow_shift"]))
 
-    _apply_best_offload(
-        pipe,
-        float(query_gpu_info().get("vram_total_gb", 22.0)),
-        float(handle.get("min_vram_gb", 14.0)),
-    )
+    try:
+        _apply_best_offload(
+            pipe,
+            float(query_gpu_info().get("vram_total_gb", 22.0)),
+            float(handle.get("min_vram_gb", 14.0)),
+        )
+    except BaseException:
+        # Offload can fail after the direct deltas were applied. Remove its hooks
+        # before restoring; never leave a modified base masquerading as unloaded.
+        if hasattr(pipe, "remove_all_hooks"):
+            pipe.remove_all_hooks()
+        _clear_video_adapters(handle, pipe)
+        raise
     handle["active_lora_id"] = resolved_specs[0][0]
     handle["active_lora_scale"] = adapter_weights[0]
     handle["active_lora_signature"] = new_ids_tuple
+    handle["active_lora_weights"] = list(adapter_weights)
     handle["active_lora_defns"] = all_defns
     handle.pop("lora_load_partial", None)
     memory_manager.update_adapters("video", list(new_ids_tuple))

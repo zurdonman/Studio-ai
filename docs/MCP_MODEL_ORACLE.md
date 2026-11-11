@@ -161,6 +161,8 @@ FastWan es un archivo del repositorio `Kijai/WanVideo_comfy`, no su nombre de re
 
 Si el usuario pide aceleración, usa `require_fast=true` tanto al recomendar como en `studio_generate_video` (o activa la preferencia `use_fast_loras`). Para esta pareja pasa también `video_lora_id="lora-wan22-ti2v-5b-fastwan"` y `video_submode="i2v"`, una ruta de imagen real y `use_official_defaults=true`. `require_fast` admite modelos destilados sin LoRA, pero si el usuario exige un LoRA, no lo sustituyas por un destilado sin su autorización. No desactives la preferencia para saltarte el requisito. Si el LoRA falta, es incompatible o falla la carga, para e informa; no generes con la base sola.
 
+El cargador de `wan_ti2v` separa tensores directos `diff`/`diff_b` de las matrices LoRA, comprueba destinos y formas, los aplica con la escala y restaura los originales al retirar o cambiar el adaptador. Ante `WAN_LORA_INCOMPLETE`, `WAN_LORA_UNSUPPORTED_KEY`, `WAN_LORA_DELTA_*` o `WAN_LORA_RESTORE_FAILED`, detente y conserva los logs; no descartes tensores, no fuerces un reintento y no continúes con la base. La implementación tiene pruebas sintéticas con Diffusers/PEFT en CPU: **no es una prueba del archivo completo ni de inferencia en L4**.
+
 Si se pidió aprobación previa, ejecutar un solo clip de prueba. Esperar el mismo job, pasar los logs al usuario y comprobar en el resultado `active_lora_id`, `steps`, duración y tiempos realmente disponibles; no inferir valores ausentes. Esperar aprobación antes de los clips restantes, voces y montaje. No hay garantía de mejor anatomía, movimiento o tiempo; no confundir valores recomendados de pasos con mediciones reales.
 
 ## 7. Parámetros, entradas y límites de cada motor
