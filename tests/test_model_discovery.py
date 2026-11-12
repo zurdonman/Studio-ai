@@ -895,3 +895,25 @@ def test_l4_api_filter_excludes_incompatible_even_if_downloaded_or_loaded(temp_s
     assert "ltx-2.5-full-av" not in ids
     item = next(m for m in ample if m["id"] == "ltx-2.3-full-fp8-av")
     assert item["compatibility"]["is_simulated"] and not item["compatibility"]["gpu_tested"]
+
+
+def test_ltx_l4_labels_distinguish_gpu_from_host_resources(catalog):
+    from studio.model_compatibility import assess_definition
+
+    limited = context(gpu="CPU", profile="L4", ram=16, ram_free=12, disk=20)
+    fp8 = assess_definition(catalog.get_definition("ltx-2.3-distilled-fp8-av"), limited, catalog=catalog)
+    assert fp8["resources"]["vram"]["status"] == "fits_estimate"
+    assert fp8["resources"]["ram"]["status"] == "insufficient"
+    assert fp8["resources"]["disk"]["status"] == "insufficient"
+    assert fp8["compatible"] is False and fp8["gpu_tested"] is False
+    assert "VRAM con encaje estimado" in fp8["label"]
+    assert "RAM/disco" in fp8["label"] and "No apto" not in fp8["label"]
+
+    bf16 = assess_definition(catalog.get_definition("ltx-2.3-distilled-av"), limited, catalog=catalog)
+    assert bf16["resources"]["vram"]["status"] == "insufficient"
+    assert "VRAM por debajo de la estimación" in bf16["label"]
+    assert "No apto" not in bf16["label"]
+
+    ample = context(gpu="CPU", profile="L4", ram=128, ram_free=120, disk=200)
+    fitting = assess_definition(catalog.get_definition("ltx-2.3-distilled-fp8-av"), ample, catalog=catalog)
+    assert fitting["compatible"] is True and fitting["is_simulated"] and not fitting["gpu_tested"]

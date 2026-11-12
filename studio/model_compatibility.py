@@ -205,7 +205,13 @@ def assess_definition(defn: Dict[str, Any], context: Dict[str, Any], *, catalog:
     if candidate:
         status, label, tier_name = "candidate", "🧪 Candidato sin receta revisada", "candidate"
     elif not compatible:
-        status, label, tier_name = "blocked", "🔴 No apto / faltan datos", "incompatible"
+        status, tier_name = "blocked", "incompatible"
+        if supported and dtype_ok and not dtype_unknown and fits["vram"] == "fits_estimate":
+            label = "🟡 VRAM con encaje estimado · revisar RAM/disco"
+        elif fits["vram"] == "insufficient":
+            label = "🟠 VRAM por debajo de la estimación · revisar"
+        else:
+            label = "🟠 Requisitos o datos por revisar"
     elif target.get("is_simulated"):
         status, label, tier_name = "simulated_fit", "🧮 Ajuste estimado · GPU simulada", "normal"
     elif not runnable:

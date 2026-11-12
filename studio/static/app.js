@@ -1490,6 +1490,8 @@
                 <span class="gpu-sticker ${escapeHtml(tier)}">${escapeHtml(comp.label || comp.sticker || "")}</span>
                 <span>· ${escapeHtml(diskTxt)}</span>
               </div>
+              ${comp.compatible === false && (comp.reasons || []).length ? `<div class="muted">${escapeHtml(comp.reasons.join(" "))}</div>` : ""}
+              ${comp.resources ? `<div class="muted">${escapeHtml(modelResourceComparison(comp))}</div>` : ""}
               <div class="vmc-modes-row">${modes}</div>
             </div>
           `;
@@ -1672,6 +1674,16 @@
       `VRAM ≥ ${formatModelNumber((resources.vram || {}).required_gb)}`,
       `RAM ≥ ${formatModelNumber((resources.ram || {}).required_gb)}`,
       `Descarga + margen: ${formatModelNumber((resources.disk || {}).download_budget_gb)}`,
+    ].join(" · ");
+  }
+
+  function modelResourceComparison(comp) {
+    const r = comp.resources || {};
+    const v = r.vram || {}, ram = r.ram || {}, disk = r.disk || {};
+    return [
+      `VRAM: ${formatModelNumber(v.total_gb)} / ${formatModelNumber(v.admission_required_gb)} estimados con reserva`,
+      `RAM total: ${formatModelNumber(ram.total_gb)} / ${formatModelNumber(ram.admission_required_gb)} estimados con reserva`,
+      `Disco libre: ${formatModelNumber(disk.free_gb)} / ${formatModelNumber(disk.total_required_free_gb)} estimados`,
     ].join(" · ");
   }
 
