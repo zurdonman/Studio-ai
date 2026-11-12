@@ -85,6 +85,10 @@ const model = (id, fit, extra = {}) => ({
   $("btn-prepare-video").click();
   await wait(20);
   if (!requests.some(r => r.method === "POST" && r.path === "/api/video/ltx-gguf/prepare")) throw Error("GGUF prepare used wrong endpoint");
+  $("vid-prompt").value = "";
+  $("btn-run-video").click();
+  if ($("vid-gguf-feedback").hidden || !$("vid-gguf-feedback").textContent.includes("prompt")) throw Error("Missing prompt should remain visible beside generate");
+  if (requests.some(r => r.method === "POST" && r.path === "/api/video/ltx-gguf")) throw Error("Missing prompt submitted GGUF request");
   $("vsub-t2v").click();
   if ($("select-video-model").value !== ggufId) throw Error("Switching supported submode changed GGUF selection");
   $("vid-prompt").value = "A person waves";
@@ -95,6 +99,7 @@ const model = (id, fit, extra = {}) => ({
   await wait(20);
   const ggufRequest = requests.find(r => r.path === "/api/video/ltx-gguf" && r.method === "POST");
   if (!ggufRequest || JSON.parse(ggufRequest.body).prompt !== "A person waves" || JSON.parse(ggufRequest.body).duration_sec !== 10 || JSON.parse(ggufRequest.body).width !== 512) throw Error("GGUF generation used wrong endpoint or parameters");
+  if ($("vid-gguf-feedback").hidden || !$("vid-gguf-feedback").textContent.includes("enviada")) throw Error("GGUF submission confirmation missing");
   pill("L4").click(); pill("T4").click();
   await wait(110);
   if (ids().length !== 0 || !w.document.querySelector('#vid-gpu-pills [data-gpu="T4"]').classList.contains("active")) throw Error("Stale profile response overrode newer selection");

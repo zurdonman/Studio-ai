@@ -469,7 +469,7 @@ def build_full_session_log_document(
         lines.append(
             "- **Modelos descargados en disco:** "
             + (
-                ", ".join(f"`{m.get('id')}` ({m.get('disk_gb')} GB)" for m in downloaded_models)
+                ", ".join(f"`{m.get('id')}` ({m.get('disk_gb')} GiB" + (f"; {m['details']}" if m.get("details") else "") + ")" for m in downloaded_models)
                 if downloaded_models
                 else "_Ninguno descargado en disco_"
             )

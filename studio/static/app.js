@@ -431,6 +431,7 @@
           if (/LTX 2\.3 GGUF/.test(j.title || "") && $("ltx-gguf-error")) {
             $("ltx-gguf-error").hidden = false;
             $("ltx-gguf-error").textContent = `Error GGUF: ${j.error || "Revisa el registro de la tarea"}`;
+            ggufFeedback(`Error GGUF: ${j.error || "Revisa el registro de la tarea"}`, true);
           }
         }
       }
@@ -479,9 +480,21 @@
     });
   }
 
+  function ggufFeedback(message, error = false) {
+    const box = $("vid-gguf-feedback");
+    if (box) {
+      box.hidden = false;
+      box.className = `vid-steps-note ${error ? "warn" : "ok"}`;
+      box.textContent = message;
+    }
+  }
+
   async function handleJobCompleted(job) {
     await Promise.all([loadCatalog(), loadAssets()]);
     const res = job.result || {};
+    if (res.prepared && /LTX 2\.3 GGUF/.test(job.title || "")) {
+      ggufFeedback("Archivos GGUF preparados en disco. Para crear el vídeo: elige Imagen a Vídeo o Texto a Vídeo, escribe el prompt y pulsa «Generar Clip de Vídeo». Los pesos se cargan al generar.");
+    }
     if (res && res.media_url && state.workspaceMode === "higgsfield") {
       showHiggsfieldStageResult(res);
     }
@@ -3468,18 +3481,23 @@
     async function runLtxGguf() {
       const sub = state.videoSubmode || "i2v";
       const prompt = $("vid-prompt").value.trim();
-      if (!prompt) return toast("Describe la escena antes de generar con GGUF.", "error");
-      if (!["t2v", "i2v"].includes(sub)) return toast("GGUF experimental admite solo Texto→Vídeo o Imagen→Vídeo.", "error");
+      const showInputError = (message) => { ggufFeedback(message, true); toast(message, "error"); };
+      if (!prompt) return showInputError("Escribe un prompt antes de generar con GGUF.");
+      if (!["t2v", "i2v"].includes(sub)) return showInputError("GGUF admite solo Texto a Vídeo o Imagen a Vídeo.");
       const image_rel = sub === "i2v" ? $("vid-source-image").value : null;
-      if (sub === "i2v" && !image_rel) return toast("Selecciona un primer fotograma para Imagen→Vídeo.", "error");
+      if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
       if (!confirm("GGUF experimental: se usarán la resolución, duración y fps elegidos (8 pasos y CFG 1 fijos). Los clips largos consumen más memoria y no están validados en L4. Si falta, se descargarán hasta 24 GiB. ¿Generar?")) return;
       try {
         $("ltx-gguf-error").hidden = true;
+        ggufFeedback("Enviando solicitud de generación GGUF…");
         const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value)})});
+        if (!res || !res.job || !res.job.id) throw new Error("El servidor no devolvió una tarea de generación.");
+        ggufFeedback("Generación enviada. Puedes seguir el progreso o cancelarla en el panel de tareas.");
         watchJob(res.job);
       } catch (error) {
         $("ltx-gguf-error").hidden = false;
         $("ltx-gguf-error").textContent = `Error GGUF: ${error.message}`;
+        ggufFeedback(`No se ha iniciado la generación: ${error.message}`, true);
         toast(error.message, "error");
       }
     }

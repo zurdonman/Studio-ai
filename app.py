@@ -1828,6 +1828,12 @@ def _generate_current_session_report(fmt: str = "md") -> tuple[str, str]:
         for m in catalog_manager.get_all_definitions()
         if not m.get("builtin_no_download") and catalog_manager.is_downloaded(m["id"])
     ]
+    from studio.engines.ltx_gguf_backend import MODEL_ID, gguf_disk_inventory
+    gguf = gguf_disk_inventory()
+    if gguf["present"]:
+        downloaded.append({"id": MODEL_ID, "name": "LTX 2.3 GGUF Q4", "category": "video",
+                           "disk_gb": round(gguf["size_bytes"] / 1024**3, 2),
+                           "details": f"{gguf['complete_sizes']}/{gguf['total']} componentes con tamaño esperado; hashes no comprobados al exportar"})
     return build_full_session_log_document(
         jobs_list=job_manager.list_jobs(limit=500, include_logs=True),
         loaded_summary=memory_manager.status_summary(),

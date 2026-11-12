@@ -344,7 +344,7 @@ def test_gguf_download_reports_real_bytes_and_verifies_hash(monkeypatch, tmp_pat
     monkeypatch.setattr(d, 'FILES', (('dit', 'repo', 'rev', 'model.gguf', len(payload), sha),))
     def download(*, repo_id, revision, filename, local_dir, token, tqdm_class):
         bar = tqdm_class(total=len(payload), unit='B')
-        bar.update(4); bar.update(6); bar.close()
+        bar.update(4); bar.update_transfer(9); bar.update(6); bar.close()
         from pathlib import Path
         (Path(local_dir) / filename).write_bytes(payload)
     monkeypatch.setattr(d, 'hf_hub_download', download)
@@ -406,3 +406,20 @@ def test_gguf_generation_cancellation_unloads_session(temp_studio_env, monkeypat
     with pytest.raises(JobCancelledError):
         b.generate_gguf(image_path=None, prompt='test', negative_prompt='', seed=1, job=JobRecord('video', 'cancel'))
     assert released == ['video']
+
+
+def test_gguf_disk_inventory_and_session_log(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import ltx_gguf_backend as b
+    client, _ = temp_studio_env
+    monkeypatch.setattr(b, 'FILES', (('dit', 'r', 'rev', 'a', 3, 'hash'),
+                                    ('text_encoder', 'r', 'rev', 'b', 4, 'hash')))
+    files = {'dit': tmp_path / 'a', 'text_encoder': tmp_path / 'b'}
+    files['dit'].write_bytes(b'abc')
+    files['text_encoder'].write_bytes(b'xx')
+    monkeypatch.setattr(b, '_artifact_path', lambda role: files[role])
+    info = b.gguf_disk_inventory()
+    assert info == {'present': 2, 'complete_sizes': 1, 'total': 2, 'size_bytes': 5}
+    report = client.get('/api/logs/export?format=md')
+    assert report.status_code == 200
+    assert b.MODEL_ID in report.text
+    assert '1/2 componentes con tamaño esperado; hashes no comprobados' in report.text

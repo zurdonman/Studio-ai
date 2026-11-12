@@ -465,6 +465,22 @@ def _prepare_gguf(job: Any, *, extra_ram: float = 0, extra_vram: float = 0) -> d
     return _make_model_links(ROOT / "comfy")
 
 
+def gguf_disk_inventory() -> dict:
+    """Report final component files without implying that their hashes were checked."""
+    total, complete, present, size = len(FILES), 0, 0, 0
+    for role, _, _, _, expected, _ in FILES:
+        try:
+            path = _artifact_path(role)
+            if path.is_file():
+                actual = path.stat().st_size
+                present += 1
+                size += actual
+                complete += int(actual == expected)
+        except OSError:
+            continue
+    return {"present": present, "complete_sizes": complete, "total": total, "size_bytes": size}
+
+
 def gguf_files_present() -> bool:
     # File sizes are a cheap UI hint only; _prepare_models always verifies hashes before use.
     try:

@@ -62,6 +62,13 @@ def main(root: Path) -> None:
                             _emit(role, 'descarga', min(size, int(self.n)), size, before, total_bytes)
                             self._studio_last = now
                         return result
+                    # Newer Xet exposes transfer and reconstruction as separate
+                    # streams. Track reconstructed file bytes only, not two
+                    # independent bars that jump backwards when interleaved.
+                    def update_transfer(self, n=1):
+                        pass
+                    def set_transfer_postfix_str(self, text, refresh=False):
+                        pass
                     def close(self):
                         super().close()
                         try:
