@@ -20,7 +20,7 @@ const model = (id, fit, extra = {}) => ({
   w.confirm = () => true;
   w.fetch = async (url, opts={}) => {
     const u = new URL(url, "http://studio.test");
-    requests.push({path:u.pathname, method:opts.method || "GET"});
+    requests.push({path:u.pathname, method:opts.method || "GET", body:opts.body});
     let data = {};
     if (u.pathname === "/api/catalog") {
       const profile = u.searchParams.get("gpu_profile");
@@ -38,6 +38,7 @@ const model = (id, fit, extra = {}) => ({
     } else if (u.pathname === "/api/tts/voices") data = {voices:[]};
     else if (u.pathname === "/api/higgsfield/catalog") data = {cameras:{},lenses:{},focal_lengths:{},apertures:{},lighting_moods:{},motions:{},characters:[]};
     else if (u.pathname === "/api/status") { throw new Error("poll not needed"); }
+    else if (u.pathname === "/api/video/ltx-gguf") data = {job:{id:"gguf-test"}};
     return {ok:true, json: async()=>data};
   };
   w.eval(fs.readFileSync("studio/static/app.js", "utf8"));
@@ -64,6 +65,16 @@ const model = (id, fit, extra = {}) => ({
   await wait(30);
   if (ids().length || !$("video-model-cards").textContent.includes("No hay modelos")) throw Error("Empty filter silently returned models");
   if (!$("btn-prepare-video").disabled || !$("btn-run-video").disabled) throw Error("Empty filter allows actions");
+  const ggufPanel = $("ltx-gguf-panel");
+  if (!ggufPanel || ggufPanel.hidden || ggufPanel.closest("details") ||
+      !(ggufPanel.compareDocumentPosition($("vid-gpu-pills")) & w.Node.DOCUMENT_POSITION_FOLLOWING))
+    throw Error("GGUF experiment not prominently visible above GPU filter");
+  $("vsub-t2v").click();
+  $("vid-prompt").value = "A person waves";
+  $("btn-run-ltx-gguf").click();
+  await wait(20);
+  const ggufRequest = requests.find(r => r.path === "/api/video/ltx-gguf" && r.method === "POST");
+  if (!ggufRequest || JSON.parse(ggufRequest.body).prompt !== "A person waves") throw Error("GGUF action not usable when GPU filter is empty");
   $("btn-prepare-video").dispatchEvent(new w.Event("click"));
   $("btn-run-video").dispatchEvent(new w.Event("click"));
   await wait(20);

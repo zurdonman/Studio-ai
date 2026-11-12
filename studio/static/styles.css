@@ -1391,6 +1391,29 @@ select:focus {
   border-radius: var(--radius-sm);
 }
 
+.ltx-gguf-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #6186c8;
+  border-radius: var(--radius-sm);
+  background: rgba(39, 72, 124, 0.22);
+}
+
+.ltx-gguf-copy {
+  flex: 1 1 340px;
+  min-width: 0;
+}
+
+.ltx-gguf-copy p {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
 .catalog-gpu-bar {
   margin-bottom: 12px;
 }
