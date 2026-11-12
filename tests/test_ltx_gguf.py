@@ -379,7 +379,13 @@ def test_gguf_download_reports_real_bytes_and_verifies_hash(monkeypatch, tmp_pat
     assert (tmp_path / 'ltx' / 'model.gguf').read_bytes() == b'X' * len(payload)
 
 
-def test_gguf_idle_slot_is_evicted_under_pressure_not_while_pinned(temp_studio_env, monkeypatch):
+@pytest.mark.parametrize('model_id', [
+    'ltx-2.3-distilled-gguf-q4-experimental',
+    'ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental',
+    'ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental',
+    'ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental',
+])
+def test_gguf_idle_slot_is_evicted_under_pressure_not_while_pinned(temp_studio_env, monkeypatch, tmp_path, model_id):
     from studio.memory_manager import RuntimeMemoryManager
     from studio import memory_manager as mm
     manager = RuntimeMemoryManager()
@@ -388,7 +394,9 @@ def test_gguf_idle_slot_is_evicted_under_pressure_not_while_pinned(temp_studio_e
         unloaded = False
         def unload(self): self.unloaded = True
     h = Handle()
-    manager.register_loaded('video', 'ltx-2.3-distilled-gguf-q4-experimental', 'GGUF', h)
+    weights = tmp_path / 'weights.gguf'
+    weights.write_bytes(b'pesos preservados')
+    manager.register_loaded('video', model_id, 'GGUF', h)
     under_pressure = False
     def sample():
         present = manager.get_slot('video') is not None
@@ -405,6 +413,7 @@ def test_gguf_idle_slot_is_evicted_under_pressure_not_while_pinned(temp_studio_e
     under_pressure = True
     manager.tick()
     assert h.unloaded and manager.get_slot('video') is None
+    assert weights.read_bytes() == b'pesos preservados'
 
 
 def test_gguf_generation_cancellation_unloads_session(temp_studio_env, monkeypatch, tmp_path):
@@ -566,20 +575,23 @@ def test_ltx25_memory_rejection_precedes_install_and_download(temp_studio_env, m
     assert calls == [(47,16.5)]
 
 
-def test_ltx25_cancel_unloads_resident_process(temp_studio_env, monkeypatch, tmp_path):
+@pytest.mark.parametrize('variant', ['Q5_ID', 'Q4_Q5_ID', 'UDQ4_Q5_ID'])
+@pytest.mark.parametrize('reason', ['cancel', 'critical'])
+def test_ltx25_failure_unloads_resident_process(temp_studio_env, monkeypatch, tmp_path, variant, reason):
     from types import SimpleNamespace
     from studio.engines import ltx25_gguf as b
     from studio.jobs import JobRecord, JobCancelledError
     inp, out = tmp_path/'in25', tmp_path/'out25'
     inp.mkdir(); out.mkdir()
-    mid = next(iter(b.MODELS))
-    monkeypatch.setattr(b, '_prepare', lambda *a, **k: {'dit':'x.gguf', 'text_encoder':'g.safetensors', 'video_vae':'v.safetensors','audio_vae':'a.safetensors'})
+    mid = getattr(b, variant)
+    monkeypatch.setattr(b, '_prepare', lambda *a, **k: {'dit':'x.gguf', 'text_encoder':'g.gguf', 'video_vae':'v.safetensors','audio_vae':'a.safetensors'})
     monkeypatch.setattr(b.common, '_open_resident', lambda *a: SimpleNamespace(input_dir=inp, output_dir=out))
-    def fail(*args): raise JobCancelledError('cancelled')
+    failure = JobCancelledError('cancelled') if reason == 'cancel' else RuntimeError('GGUF_MEMORY_CRITICAL')
+    def fail(*args): raise failure
     monkeypatch.setattr(b.common, '_infer', fail)
     released=[]
     monkeypatch.setattr(b.memory_manager, 'unload_slot', lambda slot: released.append(slot))
-    with pytest.raises(JobCancelledError):
+    with pytest.raises(type(failure)):
         b.generate(model_id=mid, image_path=None, prompt='test', negative_prompt='', seed=1, job=JobRecord('video','test'),
                    width=512, height=320, duration_sec=2, fps=24, speech_language='auto', image_strength=1)
     assert released == ['video']
@@ -741,3 +753,41 @@ def test_face_identity_candidates_are_informative_and_blocked(temp_studio_env):
         assert entries[mid]['compatible_models'] == []
         assert client.post(f'/api/catalog/{mid}/download').status_code == 400
         assert client.post('/api/memory/load', json={'model_id':mid}).status_code == 400
+
+
+@pytest.mark.parametrize('variant', ['Q5_ID', 'Q4_Q5_ID', 'UDQ4_Q5_ID'])
+def test_ltx25_q5_resident_reuses_session_without_reinstall_or_download(temp_studio_env, monkeypatch, variant):
+    from types import SimpleNamespace
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord
+    mid = getattr(b, variant)
+    session = SimpleNamespace(names={'dit':'cached.gguf'})
+    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True,'bf16_supported':True,'vram_total_gb':22})
+    monkeypatch.setattr(b.common, '_resident', lambda model_id: session if model_id == mid else None)
+    calls = []
+    monkeypatch.setattr(b.memory_manager, 'ensure_capacity', lambda **kw: calls.append((kw['ram_gb'],kw['vram_gb'])))
+    monkeypatch.setattr(b.common, '_install', lambda *a, **kw: pytest.fail('resident must not reinstall'))
+    monkeypatch.setattr(b.common, '_command', lambda *a, **kw: pytest.fail('resident must not redownload or rehash'))
+    result = b._prepare(mid, JobRecord('video','reuse'), extra_ram=2, extra_vram=.5)
+    assert result is session.names and calls == [(2,.5)]
+
+
+@pytest.mark.parametrize('variant', ['Q5_ID', 'Q4_Q5_ID', 'UDQ4_Q5_ID'])
+def test_ltx25_q5_switch_unloads_previous_before_admission_and_does_not_download_on_failure(temp_studio_env, monkeypatch, variant):
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord
+    mid = getattr(b, variant)
+    calls = []
+    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True,'bf16_supported':True,'vram_total_gb':22})
+    monkeypatch.setattr(b.common, '_resident', lambda *_: None)
+    monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: {'model_id':'old'})
+    monkeypatch.setattr(b.memory_manager, 'unload_slot', lambda slot: calls.append(('unload',slot)))
+    def reject(**kw):
+        calls.append(('admission',kw['ram_gb'],kw['vram_gb']))
+        raise RuntimeError('not enough')
+    monkeypatch.setattr(b.memory_manager, 'ensure_capacity', reject)
+    monkeypatch.setattr(b.common, '_install', lambda *a, **kw: pytest.fail('must not install before admission'))
+    monkeypatch.setattr(b.common, '_command', lambda *a, **kw: pytest.fail('must not download before admission'))
+    with pytest.raises(RuntimeError, match='not enough'):
+        b._prepare(mid, JobRecord('video','switch'))
+    assert calls[0] == ('unload','video') and calls[1][0] == 'admission'
