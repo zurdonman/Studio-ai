@@ -1,12 +1,12 @@
 # Investigación: codificadores de texto GGUF para vídeo + audio
 
-Consulta: 5 de noviembre de 2026. Alcance: LTX en Studio; **investigación, no integración nueva ni pruebas GPU realizadas por Studio**. Un codificador cuantizado puede reducir el disco y parte de la presión de memoria, pero el tamaño del archivo no equivale al pico de RAM/VRAM ni determina por sí mismo la calidad del vídeo, diálogo o voz.
+Consulta: 5 de noviembre de 2026. Alcance: LTX en Studio; **sin pruebas GPU realizadas por Studio**; ver el estado de integración al final. Un codificador cuantizado puede reducir el disco y parte de la presión de memoria, pero el tamaño del archivo no equivale al pico de RAM/VRAM ni determina por sí mismo la calidad del vídeo, diálogo o voz.
 
 ## LTX 2.3: Studio ya usa ambos en GGUF
 
 El flujo A/V actual usa el DiT `ltx-2.3-22b-distilled-Q4_K_M.gguf` y, a la vez, el codificador `gemma-3-12b-it-qat-UD-Q4_K_XL.gguf` (7.432.229.248 bytes ≈ 6,92 GiB). Hay también un archivo de conectores de la variante destilada y dos VAEs en safetensors. El grafo usa `UnetLoaderGGUF` para el DiT y `DualCLIPLoaderGGUF` tipo `ltxv` para Gemma + conectores: véanse `studio/engines/ltx_gguf_manifest.py` y `studio/engines/ltx_gguf_workflow.py`. [Unsloth documenta el uso de Gemma 3 GGUF con LTX 2.3](https://huggingface.co/unsloth/LTX-2.3-GGUF). Este flujo, con sus pesos concretos, ya produjo I2V con pista de audio en una L4 del usuario; ello no evalúa la calidad perceptiva de la voz o el español.
 
-## LTX 2.5: Gemma 4 GGUF con proyecciones, aún no integrado
+## LTX 2.5: Gemma 4 GGUF con proyecciones
 
 [elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF](https://huggingface.co/elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF) distribuye versiones comunitarias que incluyen las dos proyecciones de LTX (audio y vídeo), no un Gemma genérico de chat. El repositorio exige acceder/aceptar los términos LTX 2.x; también se aplica la licencia de Gemma indicada en la ficha. No se descargaron archivos ni se verificaron independientemente los hashes; los valores siguientes proceden de esa ficha:
 
@@ -35,4 +35,12 @@ Como alternativa no-GGUF existe un [Gemma 4 INT8 ConvRot para ComfyUI](https://h
 4. Con pesos reales y GPU, probar T2V e I2V de clips cortos con audio, instrumentando picos RAM/VRAM, cancelación, descarga y cambios de modelo. Comparar prompt, movimiento, habla y español; comprobar que la salida contiene audio no sustituido.
 5. Solo con datos medidos revisar preflight; no rebajar los 45 GiB preventivos actuales como simple resta de tamaño de archivo. Fijar por separado el resultado de L4 y el de otras GPU.
 
-Primera candidata técnica sugerida: **encoder Q5**, por ser el único de esta ficha con ejecución A/V completa comunicada; Q4/Q2 pueden investigarse luego si la memoria lo requiere. No se ha integrado ni hay garantías de encaje en Colab L4. No confundir un encoder de texto con ID-LoRA o referencia de voz: el encoder más pequeño por sí solo **no** conserva la voz entre clips.
+Primera candidata técnica sugerida: **encoder Q5**, por ser el único de esta ficha con ejecución A/V completa comunicada; Q4/Q2 pueden investigarse luego si la memoria lo requiere. No hay garantías de encaje en Colab L4; el estado de integración figura al final. No confundir un encoder de texto con ID-LoRA o referencia de voz: el encoder más pequeño por sí solo **no** conserva la voz entre clips.
+
+## Estado de integración posterior
+
+La combinación optativa **LTX 2.5 UD-Q2 + Gemma 4 GGUF Q5** se ha añadido al catálogo bajo «Vídeo» con un runtime Comfy independiente y sin sustituir las variantes anteriores. Se mantiene fuera del filtro estricto. Es una receta de una sola pasada, 8 pasos, sin upscale ni referencia de voz. El encoder Q5, su repositorio y revisión están fijados con SHA-256; el parche se descarga de ese mismo repositorio con la cuenta de Hugging Face configurada en Studio, se comprueba su SHA-256 y se aplica exclusivamente al plugin aislado tras comprobar su revisión y que no tenga modificaciones. No se fuerzan parches ni se alteran archivos de otros runtimes. Los archivos de DiT y VAEs se reutilizan con la variante BF16 cuando ya existen.
+
+Antes de preparar, aceptar los términos de [elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF](https://huggingface.co/elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF) con la cuenta de Hugging Face y configurar acceso a esa cuenta en Studio; no pegar credenciales en un log o conversación. Si no se autoriza el parche, falla antes de descargar los pesos de esta variante. Las licencias LTX y Gemma se siguen aplicando.
+
+El presupuesto inicial de esta variante es **32 GiB de RAM libre y 14 GiB de VRAM libre**, más reservas y margen para dimensiones/duración mayores: es una estimación preventiva de prueba, **no un pico medido**, y puede detener la tarea o no evitar un OOM. En la primera prueba usar 512×320, 24 fps y 2 s. Preparar descarga y verifica los pesos, pero el encoder y el DiT se cargan realmente al generar. ComfyUI con archivos dummy aceptó los grafos T2V e I2V; pruebas automatizadas cubren rutas, selección y verificación de un parche simulado. **No hemos accedido al parche real protegido, cargado los pesos ni ejecutado inferencia GPU/L4.** La compatibilidad del parche real, el audio, el español y el movimiento necesitan prueba real y log. El valor de espacio en disco no es una estimación de memoria.

@@ -53,4 +53,4 @@ Fuentes generales: [Unsloth LTX 2.3 y workflow](https://huggingface.co/unsloth/L
 
 La investigación de coherencia de voz y sus limitaciones prácticas está en [VOICE_GGUF_RESEARCH.md](VOICE_GGUF_RESEARCH.md).
 
-Sobre codificadores de texto GGUF, situación de Gemma 3 en LTX 2.3 y candidato Gemma 4 para LTX 2.5, véase [investigación de text encoders GGUF](GGUF_TEXT_ENCODERS_RESEARCH.md). Es investigación: Gemma 4 GGUF no está integrado ni probado en Studio.
+Sobre codificadores de texto GGUF, situación de Gemma 3 en LTX 2.3 y candidato Gemma 4 para LTX 2.5, véase [investigación de text encoders GGUF](GGUF_TEXT_ENCODERS_RESEARCH.md). La variante Gemma 4 GGUF Q5 ya es seleccionable, pero aún no está probada con pesos reales ni en L4.

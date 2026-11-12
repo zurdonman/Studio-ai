@@ -437,6 +437,7 @@
               <p>Elígelo en la lista de modelos de Vídeo. Si no aparece, desmarca «Mostrar solo modelos con encaje estimado»: la prueba en L4 no evalúa los recursos disponibles de esta sesión. Usa «Preparar» para instalar y descargar; luego «Generar Clip».</p>
               <p class="muted">Usa duración (1–20 s experimental), fps, ancho y alto (múltiplos de 32; área máxima 768×512), prompt, prompt negativo, semilla e imagen inicial opcional. Duración aproximada por fotogramas 8n+1. Fijos: 8 pasos y CFG 1. Sin LoRA, fotograma final ni voz de referencia. En L4 se probaron 10 y 20 s a 512×320 (20 s con caché). Otras condiciones pueden consumir más memoria, ser rechazadas o fallar.</p>
               <p class="muted">LTX 2.5 GGUF UD-Q2 y UD-Q4 son recetas nuevas, aún sin prueba GPU/L4: una pasada, VAE conv, sin upscale, con Gemma 4 BF16 (~24,5 GiB solo el codificador); pueden superar la memoria. No ofrecen voz de referencia.</p>
+              <p class="muted">También disponible: LTX 2.5 UD-Q2 + Gemma 4 GGUF Q5 (~19,4 GiB de pesos). Experimental y sin prueba L4; requiere aceptar las condiciones del repositorio elix3r y acceso Hugging Face en Studio. No incluye voz de referencia.</p>
               <p class="muted">LTX 2.3 descarga ~24 GiB más dependencias; se requieren licencias LTX y Gemma. El motor reutiliza la caché mientras haya memoria, y «Sacar de RAM/VRAM» lo libera. Las voces constantes no están garantizadas.</p>
               <p id="ltx-gguf-error" role="alert" hidden></p>
             </div>

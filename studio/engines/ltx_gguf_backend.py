@@ -110,8 +110,9 @@ def _setup_env() -> dict:
     return env
 
 
-def _prepare_venv(job: Any) -> Path:
-    venv = ROOT / "venv"
+def _prepare_venv(job: Any, root: Path | None = None) -> Path:
+    root = root or ROOT
+    venv = root / "venv"
     py = venv / "bin" / "python"
     if venv.is_symlink() or (venv.exists() and not venv.is_dir()):
         raise RuntimeError("GGUF_VENV_CONFLICT: el entorno existente no es un directorio gestionado; no se modifica")
@@ -148,19 +149,21 @@ def _prepare_venv(job: Any) -> Path:
     return py
 
 
-def _install(job: Any) -> None:
-    marker = ROOT / "ready.json"
-    source = ROOT / "comfy"
+def _install(job: Any, root: Path | None = None, comfy_commit: str | None = None) -> None:
+    root = root or ROOT
+    comfy_commit = comfy_commit or COMFY_COMMIT
+    marker = root / "ready.json"
+    source = root / "comfy"
     plugin = source / "custom_nodes" / "ComfyUI-GGUF"
-    py = ROOT / "venv" / "bin" / "python"
+    py = root / "venv" / "bin" / "python"
     try:
         ready = json.loads(marker.read_text())
-        if ready == {"comfy": COMFY_COMMIT, "gguf": GGUF_COMMIT} and py.exists() and (source / "main.py").exists() and (plugin / "nodes.py").exists():
+        if ready == {"comfy": comfy_commit, "gguf": GGUF_COMMIT} and py.exists() and (source / "main.py").exists() and (plugin / "nodes.py").exists():
             return
     except (OSError, ValueError):
         pass
-    ROOT.mkdir(parents=True, exist_ok=True)
-    for dest, repo, revision in [(source, "https://github.com/Comfy-Org/ComfyUI.git", COMFY_COMMIT),
+    root.mkdir(parents=True, exist_ok=True)
+    for dest, repo, revision in [(source, "https://github.com/Comfy-Org/ComfyUI.git", comfy_commit),
                                  (plugin, "https://github.com/city96/ComfyUI-GGUF.git", GGUF_COMMIT)]:
         if not dest.exists():
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -168,11 +171,11 @@ def _install(job: Any) -> None:
         if not (dest / ".git").is_dir():
             raise RuntimeError("GGUF_RUNTIME_CONFLICT: directorio de runtime existente no gestionado; no se borra")
         _command(["git", "-C", str(dest), "checkout", "--detach", revision], job, stage="Fijando versión de GGUF", timeout=120)
-    py = _prepare_venv(job)
+    py = _prepare_venv(job) if root == ROOT else _prepare_venv(job, root)
     env = _setup_env()
     _command([str(py), "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", "-r", str(source / "requirements.txt"), "-r", str(plugin / "requirements.txt")], job, stage="Instalando dependencias GGUF", timeout=2400, env=env)
     _command([str(py), str(source / "main.py"), "--help"], job, stage="Comprobando entorno GGUF", timeout=90, env=env)
-    marker.write_text(json.dumps({"comfy": COMFY_COMMIT, "gguf": GGUF_COMMIT}), encoding="utf8")
+    marker.write_text(json.dumps({"comfy": comfy_commit, "gguf": GGUF_COMMIT}), encoding="utf8")
 
 
 def _artifact_path(role: str) -> Path:
@@ -239,10 +242,11 @@ def _runtime_env() -> dict:
     return env
 
 
-def _server_command(port: int, input_dir: Path, output_dir: Path) -> list[str]:
-    source = ROOT / "comfy"
+def _server_command(port: int, input_dir: Path, output_dir: Path, root: Path | None = None) -> list[str]:
+    root = root or ROOT
+    source = root / "comfy"
     ram_reserve = max(2.0, host_memory()["total_gb"] * 0.1)
-    return [str(ROOT / "venv/bin/python"), str(source / "main.py"), "--listen", "127.0.0.1", "--port", str(port),
+    return [str(root / "venv/bin/python"), str(source / "main.py"), "--listen", "127.0.0.1", "--port", str(port),
             "--disable-auto-launch", "--offline", "--disable-metadata", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "ComfyUI-GGUF",
             "--cache-ram", f"{ram_reserve:.2f}", f"{ram_reserve:.2f}",
             "--input-directory", str(input_dir), "--output-directory", str(output_dir), "--reserve-vram", "1.8"]
@@ -265,13 +269,14 @@ def _wait_server(proc: subprocess.Popen, base: str, logfile: Any, job: Any) -> N
     raise TimeoutError("GGUF_SERVER_TIMEOUT: ComfyUI no arrancó en 3 minutos")
 
 
-def _probe_runtime(job: Any, extra_required: set[str] | None = None) -> None:
+def _probe_runtime(job: Any, extra_required: set[str] | None = None, root: Path | None = None) -> None:
+    root = root or ROOT
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="gguf-probe-", dir=TEMP_DIR) as tmp, tempfile.TemporaryFile() as log:
         inp, out = Path(tmp) / "in", Path(tmp) / "out"
         inp.mkdir(); out.mkdir()
         port = _free_port(); base = f"http://127.0.0.1:{port}"
-        proc = subprocess.Popen(_server_command(port, inp, out), cwd=ROOT / "comfy", env=_runtime_env(), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        proc = subprocess.Popen(_server_command(port, inp, out, root), cwd=root / "comfy", env=_runtime_env(), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             _wait_server(proc, base, log, job)
             info = requests.get(base + "/object_info", timeout=20).json()
@@ -286,7 +291,8 @@ def _probe_runtime(job: Any, extra_required: set[str] | None = None) -> None:
 
 class _ResidentComfy:
     """Comfy cache owned by the video slot. Unload stops the process and frees its GPU."""
-    def __init__(self, job: Any, names: dict[str, str]):
+    def __init__(self, job: Any, names: dict[str, str], runtime_root: Path | None = None):
+        runtime_root = runtime_root or ROOT
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix="ltx-gguf-session-", dir=TEMP_DIR)
         self.root = Path(self.temp.name)
@@ -298,7 +304,7 @@ class _ResidentComfy:
         self.log = tempfile.TemporaryFile()
         self.proc = None
         try:
-            self.proc = subprocess.Popen(_server_command(self.port, self.input_dir, self.output_dir), cwd=ROOT / "comfy",
+            self.proc = subprocess.Popen(_server_command(self.port, self.input_dir, self.output_dir, runtime_root), cwd=runtime_root / "comfy",
                                          env=_runtime_env(), stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
             _wait_server(self.proc, self.base, self.log, job)
         except BaseException:
@@ -327,11 +333,11 @@ def _resident(model_id: str = MODEL_ID) -> _ResidentComfy | None:
     return session
 
 
-def _open_resident(job: Any, names: dict[str, str], model_id: str = MODEL_ID) -> _ResidentComfy:
+def _open_resident(job: Any, names: dict[str, str], model_id: str = MODEL_ID, runtime_root: Path | None = None) -> _ResidentComfy:
     session = _resident(model_id)
     if session is not None:
         return session
-    session = _ResidentComfy(job, names)
+    session = _ResidentComfy(job, names, runtime_root) if runtime_root else _ResidentComfy(job, names)
     try:
         memory_manager.register_loaded("video", model_id, "LTX GGUF · motor activo", session)
     except BaseException:

@@ -1,7 +1,7 @@
 """LTX-2.5 single-pass GGUF A/V recipes, experimental and untested on GPU.
 
-Uses the isolated, pinned Comfy runtime shared with LTX 2.3; never substitutes
-its Gemma 4 encoder or silently falls back to the 2.3 graph.
+BF16 uses the pinned Comfy runtime shared with LTX 2.3; Gemma 4 GGUF
+uses a separate patched runtime. No silent fallback to the 2.3 graph.
 """
 from __future__ import annotations
 
@@ -24,8 +24,15 @@ from studio.memory_manager import memory_manager, serialized_gpu_operation
 REPO = 'unsloth/LTX-2.5-GGUF'
 REV = 'ac3c540c6025903784336e99b2dc179385c4c3b7'
 WEIGHTS = DATA_ROOT / 'models' / 'ltx25-gguf'
+Q5_ID = 'ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental'
+Q5_RUNTIME = DATA_ROOT / 'runtimes' / 'ltx25-gemma4-gguf'
+Q5_COMFY_COMMIT = '2f35f4a08176d993cded35dac3332be4f7287f41'
+Q5_ENCODER = ('text_encoder', 'elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF',
+              '2a18e836d286eb0570ec9f013c3591eb8c614d57', 'gemma4-12b-with-proj-ltx-2.5-Q5_K_M.gguf',
+              9514920864, '1d35d4fbfa34cca1513d8e9fdd77c0573778b21ffdcbe4ca9c906f37a8c502f9')
 MODELS = {
     'ltx-2.5-distilled-gguf-ud-q2-experimental': ('UD-Q2_K_XL', 'distilled/ltx-2.5-22b-distilled-UD-Q2_K_XL.gguf', 9500270976, 'd6fdc7e117f1a9780bdbe15c898d63c12a7d747847f54b276b69a6be5ce3c57d'),
+    Q5_ID: ('UD-Q2_K_XL + Gemma 4 GGUF Q5_K_M', 'distilled/ltx-2.5-22b-distilled-UD-Q2_K_XL.gguf', 9500270976, 'd6fdc7e117f1a9780bdbe15c898d63c12a7d747847f54b276b69a6be5ce3c57d'),
     'ltx-2.5-distilled-gguf-ud-q4-experimental': ('UD-Q4_K_XL', 'distilled/ltx-2.5-22b-distilled-UD-Q4_K_XL.gguf', 14000234880, '55442750eb0013d94fffaa4dadb577c5f4dc07107ec04389d41444f6e517d980'),
 }
 COMMON = (
@@ -40,7 +47,8 @@ def files_for(model_id: str) -> tuple:
     if model_id not in MODELS:
         raise ValueError('GGUF_MODEL_UNSUPPORTED: modelo LTX 2.5 desconocido')
     _, filename, size, sha = MODELS[model_id]
-    return (('dit', REPO, REV, filename, size, sha), *COMMON)
+    components = (Q5_ENCODER, *COMMON[1:]) if model_id == Q5_ID else COMMON
+    return (('dit', REPO, REV, filename, size, sha), *components)
 
 
 def path_for(item) -> Path:
@@ -50,7 +58,7 @@ def path_for(item) -> Path:
 
 def files_present(model_id: str) -> bool:
     try:
-        return (common.ROOT / 'ready.json').is_file() and all(path_for(x).is_file() and path_for(x).stat().st_size == x[4] for x in files_for(model_id))
+        return ((Q5_RUNTIME if model_id == Q5_ID else common.ROOT) / 'ready.json').is_file() and (model_id != Q5_ID or (Q5_RUNTIME / 'gemma4-patch.json').is_file()) and all(path_for(x).is_file() and path_for(x).stat().st_size == x[4] for x in files_for(model_id))
     except OSError:
         return False
 
@@ -79,6 +87,7 @@ def _fingerprint(model_id: str) -> tuple | None:
 
 
 def _links(model_id: str) -> dict[str, str]:
+    runtime = Q5_RUNTIME if model_id == Q5_ID else common.ROOT
     folders = {'dit': 'diffusion_models', 'text_encoder': 'text_encoders', 'video_vae': 'vae', 'audio_vae': 'vae'}
     names = {}
     for item in files_for(model_id):
@@ -86,7 +95,7 @@ def _links(model_id: str) -> dict[str, str]:
         source = path_for(item)
         if not source.is_file():
             raise RuntimeError(f'GGUF_MISSING_COMPONENT: {role}')
-        dest = common.ROOT / 'comfy' / 'models' / folders[role] / source.name
+        dest = runtime / 'comfy' / 'models' / folders[role] / source.name
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.is_symlink():
             if dest.resolve() != source.resolve():
@@ -112,17 +121,35 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
     if memory_manager.get_slot('video'):
         job.log('Liberando el modelo de vídeo anterior para cambiar de receta; archivos intactos.')
         memory_manager.unload_slot('video')
+    # Budgets are preventive estimates, not measured peaks for either variant.
+    q5 = model_id == Q5_ID
+    runtime = Q5_RUNTIME if q5 else common.ROOT
     # The 26.3 GB BF16 Gemma 4 encoder is not the quantized Gemma 3 of LTX 2.3.
     # This conservative budget is not a measured peak and can reject an L4.
-    memory_manager.ensure_capacity(ram_gb=45 + extra_ram, vram_gb=16 + extra_vram,
+    memory_manager.ensure_capacity(ram_gb=(32 if q5 else 45) + extra_ram, vram_gb=(14 if q5 else 16) + extra_vram,
                                    stage='LTX 2.5 GGUF (estimación preventiva, no medida)', job=job)
-    common.ROOT.mkdir(parents=True, exist_ok=True)
+    runtime.mkdir(parents=True, exist_ok=True)
     missing = sum(x[4] for x in files if not path_for(x).is_file() or path_for(x).stat().st_size != x[4])
     required = missing + 10 * 1024**3
-    if shutil.disk_usage(common.ROOT).free < required:
+    if shutil.disk_usage(runtime).free < required:
         raise RuntimeError(f'GGUF_DISK_LOW: se requieren {required / 1024**3:.1f} GiB libres para archivos y entorno')
-    common._install(job)
-    common._probe_runtime(job, {'CLIPLoader', 'LTXVDualCFGGuider', 'VAEDecodeTiled'})
+    if q5:
+        job.log('Variante Gemma 4 GGUF Q5: runtime aislado y estimaciones de memoria no medidas; requiere acceso al repositorio elix3r.')
+        common._install(job, runtime, Q5_COMFY_COMMIT)
+        from studio.catalog import catalog_manager
+        env = os.environ.copy()
+        token = catalog_manager.get_hf_token()
+        if token:
+            env['HF_TOKEN'] = token
+        repo = str(Path(__file__).resolve().parents[2])
+        env['PYTHONPATH'] = repo + os.pathsep + env.get('PYTHONPATH', '')
+        common._command([sys.executable, '-m', 'studio.engines.ltx25_gguf_patch',
+                         str(runtime / 'comfy' / 'custom_nodes' / 'ComfyUI-GGUF'), str(runtime / 'gemma4-patch.json')],
+                        job, env=env, cwd=repo, stage='Verificando acceso y parche Gemma 4 GGUF', timeout=600)
+        common._probe_runtime(job, {'CLIPLoaderGGUF', 'LTXVDualCFGGuider', 'VAEDecodeTiled'}, runtime)
+    else:
+        common._install(job)
+        common._probe_runtime(job, {'CLIPLoader', 'LTXVDualCFGGuider', 'VAEDecodeTiled'})
     fingerprint = _fingerprint(model_id)
     if fingerprint is None or fingerprint != _verified.get(model_id):
         from studio.catalog import catalog_manager
@@ -147,7 +174,9 @@ def make_graph25(*, prompt: str, negative_prompt: str, width: int, height: int, 
                        frames=frames, fps=fps, seed=seed, image_name=image_name, image_strength=image_strength,
                        model=names['dit'], text_encoder=names['text_encoder'], connectors='unused.safetensors',
                        video_vae=names['video_vae'], audio_vae=names['audio_vae'])
-    graph['2'] = {'class_type': 'CLIPLoader', 'inputs': {'clip_name': names['text_encoder'], 'type': 'ltxv', 'device': 'default'}}
+    graph['2'] = ({'class_type': 'CLIPLoaderGGUF', 'inputs': {'clip_name': names['text_encoder'], 'type': 'ltxv'}}
+                  if names['text_encoder'].endswith('.gguf') else
+                  {'class_type': 'CLIPLoader', 'inputs': {'clip_name': names['text_encoder'], 'type': 'ltxv', 'device': 'default'}})
     graph['11'] = {'class_type': 'LTXVDualCFGGuider', 'inputs': {'model': ['1', 0], 'positive': ['7', 0], 'negative': ['7', 1], 'video_cfg': 1.0, 'audio_cfg': 1.0}}
     graph['13']['inputs']['sampler_name'] = 'euler_ancestral'
     graph['17'] = {'class_type': 'VAEDecodeTiled', 'inputs': {'samples': ['16', 0], 'vae': ['3', 0], 'tile_size': 512, 'overlap': 64, 'temporal_size': 64, 'temporal_overlap': 16}}
@@ -174,11 +203,12 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
     # Validate the graph before any download; the file names below are placeholders only.
     make_graph25(prompt=effective, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
                  seed=seed, image_name='input.png' if image_path else None, image_strength=image_strength,
-                 names={'dit':'x.gguf','text_encoder':'x.safetensors','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
+                 names={'dit':'x.gguf','text_encoder':'x.gguf' if model_id == Q5_ID else 'x.safetensors','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
     scale = width * height * frames / (512 * 320 * 49)
     extra_ram, extra_vram = max(0, scale - 1) * 2, max(0, scale - 1) * .5
     names = _prepare(model_id, job, extra_ram=extra_ram, extra_vram=extra_vram)
-    session = common._open_resident(job, names, model_id)
+    session = (common._open_resident(job, names, model_id, Q5_RUNTIME) if model_id == Q5_ID
+               else common._open_resident(job, names, model_id))
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     seed = int(seed) if seed else int.from_bytes(os.urandom(4), 'big')
     job.log(f'LTX 2.5: {width}×{height}, {frames} fotogramas a {fps} fps (~{frames/fps:.2f} s), una pasada, 8 pasos.')

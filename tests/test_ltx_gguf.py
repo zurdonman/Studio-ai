@@ -331,7 +331,7 @@ web.run_app(app, host='127.0.0.1', port=port, print=None)
     monkeypatch.setattr(b, 'ROOT', root)
     monkeypatch.setattr(b, 'TEMP_DIR', tmp_path)
     monkeypatch.setattr(b, '_check_pressure', lambda: None)
-    monkeypatch.setattr(b, '_server_command', lambda port, inp, out: [sys.executable, str(script), str(port), str(out)])
+    monkeypatch.setattr(b, '_server_command', lambda port, inp, out, *args: [sys.executable, str(script), str(port), str(out)])
     manager = RuntimeMemoryManager()
     monkeypatch.setattr(b, 'memory_manager', manager)
     job = JobRecord('video', 'mock'); job.status = 'running'
@@ -466,7 +466,7 @@ def test_ltx25_metadata_and_api_routing(temp_studio_env, monkeypatch):
     import time
     from studio.engines import ltx25_gguf as b
     client, _ = temp_studio_env
-    q2, q4 = list(b.MODELS)
+    q2, q4 = [mid for mid in b.MODELS if mid != b.Q5_ID]
     entries = {x['id']: x for x in client.get('/api/catalog').json()['models']}
     assert entries[q2]['engine'] == 'ltx_gguf' and entries[q4]['engine'] == 'ltx_gguf'
     assert entries[q2]['estimated_gb'] < entries[q4]['estimated_gb']
@@ -494,7 +494,7 @@ def test_ltx25_metadata_and_api_routing(temp_studio_env, monkeypatch):
 def test_ltx25_guards_gpu_before_downloading_and_switches_models(temp_studio_env, monkeypatch):
     from studio.engines import ltx25_gguf as b
     from studio.jobs import JobRecord
-    q2, _ = list(b.MODELS)
+    q2 = next(iter(b.MODELS))
     installed = []
     monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':False})
     monkeypatch.setattr(b.common, '_install', lambda *_: installed.append('install'))
@@ -540,7 +540,7 @@ def test_ltx25_end_to_end_with_synthetic_audio_and_video(temp_studio_env, monkey
 def test_gguf_resident_cache_never_reuses_a_different_variant(temp_studio_env, monkeypatch):
     from types import SimpleNamespace
     from studio.engines import ltx_gguf_backend as common, ltx25_gguf as ltx25
-    q2, q4 = list(ltx25.MODELS)
+    q2, q4 = [mid for mid in ltx25.MODELS if mid != ltx25.Q5_ID]
     session = object.__new__(common._ResidentComfy)
     session.proc = SimpleNamespace(poll=lambda: None)
     monkeypatch.setattr(common.memory_manager, 'get_slot', lambda *_: {'model_id':q2, 'handle':session})
@@ -583,3 +583,89 @@ def test_ltx25_cancel_unloads_resident_process(temp_studio_env, monkeypatch, tmp
         b.generate(model_id=mid, image_path=None, prompt='test', negative_prompt='', seed=1, job=JobRecord('video','test'),
                    width=512, height=320, duration_sec=2, fps=24, speech_language='auto', image_strength=1)
     assert released == ['video']
+
+
+def test_ltx25_q5_manifest_graph_catalog_and_routing(temp_studio_env, monkeypatch):
+    import time
+    from studio.engines import ltx25_gguf as b
+    client, _ = temp_studio_env
+    q2 = next(iter(b.MODELS))
+    files = b.files_for(b.Q5_ID)
+    assert files[0] == b.files_for(q2)[0] and files[2:] == b.files_for(q2)[2:]
+    assert files[1] == b.Q5_ENCODER and files[1][2] == '2a18e836d286eb0570ec9f013c3591eb8c614d57'
+    assert round(sum(x[4] for x in files) / 1024**3, 1) == 19.4
+    names = {'dit':'model.gguf', 'text_encoder': files[1][3], 'video_vae':'v.safetensors', 'audio_vae':'a.safetensors'}
+    graph = b.make_graph25(prompt='Hola', negative_prompt='', width=512, height=320, frames=49, fps=24, seed=1, image_name=None, names=names)
+    assert graph['2'] == {'class_type':'CLIPLoaderGGUF', 'inputs': {'clip_name': files[1][3], 'type':'ltxv'}}
+    entry = next(x for x in client.get('/api/catalog').json()['models'] if x['id'] == b.Q5_ID)
+    assert 'Gemma 4 GGUF Q5' in entry['name'] and entry['estimated_gb'] == 19.4 and not entry['compatibility']['compatible']
+    assert not any(x['id'] == b.Q5_ID for x in client.get('/api/catalog?gpu_profile=L4&only_compatible=true').json()['models'])
+    calls = []
+    monkeypatch.setattr(b, 'prepare', lambda mid, *, job: calls.append(('prepare',mid)) or {'prepared':True})
+    monkeypatch.setattr(b, 'generate', lambda **kw: calls.append(('generate',kw['model_id'])) or {'media_url':'/mock.mp4'})
+    assert client.post('/api/video/ltx-gguf/prepare', params={'model_id': b.Q5_ID}).status_code == 200
+    assert client.post('/api/video/ltx-gguf', json={'model_id':b.Q5_ID, 'prompt':'Hola'}).status_code == 200
+    for _ in range(50):
+        if len(calls) == 2: break
+        time.sleep(.02)
+    assert ('prepare',b.Q5_ID) in calls and ('generate',b.Q5_ID) in calls
+
+
+def test_ltx25_q5_uses_separate_runtime_and_memory_guard(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord
+    calls=[]
+    monkeypatch.setattr(b, 'Q5_RUNTIME', tmp_path/'isolated')
+    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True,'bf16_supported':True,'vram_total_gb':22})
+    monkeypatch.setattr(b.common, '_resident', lambda *_: None)
+    monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: None)
+    monkeypatch.setattr(b.memory_manager, 'ensure_capacity', lambda **kw: calls.append(('capacity', kw['ram_gb'], kw['vram_gb'])))
+    monkeypatch.setattr(b.common, '_install', lambda job,root,rev: calls.append(('install',root,rev)))
+    monkeypatch.setattr(b.common, '_probe_runtime', lambda job,nodes,root: calls.append(('probe',root,nodes)))
+    monkeypatch.setattr(b.common, '_command', lambda args,job,**kw: calls.append(('command',args,kw['stage'])))
+    monkeypatch.setattr(b, '_links', lambda mid: {'dit':'d.gguf'})
+    monkeypatch.setattr(b.shutil, 'disk_usage', lambda p: type('Disk',(),{'free':100*1024**3})())
+    b._prepare(b.Q5_ID, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
+    assert ('capacity',34,14.5) in calls
+    assert ('install', b.Q5_RUNTIME, b.Q5_COMFY_COMMIT) in calls
+    assert any(c[0]=='probe' and c[1] == b.Q5_RUNTIME and 'CLIPLoaderGGUF' in c[2] for c in calls)
+    assert any(c[0]=='command' and 'studio.engines.ltx25_gguf_patch' in c[1] for c in calls)
+    assert any(c[0]=='command' and 'studio.engines.ltx_gguf_download' in c[1] and b.Q5_ID in c[1] for c in calls)
+
+
+def test_gemma4_patch_applies_only_verified_patch_and_preserves_changes(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    from studio.engines import ltx25_gguf_patch as p
+    plugin = tmp_path/'plugin'; plugin.mkdir()
+    def git(*args):
+        return subprocess.run(['git','-C',str(plugin),*args], check=True, capture_output=True, text=True).stdout
+    git('init','-q'); git('config','user.email','test@example.invalid'); git('config','user.name','Test')
+    loader=plugin/'loader.py'; loader.write_text('original\n')
+    git('add','loader.py'); git('commit','-qm','initial')
+    monkeypatch.setattr(p, 'GGUF_COMMIT', git('rev-parse','HEAD').strip())
+    loader.write_text('patched\n')
+    patch=tmp_path/'test.patch'; patch.write_text(git('diff','--','loader.py'))
+    git('checkout','--','loader.py')
+    monkeypatch.setattr(p, 'PATCH_SHA256', p.digest(patch))
+    monkeypatch.setattr(p, 'hf_hub_download', lambda **kw: str(patch))
+    stamp=tmp_path/'stamp.json'
+    p.run(plugin,stamp)
+    assert loader.read_text() == 'patched\n' and json.loads(stamp.read_text())['patch_sha256'] == p.digest(patch)
+    p.run(plugin,stamp)  # idempotent
+    loader.write_text('user edits\n')
+    with pytest.raises(RuntimeError, match='PATCH_CONFLICT'):
+        p.run(plugin,stamp)
+    assert loader.read_text() == 'user edits\n'
+    patch.write_text('tampered')
+    with pytest.raises(RuntimeError, match='PATCH_HASH'):
+        p.run(plugin,stamp)
+    assert loader.read_text() == 'user edits\n'
+
+
+def test_gemma4_patch_gated_access_error_is_actionable(tmp_path, monkeypatch):
+    from studio.engines import ltx25_gguf_patch as p
+    def denied(**kw): raise RuntimeError('denied')
+    monkeypatch.setattr(p, 'hf_hub_download', denied)
+    with pytest.raises(RuntimeError, match='GGUF_GEMMA4_ACCESS'):
+        p.run(tmp_path, tmp_path/'stamp')

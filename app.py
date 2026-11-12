@@ -501,14 +501,14 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
                        "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                          "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
                                          "official_note": "I2V de 10 y 20 s probado en L4 a 512×320; 8 pasos y CFG 1 fijos. Otras configuraciones y el encaje actual no garantizados."}})
-        from studio.engines.ltx25_gguf import MODELS as LTX25_MODELS, files_for as ltx25_files, files_present as ltx25_present
+        from studio.engines.ltx25_gguf import MODELS as LTX25_MODELS, Q5_ID, files_for as ltx25_files, files_present as ltx25_present
         for mid, (quant, _, _, _) in LTX25_MODELS.items():
             models.append({"id": mid, "name": f"LTX 2.5 GGUF {quant} · vídeo + audio (experimental)",
                            "category": "video", "engine": "ltx_gguf", "video_modes": ["i2v", "t2v", "av"],
                            "estimated_gb": round(sum(x[4] for x in ltx25_files(mid)) / 1024**3, 1),
                            "downloaded": ltx25_present(mid), "loaded_in_memory": mid in loaded_ids,
                            "compatibility": {"compatible": False, "tier": "candidate", "label": "Sin prueba GPU · encaje desconocido", "sticker": "🧪",
-                                             "reasons": ["No probado en L4. Gemma 4 BF16 ocupa ~24,5 GiB; la admisión puede rechazar la tarea."]},
+                                             "reasons": ["No probado en L4. " + ("Gemma 4 GGUF Q5 requiere aceptar condiciones de elix3r; la admisión puede rechazar la tarea." if mid == Q5_ID else "Gemma 4 BF16 ocupa ~24,5 GiB; la admisión puede rechazar la tarea.")]},
                            "ltx_distilled": True,
                            "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                              "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
@@ -994,7 +994,7 @@ def api_id_lora_video(req: VoiceConsistencyReq) -> Dict[str, Any]:
 
 
 class LTXGGUFReq(BaseModel):
-    model_id: Literal["ltx-2.3-distilled-gguf-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental"] = "ltx-2.3-distilled-gguf-q4-experimental"
+    model_id: Literal["ltx-2.3-distilled-gguf-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental"] = "ltx-2.3-distilled-gguf-q4-experimental"
     prompt: str = Field(min_length=1, max_length=3000)
     negative_prompt: str = Field(default="", max_length=3000)
     image_rel: Optional[str] = None
@@ -1878,7 +1878,7 @@ def _generate_current_session_report(fmt: str = "md") -> tuple[str, str]:
     unique_files = {ltx25_path(item): item for mid in LTX25_MODELS for item in ltx25_files(mid)}
     existing = [(path, item) for path, item in unique_files.items() if path.is_file()]
     if existing:
-        downloaded.append({"id": "ltx-2.5-gguf-shared-inventory", "name": "LTX 2.5 GGUF Q2/Q4 y componentes compartidos", "category": "video",
+        downloaded.append({"id": "ltx-2.5-gguf-shared-inventory", "name": "LTX 2.5 GGUF y componentes compartidos", "category": "video",
                            "disk_gb": round(sum(path.stat().st_size for path, _ in existing) / 1024**3, 2),
                            "details": f"{sum(path.stat().st_size == item[4] for path, item in existing)}/{len(unique_files)} archivos con tamaño esperado; comunes contados una vez; hashes no comprobados al exportar"})
     return build_full_session_log_document(
