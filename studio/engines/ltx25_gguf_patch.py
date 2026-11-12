@@ -20,13 +20,43 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _download_error(exc: Exception, token_supplied: bool) -> str:
+    # Do not put exception messages, URLs with query strings or credentials in logs.
+    # HF Hub may wrap the original HTTP/network error in a cache exception.
+    chain = []
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen and len(chain) < 8:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    names = {type(item).__name__ for item in chain}
+    statuses = {getattr(getattr(item, 'response', None), 'status_code', None) for item in chain}
+    token_state = 'sí' if token_supplied else 'no (podría existir una sesión local de Hugging Face)'
+    context = f"Tipo: {type(exc).__name__}; token de Studio en el proceso: {token_state}."
+    if 'GatedRepoError' in names or 401 in statuses or 403 in statuses:
+        return ('GGUF_GEMMA4_ACCESS: Hugging Face ha rechazado el acceso. Abre https://huggingface.co/' + REPO +
+                ', acepta las condiciones y configura en Studio el acceso de esa misma cuenta. ' + context)
+    if 'RevisionNotFoundError' in names or 'EntryNotFoundError' in names and 'LocalEntryNotFoundError' not in names:
+        return 'GGUF_GEMMA4_RESOURCE: no se encontró la revisión o el parche fijado en Hugging Face. ' + context
+    if 'RepositoryNotFoundError' in names or 404 in statuses:
+        return ('GGUF_GEMMA4_REPOSITORY: Hugging Face no encontró el repositorio o no autorizó el acceso. '
+                'Comprueba la cuenta y sus permisos. ' + context)
+    if names.intersection({'LocalEntryNotFoundError', 'OfflineModeIsEnabled', 'ConnectError', 'ConnectTimeout',
+                           'ReadTimeout', 'ConnectionError', 'Timeout', 'SSLError'}):
+        return ('GGUF_GEMMA4_NETWORK: no se pudo recuperar el parche; revisa la conexión y si Hugging Face está en modo sin conexión. '
+                'Si vuelve a fallar, comparte el log. ' + context)
+    status_text = ', '.join(str(x) for x in sorted(x for x in statuses if isinstance(x, int)))
+    return ('GGUF_GEMMA4_DOWNLOAD: no se pudo recuperar el parche; comparte el log. ' + context +
+            (f' HTTP: {status_text}.' if status_text else ''))
+
+
 def run(plugin: Path, stamp: Path) -> None:
     try:
         patch = Path(hf_hub_download(repo_id=REPO, revision=REV,
                      filename='patches/ComfyUI-GGUF-ltx25-gemma4.patch', token=os.environ.get('HF_TOKEN') or None))
     except Exception as exc:
-        raise RuntimeError('GGUF_GEMMA4_ACCESS: acepta las condiciones en https://huggingface.co/' + REPO +
-                           ' y configura tu acceso a Hugging Face en Studio; no se descargaron los pesos') from exc
+        raise RuntimeError(_download_error(exc, bool(os.environ.get('HF_TOKEN'))) + ' No se descargaron los pesos.') from None
     if digest(patch) != PATCH_SHA256:
         raise RuntimeError('GGUF_GEMMA4_PATCH_HASH: parche no coincide con SHA-256; no se aplica')
     def git(*args, check=True):
@@ -58,4 +88,8 @@ def run(plugin: Path, stamp: Path) -> None:
 
 
 if __name__ == '__main__':
-    run(Path(sys.argv[1]), Path(sys.argv[2]))
+    try:
+        run(Path(sys.argv[1]), Path(sys.argv[2]))
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        sys.exit(1)

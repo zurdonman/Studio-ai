@@ -665,7 +665,27 @@ def test_gemma4_patch_applies_only_verified_patch_and_preserves_changes(tmp_path
 
 def test_gemma4_patch_gated_access_error_is_actionable(tmp_path, monkeypatch):
     from studio.engines import ltx25_gguf_patch as p
-    def denied(**kw): raise RuntimeError('denied')
+    class GatedRepoError(Exception): pass
+    def denied(**kw): raise GatedRepoError('denied with secret')
     monkeypatch.setattr(p, 'hf_hub_download', denied)
-    with pytest.raises(RuntimeError, match='GGUF_GEMMA4_ACCESS'):
+    with pytest.raises(RuntimeError, match='GGUF_GEMMA4_ACCESS') as error:
         p.run(tmp_path, tmp_path/'stamp')
+    assert 'secret' not in str(error.value)
+
+
+def test_gemma4_download_errors_distinguish_auth_network_and_unknown_without_secrets(tmp_path, monkeypatch):
+    from studio.engines import ltx25_gguf_patch as p
+    class LocalEntryNotFoundError(Exception): pass
+    class RevisionNotFoundError(Exception): pass
+    class GatedRepoError(Exception): pass
+    class FakeHttpError(Exception):
+        response = type('Response', (), {'status_code':403})()
+    for error, code in [(LocalEntryNotFoundError('hf_secret'), 'GGUF_GEMMA4_NETWORK'),
+                        (RevisionNotFoundError('hf_secret'), 'GGUF_GEMMA4_RESOURCE'),
+                        (FakeHttpError('hf_secret'), 'GGUF_GEMMA4_ACCESS'),
+                        (ValueError('hf_secret'), 'GGUF_GEMMA4_DOWNLOAD')]:
+        message = p._download_error(error, True)
+        assert code in message and 'hf_secret' not in message and 'token de Studio en el proceso: sí' in message
+    wrapped = LocalEntryNotFoundError('outer')
+    wrapped.__cause__ = GatedRepoError('secret')
+    assert 'GGUF_GEMMA4_ACCESS' in p._download_error(wrapped, False)
