@@ -294,7 +294,9 @@
     const vidDot = $("vid-engine-dot");
     if (vidSlot) {
       vidDot.className = "status-dot loaded";
-      $("vid-engine-state").textContent = `Activo en VRAM: ${vidSlot.name}`;
+      $("vid-engine-state").textContent = vidSlot.model_id === GGUF_MODEL_ID
+        ? "Motor GGUF activo · caché en RAM/VRAM gestionada por Comfy"
+        : `Activo en VRAM: ${vidSlot.name}`;
     } else {
       vidDot.className = "status-dot";
       $("vid-engine-state").textContent = "Sin modelo IA en VRAM (FFmpeg CPU disponible siempre)";
@@ -488,7 +490,7 @@
       toast("Imagen lista y verificada.", "success");
     } else if (job.kind === "video" && res.media_url) {
       showVideoResult(res);
-      toast("Clip de vídeo MP4 listo.", "success");
+      toast(res.duration_warning || "Clip de vídeo MP4 listo.", res.duration_warning ? "error" : "success");
     } else if (job.kind === "tts" && res.media_url) {
       toast(`Locución lista (${res.duration_seconds}s).`, "success");
     } else if (["music_mix", "midi_render"].includes(job.kind) && res.media_url) {
@@ -594,7 +596,7 @@
     if (!btn || !sel || btn.disabled) return;
     const m = state.catalog.find((item) => item.id === sel.value);
     if (m && m.id === GGUF_MODEL_ID) {
-      btn.textContent = m.downloaded ? "🔄 Verificar preparación GGUF" : "⬇ Preparar GGUF (~24 GiB)";
+      btn.textContent = m.loaded_in_memory ? "✅ Motor GGUF activo" : m.downloaded ? "🔄 Verificar preparación GGUF" : "⬇ Preparar GGUF (~24 GiB)";
       return;
     }
     if (!m) {
@@ -1397,9 +1399,20 @@
     }
   }
 
+  function syncGgufControls(modelId) {
+    const gguf = modelId === GGUF_MODEL_ID;
+    ["vid-steps", "vid-steps-slider", "vid-cfg", "btn-steps-fast-safe", "btn-reset-vid-steps"].forEach(id => {
+      if ($(id)) $(id).disabled = gguf;
+    });
+    if (gguf && $("vid-steps-safety-note")) {
+      $("vid-steps-safety-note").textContent = "GGUF destilado: 8 pasos y CFG 1 fijos; otros parámetros de difusión no se aplican.";
+    }
+  }
+
   function applyVideoModelDefaults(modelId) {
     const m = state.catalog.find((x) => x.id === modelId);
     if (!m) return;
+    syncGgufControls(modelId);
     if (m.id === GGUF_MODEL_ID && !["i2v", "t2v"].includes(state.videoSubmode)) {
       state.videoMode = "ai";
       state.videoSubmode = "i2v";
@@ -1439,6 +1452,7 @@
       $("vid-fps").value = spec.default_fps || m.default_fps;
     }
     resetVideoStepsToRecommended();
+    syncGgufControls(modelId);
     syncVideoPrepareButtonLabel();
     syncVideoSubmodeUI();
   }
@@ -1455,7 +1469,7 @@
     sel.innerHTML = vModels
       .map((m) => {
         const st = m.loaded_in_memory
-          ? "🟢 En VRAM"
+          ? (m.id === GGUF_MODEL_ID ? "🟢 Motor activo · caché" : "🟢 En VRAM")
           : m.builtin_no_download
           ? "⚡ 0 GB"
           : m.downloaded
@@ -1490,7 +1504,7 @@
           const diskTxt = m.builtin_no_download
             ? "0 GB (integrado)"
             : m.loaded_in_memory
-            ? "🟢 Activo en VRAM"
+            ? (m.id === GGUF_MODEL_ID ? "🟢 Motor activo · caché" : "🟢 Activo en VRAM")
             : m.downloaded
             ? `💾 En disco (${m.actual_disk_gb || m.estimated_gb} GB)`
             : `☁️ ${m.estimated_gb} GB`;
@@ -1527,6 +1541,7 @@
       else updateVideoStepsSafetyNote();
     } else {
       state.activeVidExtraLoras = {};
+      syncGgufControls("");
       populateVideoLoraSelect("");
       const note = $("vid-steps-safety-note");
       if (note) note.textContent = "Sin modelo seleccionado.";
@@ -3457,10 +3472,10 @@
       if (!["t2v", "i2v"].includes(sub)) return toast("GGUF experimental admite solo Texto→Vídeo o Imagen→Vídeo.", "error");
       const image_rel = sub === "i2v" ? $("vid-source-image").value : null;
       if (sub === "i2v" && !image_rel) return toast("Selecciona un primer fotograma para Imagen→Vídeo.", "error");
-      if (!confirm("GGUF experimental: se comprobarán los recursos y, si falta, se preparará el entorno y se descargarán hasta 24 GiB. El encaje en L4 no está validado. ¿Generar?") ) return;
+      if (!confirm("GGUF experimental: se usarán la resolución, duración y fps elegidos (8 pasos y CFG 1 fijos). Los clips largos consumen más memoria y no están validados en L4. Si falta, se descargarán hasta 24 GiB. ¿Generar?")) return;
       try {
         $("ltx-gguf-error").hidden = true;
-        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0)})});
+        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value)})});
         watchJob(res.job);
       } catch (error) {
         $("ltx-gguf-error").hidden = false;

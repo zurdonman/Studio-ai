@@ -120,6 +120,7 @@ async def studio_lifespan(_app: FastAPI):
     finally:
         model_discovery.stop()
         memory_manager.stop()
+        memory_manager.unload_by_model_id("ltx-2.3-distilled-gguf-q4-experimental")
 
 
 app = FastAPI(
@@ -490,11 +491,11 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
         unknown = {"compatible": False, "tier": "incompatible", "label": "Experimental · encaje sin validar", "sticker": "🧪", "reasons": ["Sin medición de encaje en GPU, RAM y disco; desmarca el filtro para investigar."]}
         models.append({"id": "ltx-2.3-distilled-gguf-q4-experimental", "name": "LTX 2.3 GGUF Q4 · vídeo + audio (experimental)",
                        "category": "video", "engine": "ltx_gguf", "video_modes": ["i2v", "t2v", "av"],
-                       "estimated_gb": 24.1, "downloaded": gguf_files_present(), "loaded_in_memory": False,
+                       "estimated_gb": 24.1, "downloaded": gguf_files_present(), "loaded_in_memory": "ltx-2.3-distilled-gguf-q4-experimental" in loaded_ids,
                        "compatibility": unknown, "ltx_distilled": True,
-                       "official_spec": {"fixed_resolution": [512, 320], "landscape": [512, 320], "portrait": [512, 320], "square": [512, 320],
+                       "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                          "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
-                                         "official_note": "Prueba fija experimental; el encaje en L4 no está validado."}})
+                                         "official_note": "Duración 1–10 s; 8 pasos y CFG 1 fijos. Resolución y clips largos no validados en L4."}})
     for model in models:
         model["hardware_assessment"] = model["compatibility"]
         if model["category"] == "image":
@@ -980,6 +981,10 @@ class LTXGGUFReq(BaseModel):
     negative_prompt: str = Field(default="", max_length=3000)
     image_rel: Optional[str] = None
     seed: int = Field(default=0, ge=0, le=4294967295)
+    width: int = Field(default=512, ge=256, le=768)
+    height: int = Field(default=320, ge=256, le=768)
+    duration_sec: float = Field(default=2.0, ge=1, le=10, allow_inf_nan=False)
+    fps: int = Field(default=24, ge=8, le=30)
 
 
 @app.post("/api/video/ltx-gguf/prepare")
@@ -995,11 +1000,14 @@ def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
     from studio.engines.ltx_gguf_backend import generate_gguf
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Describe la escena.")
+    if req.width % 32 or req.height % 32 or req.width * req.height > 768 * 512:
+        raise HTTPException(status_code=400, detail="GGUF: ancho y alto deben ser múltiplos de 32 y su área no puede superar 768×512.")
     image = _resolve_media_rel(req.image_rel) if req.image_rel else None
     if req.image_rel and image is None:
         raise HTTPException(status_code=400, detail="La imagen no está disponible.")
     job = job_manager.submit(kind="video", title="LTX 2.3 GGUF Q4 · audio y vídeo (experimental)",
-        fn=lambda j: generate_gguf(image_path=image, prompt=req.prompt, negative_prompt=req.negative_prompt, seed=req.seed, job=j))
+        fn=lambda j: generate_gguf(image_path=image, prompt=req.prompt, negative_prompt=req.negative_prompt, seed=req.seed,
+                                   width=req.width, height=req.height, duration_sec=req.duration_sec, fps=req.fps, job=j))
     return {"ok": True, "job": job.to_dict()}
 
 

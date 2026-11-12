@@ -19,8 +19,8 @@ def make_graph(*, prompt: str, negative_prompt: str, width: int, height: int,
         raise ValueError("El prompt no puede estar vacío")
     if width < 256 or height < 256 or width % 32 or height % 32 or width * height > 768 * 512:
         raise ValueError("Resolución experimental: múltiplos de 32, mínimo 256 y máximo 768×512 píxeles")
-    if frames < 9 or frames > 121 or (frames - 1) % 8 or not math.isfinite(fps) or not 1 <= fps <= 30:
-        raise ValueError("Frames deben cumplir 8n+1 y ser 9–121; fps entre 1 y 30")
+    if frames < 9 or frames > 305 or (frames - 1) % 8 or not math.isfinite(fps) or not 1 <= fps <= 30:
+        raise ValueError("Frames deben cumplir 8n+1 y ser 9–305; fps entre 1 y 30")
     if not 0 <= seed <= 2**63 - 1:
         raise ValueError("Semilla fuera de rango")
     for name in [model, text_encoder, connectors, video_vae, audio_vae, *([image_name] if image_name else [])]:

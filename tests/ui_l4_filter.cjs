@@ -88,10 +88,13 @@ const model = (id, fit, extra = {}) => ({
   $("vsub-t2v").click();
   if ($("select-video-model").value !== ggufId) throw Error("Switching supported submode changed GGUF selection");
   $("vid-prompt").value = "A person waves";
+  $("vid-width").value = "512"; $("vid-height").value = "320";
+  $("vid-duration").value = "10"; $("vid-fps").value = "24";
+  if (!$("vid-steps").disabled || !$("vid-cfg").disabled) throw Error("GGUF fixed settings not disabled");
   $("btn-run-video").click();
   await wait(20);
   const ggufRequest = requests.find(r => r.path === "/api/video/ltx-gguf" && r.method === "POST");
-  if (!ggufRequest || JSON.parse(ggufRequest.body).prompt !== "A person waves") throw Error("GGUF generation used wrong endpoint");
+  if (!ggufRequest || JSON.parse(ggufRequest.body).prompt !== "A person waves" || JSON.parse(ggufRequest.body).duration_sec !== 10 || JSON.parse(ggufRequest.body).width !== 512) throw Error("GGUF generation used wrong endpoint or parameters");
   pill("L4").click(); pill("T4").click();
   await wait(110);
   if (ids().length !== 0 || !w.document.querySelector('#vid-gpu-pills [data-gpu="T4"]').classList.contains("active")) throw Error("Stale profile response overrode newer selection");

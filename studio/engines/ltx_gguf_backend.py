@@ -5,8 +5,13 @@ peak memory. A private child process holds GPU only for the duration of a job.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 import os
+import queue
+import threading
+import uuid
 import shutil
 import signal
 import socket
@@ -26,12 +31,14 @@ from studio.engines.ltx_gguf_manifest import FILES
 from studio.engines.ltx_gguf_workflow import make_graph
 from studio.hardware import hardware_tracker, query_gpu_info
 from studio.memory_manager import memory_manager, serialized_gpu_operation
-from studio.memory_policy import pressure
+from studio.memory_policy import host_memory, pressure
 
 COMFY_COMMIT = "7ad7adb38f6cbb6c2b0713d3bd44c3fb2b9c8ebe"
 GGUF_COMMIT = "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
 ROOT = DATA_ROOT / "runtimes" / "ltx23-gguf"
 WEIGHTS = DATA_ROOT / "models" / "ltx23-gguf-q4"
+MODEL_ID = "ltx-2.3-distilled-gguf-q4-experimental"
+_verified_fingerprint = None
 
 
 def _stop(proc: subprocess.Popen) -> None:
@@ -60,8 +67,19 @@ def _command(args: list[str], job: Any, *, stage: str, timeout: int, env: dict |
                     log.flush(); log.seek(offset)
                     lines = log.read(8192).decode("utf-8", "replace").replace("\r", "\n").splitlines()
                     offset = log.tell()
-                    visible = [line for line in lines if line.startswith("[") and ("Comprobando" in line or "Verificado" in line)]
-                    if visible:
+                    progress_lines = [line for line in lines if line.startswith("GGUF_PROGRESS:")]
+                    visible = [line for line in lines if line.startswith("[") and ("Preparando" in line or "Verificado" in line)]
+                    if progress_lines:
+                        try:
+                            p = json.loads(progress_lines[-1].split(":", 1)[1])
+                            pct = 100 * p["done"] / p["total"] if p["total"] else 0
+                            progress_span = 85 if job.kind == "download" else 30
+                            job.heartbeat(progress=5 + progress_span * min(1, max(0, p["overall"])),
+                                          step=f"{p['phase'].capitalize()} {p['role']}: {pct:.1f}%",
+                                          speed_text=f"{p['done'] / 1024**3:.2f} / {p['total'] / 1024**3:.2f} GiB")
+                        except (ValueError, KeyError, TypeError):
+                            job.heartbeat(step=stage)
+                    elif visible:
                         job.log(visible[-1][:180], step=stage)
                     else:
                         job.heartbeat(step=stage)
@@ -203,7 +221,7 @@ def _free_port() -> int:
 
 def _check_pressure() -> None:
     state = pressure(hardware_tracker.get_snapshot())
-    if state["level"] == "critical":
+    if state["level"] in ("critical", "unknown"):
         raise RuntimeError("GGUF_MEMORY_CRITICAL: memoria libre crítica; se detuvo el proceso experimental sin borrar pesos")
 
 
@@ -222,8 +240,10 @@ def _runtime_env() -> dict:
 
 def _server_command(port: int, input_dir: Path, output_dir: Path) -> list[str]:
     source = ROOT / "comfy"
+    ram_reserve = max(2.0, host_memory()["total_gb"] * 0.1)
     return [str(ROOT / "venv/bin/python"), str(source / "main.py"), "--listen", "127.0.0.1", "--port", str(port),
             "--disable-auto-launch", "--offline", "--disable-metadata", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "ComfyUI-GGUF",
+            "--cache-ram", f"{ram_reserve:.2f}", f"{ram_reserve:.2f}",
             "--input-directory", str(input_dir), "--output-directory", str(output_dir), "--reserve-vram", "1.8"]
 
 
@@ -262,65 +282,187 @@ def _probe_runtime(job: Any) -> None:
             _stop(proc)
 
 
-def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any) -> Path:
-    source = ROOT / "comfy"
-    port = _free_port()
-    base = f"http://127.0.0.1:{port}"
-    with tempfile.TemporaryFile() as logfile:
-        proc = subprocess.Popen(_server_command(port, input_dir, output_dir), cwd=source, env=_runtime_env(), stdout=logfile, stderr=subprocess.STDOUT, start_new_session=True)
+class _ResidentComfy:
+    """Comfy cache owned by the video slot. Unload stops the process and frees its GPU."""
+    def __init__(self, job: Any, names: dict[str, str]):
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(prefix="ltx-gguf-session-", dir=TEMP_DIR)
+        self.root = Path(self.temp.name)
+        self.input_dir, self.output_dir = self.root / "input", self.root / "output"
+        self.input_dir.mkdir(); self.output_dir.mkdir()
+        self.names = names
+        self.port = _free_port()
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.log = tempfile.TemporaryFile()
+        self.proc = None
         try:
-            _wait_server(proc, base, logfile, job)
-            reply = requests.post(base + "/prompt", json={"prompt": graph}, timeout=20)
-            if not reply.ok:
-                raise RuntimeError(f"GGUF_GRAPH_REJECTED: {reply.text[:1200]}")
-            ident = reply.json()["prompt_id"]
-            job.log("Grafo aceptado: generando vídeo y audio en un proceso aislado. Primera prueba sin validar en GPU.", step="Generando GGUF")
-            deadline = time.monotonic() + 3600
-            while time.monotonic() < deadline:
-                job.check_cancelled(); _check_pressure()
-                if proc.poll() is not None:
-                    raise RuntimeError("GGUF_ENGINE_EXITED: ComfyUI finalizó durante la generación")
-                data = requests.get(base + "/history/" + ident, timeout=10).json().get(ident)
-                if data:
-                    status = data.get("status") or {}
-                    if status.get("status_str") == "error":
-                        messages = status.get("messages") or []
-                        detail = next((str(x[1].get("exception_message", "")) for x in messages if len(x) > 1 and isinstance(x[1], dict) and x[0] == "execution_error"), "Error desconocido")
-                        raise RuntimeError("GGUF_INFERENCE_FAILED: " + detail[:800])
-                    if status.get("completed"):
-                        paths = list(output_dir.glob("studio_gguf_*.mp4"))
-                        if len(paths) != 1:
-                            raise RuntimeError("GGUF_OUTPUT_MISSING: no se produjo un MP4 único")
-                        return paths[0]
-                job.heartbeat(step="Generando vídeo y audio GGUF; puede tardar varios minutos")
-                time.sleep(2)
-            raise TimeoutError("GGUF_INFERENCE_TIMEOUT: límite de 60 minutos")
-        finally:
-            _stop(proc)
+            self.proc = subprocess.Popen(_server_command(self.port, self.input_dir, self.output_dir), cwd=ROOT / "comfy",
+                                         env=_runtime_env(), stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
+            _wait_server(self.proc, self.base, self.log, job)
+        except BaseException:
+            self.unload()
+            raise
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def unload(self) -> None:
+        if self.proc is not None:
+            _stop(self.proc)
+            self.proc = None
+        self.log.close()
+        self.temp.cleanup()
 
 
-def _prepare_gguf(job: Any) -> dict[str, str]:
+def _resident() -> _ResidentComfy | None:
+    slot = memory_manager.get_slot("video")
+    if not slot or slot.get("model_id") != MODEL_ID:
+        return None
+    session = slot.get("handle")
+    if not isinstance(session, _ResidentComfy) or not session.alive():
+        memory_manager.unload_slot("video")
+        return None
+    return session
+
+
+def _open_resident(job: Any, names: dict[str, str]) -> _ResidentComfy:
+    session = _resident()
+    if session is not None:
+        return session
+    session = _ResidentComfy(job, names)
+    try:
+        memory_manager.register_loaded("video", MODEL_ID, "LTX 2.3 GGUF · motor activo", session)
+    except BaseException:
+        session.unload()
+        raise
+    return session
+
+
+def _events_listener(base: str, client_id: str, events: queue.Queue, stop: threading.Event, ready: threading.Event) -> None:
+    async def listen():
+        import aiohttp
+        async with aiohttp.ClientSession() as client:
+            async with client.ws_connect(base + "/ws", params={"clientId": client_id}, timeout=5) as ws:
+                ready.set()
+                while not stop.is_set():
+                    try:
+                        msg = await asyncio.wait_for(ws.receive(), timeout=1)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        events.put(msg.json())
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+    try:
+        asyncio.run(listen())
+    except Exception:
+        ready.set()  # History polling remains available if websocket is unavailable.
+
+
+def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any) -> Path:
+    session = _resident()
+    if session is None:
+        raise RuntimeError("GGUF_ENGINE_EXITED: el motor aislado no está activo")
+    client_id = uuid.uuid4().hex
+    events: queue.Queue = queue.Queue()
+    stop, ready = threading.Event(), threading.Event()
+    thread = threading.Thread(target=_events_listener, args=(session.base, client_id, events, stop, ready), daemon=True)
+    thread.start()
+    ready.wait(6)
+    try:
+        reply = requests.post(session.base + "/prompt", json={"prompt": graph, "client_id": client_id}, timeout=20)
+        if not reply.ok:
+            raise RuntimeError(f"GGUF_GRAPH_REJECTED: {reply.text[:1200]}")
+        ident = reply.json()["prompt_id"]
+        job.log("Grafo aceptado. Comfy conserva su caché mientras haya memoria suficiente.", progress=40, step="Cargando componentes GGUF")
+        deadline = time.monotonic() + 3600
+        current_node = None
+        names = {"1":"transformer", "2":"codificador de texto", "3":"VAE vídeo", "4":"VAE audio",
+                 "15":"difusión", "17":"decodificación de vídeo", "18":"decodificación de audio"}
+        while time.monotonic() < deadline:
+            job.check_cancelled(); _check_pressure()
+            if not session.alive():
+                raise RuntimeError("GGUF_ENGINE_EXITED: ComfyUI finalizó durante la generación")
+            while not events.empty():
+                event = events.get_nowait()
+                data = event.get("data") or {}
+                if data.get("prompt_id") not in (None, ident):
+                    continue
+                if event.get("type") == "execution_cached":
+                    cached = [names[str(node)] for node in data.get("nodes", []) if str(node) in ("1", "2", "3", "4")]
+                    if cached:
+                        job.log("Comfy reutiliza de caché: " + ", ".join(cached), step="Reutilizando componentes GGUF")
+                elif event.get("type") == "executing":
+                    current_node = str(data.get("node") or "")
+                    if current_node in names:
+                        job.heartbeat(step=f"GGUF: {names[current_node]} · progreso no disponible", speed_text="")
+                elif event.get("type") == "progress" and data.get("max"):
+                    value, maximum = float(data.get("value", 0)), float(data["max"])
+                    pct = max(0, min(100, value / maximum * 100))
+                    node = str(data.get("node") or current_node or "")
+                    step = names.get(node, "procesando")
+                    total_progress = 45 + 45 * pct / 100 if node == "15" else None
+                    job.heartbeat(progress=total_progress, step=f"GGUF {step}: {pct:.1f}%", speed_text=f"{value:g}/{maximum:g}")
+            data = requests.get(session.base + "/history/" + ident, timeout=10).json().get(ident)
+            if data:
+                status = data.get("status") or {}
+                if status.get("status_str") == "error":
+                    messages = status.get("messages") or []
+                    detail = next((str(x[1].get("exception_message", "")) for x in messages if len(x) > 1 and isinstance(x[1], dict) and x[0] == "execution_error"), "Error desconocido")
+                    raise RuntimeError("GGUF_INFERENCE_FAILED: " + detail[:800])
+                if status.get("completed"):
+                    prefix = graph["20"]["inputs"]["filename_prefix"]
+                    paths = list(output_dir.glob(prefix + "_*.mp4"))
+                    if len(paths) != 1:
+                        raise RuntimeError("GGUF_OUTPUT_MISSING: no se produjo un MP4 único")
+                    job.heartbeat(progress=96, step="Verificando audio y vídeo")
+                    return paths[0]
+            job.heartbeat()
+            time.sleep(1)
+        raise TimeoutError("GGUF_INFERENCE_TIMEOUT: límite de 60 minutos")
+    finally:
+        stop.set()
+        thread.join(timeout=3)
+
+
+def _fingerprint():
+    try:
+        return tuple((_artifact_path(role).stat().st_size, _artifact_path(role).stat().st_mtime_ns,
+                      _artifact_path(role).stat().st_ino) for role, _, _, _, _, _ in FILES)
+    except OSError:
+        return None
+
+
+def _prepare_gguf(job: Any, *, extra_ram: float = 0, extra_vram: float = 0) -> dict[str, str]:
+    global _verified_fingerprint
     gpu = query_gpu_info()
     if not gpu.get("has_gpu") or not gpu.get("bf16_supported") or float(gpu.get("vram_total_gb") or 0) < 16:
         raise RuntimeError("GGUF_GPU_UNSUPPORTED: se necesita una GPU BF16 con al menos 16 GiB; no se descargó nada")
-    # Lower bounds are guardrails, not a measured memory budget or compatibility guarantee.
-    for slot in ("video", "image", "vision"):
-        if memory_manager.get_slot(slot):
-            job.log(f"Liberando {slot} de memoria; sus archivos en disco se conservan")
-            memory_manager.unload_slot(slot)
-    memory_manager.ensure_capacity(ram_gb=32, vram_gb=14, stage="Prueba GGUF experimental (mínimos preventivos, no medición)", job=job)
+    session = _resident()
+    if session is not None:
+        memory_manager.ensure_capacity(ram_gb=extra_ram, vram_gb=extra_vram, stage="GGUF residente: margen adicional estimado", job=job)
+        job.log("Reutilizando motor GGUF y su caché; Comfy puede mover o liberar pesos según la presión de memoria.")
+        return session.names
+    slot = memory_manager.get_slot("video")
+    if slot:
+        job.log("Liberando el modelo de vídeo anterior; los archivos en disco se conservan")
+        memory_manager.unload_slot("video")
+    memory_manager.ensure_capacity(ram_gb=32 + extra_ram, vram_gb=14 + extra_vram, stage="Preparación GGUF (márgenes preventivos, no medición)", job=job)
     ROOT.mkdir(parents=True, exist_ok=True)
     remaining = sum(size for role, _, _, _, size, _ in FILES if not _artifact_path(role).is_file() or _artifact_path(role).stat().st_size != size)
     required = remaining + 10 * 1024**3
     if shutil.disk_usage(ROOT).free < required:
         raise RuntimeError(f"GGUF_DISK_LOW: se requieren {required / 1024**3:.1f} GiB libres para archivos restantes y entorno")
-    job.log("Experimental: descarga GGUF y componentes, CPU offload y control de memoria. No se ha probado en L4.")
     _install(job)
-    job.log("Comprobando nodos GGUF antes de descargar los pesos.")
-    _probe_runtime(job)
-    _prepare_models(job)
-    names = _make_model_links(ROOT / "comfy")
-    return names
+    fingerprint = _fingerprint()
+    if fingerprint is None or fingerprint != _verified_fingerprint:
+        job.log("Comprobando nodos GGUF antes de descargar/verificar pesos.")
+        _probe_runtime(job)
+        _prepare_models(job)
+        _verified_fingerprint = _fingerprint()
+    else:
+        job.log("Componentes GGUF ya verificados en esta sesión y sin cambios; no se recalculan los hashes.")
+    return _make_model_links(ROOT / "comfy")
 
 
 def gguf_files_present() -> bool:
@@ -334,49 +476,85 @@ def gguf_files_present() -> bool:
         return False
 
 
-@serialized_gpu_operation(slots=(), managed=True)
+@serialized_gpu_operation(slots=("video",), managed=True)
 def prepare_gguf(*, job: Any) -> dict:
     _prepare_gguf(job)
     return {"prepared": True, "note": "Archivos y entorno preparados; el modelo se carga durante la generación, no queda en VRAM."}
 
 
-@serialized_gpu_operation(slots=(), managed=True)
-def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any) -> dict:
+def frames_for_duration(duration_sec: float, fps: int) -> int:
+    if not math.isfinite(duration_sec) or not 1 <= duration_sec <= 10 or not 8 <= fps <= 30:
+        raise ValueError("Duración GGUF de 1 a 10 segundos y fps de 8 a 30")
+    # LTX requires 8n+1 frames. The closest valid length can differ slightly.
+    return max(9, min(305, 8 * round((duration_sec * fps - 1) / 8) + 1))
+
+
+@serialized_gpu_operation(slots=("video",), managed=True)
+def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any,
+                  width: int = 512, height: int = 320, duration_sec: float = 2.0, fps: int = 24) -> dict:
     started = time.monotonic()
     if not prompt.strip():
         raise ValueError("Describe la escena")
     if image_path is not None:
         verify_image_file(image_path)
-    names = _prepare_gguf(job)
-    memory_manager.ensure_capacity(ram_gb=32, vram_gb=14, stage="Inicio GGUF experimental", job=job)
+    frames = frames_for_duration(duration_sec, fps)
+    if width < 256 or height < 256 or width % 32 or height % 32 or width * height > 768 * 512:
+        raise ValueError("GGUF: dimensiones múltiplos de 32 y área máxima 768×512")
+    # Extra workload is a guardrail, not a measured peak. A longer clip may still OOM.
+    scale = width * height * frames / (512 * 320 * 49)
+    extra_ram = max(0.0, scale - 1) * 2
+    extra_vram = max(0.0, scale - 1) * 0.5
+    names = _prepare_gguf(job, extra_ram=extra_ram, extra_vram=extra_vram)
+    resident = _resident()
+    if resident is None:
+        memory_manager.ensure_capacity(ram_gb=32 + extra_ram, vram_gb=14 + extra_vram, stage="Inicio GGUF: carga y parámetros solicitados (estimación no medida)", job=job)
+    else:
+        memory_manager.ensure_capacity(ram_gb=extra_ram, vram_gb=extra_vram, stage="GGUF residente: margen adicional por parámetros (estimación no medida)", job=job)
+    session = _open_resident(job, names)
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
     seed = int(seed) if seed else int.from_bytes(os.urandom(4), "big")
-    with tempfile.TemporaryDirectory(prefix="ltx-gguf-", dir=TEMP_DIR) as tmp:
-        tmp = Path(tmp); inp, out = tmp / "input", tmp / "output"; inp.mkdir(); out.mkdir()
-        image_name = None
+    job.log(f"GGUF: {width}×{height}, {frames} fotogramas a {fps} fps (~{frames / fps:.2f} s), 8 pasos fijos. La duración se ajusta a 8n+1.")
+    suffix = uuid.uuid4().hex
+    image_name = None
+    generated = None
+    try:
         if image_path is not None:
-            image_name = "frame.png"
+            image_name = f"frame_{suffix}.png"
             from PIL import Image
             with Image.open(image_path) as im:
-                im.convert("RGB").save(inp / image_name)
-        graph = make_graph(prompt=prompt, negative_prompt=negative_prompt, width=512, height=320, frames=49, fps=24,
+                im.convert("RGB").save(session.input_dir / image_name)
+        graph = make_graph(prompt=prompt, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
                            seed=seed, image_name=image_name, model=names["dit"], text_encoder=names["text_encoder"],
                            connectors=names["connectors"], video_vae=names["video_vae"], audio_vae=names["audio_vae"])
-        generated = _infer(graph, inp, out, job)
+        graph["20"]["inputs"]["filename_prefix"] = f"studio_gguf_{suffix}"
+        generated = _infer(graph, session.input_dir, session.output_dir, job)
         info = probe_media_info(generated)
         if not info.get("has_video") or not info.get("has_audio"):
             raise RuntimeError("GGUF_OUTPUT_INVALID: falta vídeo o audio en el resultado; no se publicará")
+        actual_duration = info.get("duration_seconds") or 0
+        duration_warning = None
+        if actual_duration and abs(actual_duration - frames / fps) > max(.3, 2 / fps):
+            duration_warning = f"Duración medida {actual_duration:.2f} s; esperada ~{frames / fps:.2f} s. Revisa el resultado."
+            job.log(duration_warning, level="warning", step="Aviso de duración")
         name = f"ltx_gguf_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{seed % 100000}.mp4"
         dest = VIDEOS_OUT_DIR / name
         if dest.exists():
             raise RuntimeError("GGUF_OUTPUT_COLLISION: no se sobrescribirá el vídeo existente")
         shutil.copyfile(generated, dest)
+    except BaseException:
+        # An interrupt or failed graph may leave Comfy executing or its cache inconsistent.
+        memory_manager.unload_slot("video")
+        raise
+    finally:
+        if image_name:
+            (session.input_dir / image_name).unlink(missing_ok=True)
+        if generated:
+            generated.unlink(missing_ok=True)
     meta = {"id": dest.stem, "filename": name, "rel_path": f"outputs/videos/{name}", "media_url": f"/media/outputs/videos/{name}",
-            "type": "video", "model_id": "ltx-2.3-distilled-gguf-q4-experimental", "model_name": "LTX 2.3 destilado GGUF Q4 experimental",
+            "type": "video", "model_id": MODEL_ID, "model_name": "LTX 2.3 destilado GGUF Q4 experimental",
             "video_submode": "i2v" if image_path else "t2v", "audio_native": True, "prompt": prompt, "seed": seed,
-            "width": info.get("width"), "height": info.get("height"), "duration_seconds": info.get("duration_seconds"), "fps": 24, "steps": 8,
-            "guidance_scale": 1.0, "elapsed_seconds": round(time.monotonic() - started, 2),
+            "width": info.get("width"), "height": info.get("height"), "duration_seconds": info.get("duration_seconds"), "fps": fps, "steps": 8,
+            "requested_duration_sec": duration_sec, "frames": frames, "duration_warning": duration_warning, "guidance_scale": 1.0, "elapsed_seconds": round(time.monotonic() - started, 2),
             "created_at": datetime.now().isoformat(timespec="seconds")}
     (VIDEOS_OUT_DIR / (dest.stem + ".json")).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf8")
     return meta
