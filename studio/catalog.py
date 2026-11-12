@@ -2191,7 +2191,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         },
         "description": (
             "Modelo multimodal de 19B de Lightricks que genera vídeo (desde texto, 1 imagen o Frame a Frame) "
-            "y pista de audio sincronizada a la vez. Óptimo en A100/H100."
+            "y pista de audio sincronizada a la vez. Sin prueba GPU en Studio."
         ),
         "estimated_gb": 58.0,
         "min_vram_gb": 21.5,
@@ -2208,6 +2208,54 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
                 "allow_patterns": _DIFFUSERS_VIDEO_ALLOW,
             }
         ],
+    },
+    {
+        "id": "ltx-2.3-full-av",
+        "name": "LTX-2.3 22B Completo · Audio+Vídeo (experimental)",
+        "category": "video", "is_default": False,
+        "badge": "22B fabricante · completo · GPU no validada",
+        "video_modes": ["t2v", "i2v", "flf2v"],
+        "default_fps": 24, "default_steps": 40, "default_cfg": 4.0, "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [768, 512], "portrait": [512, 768], "square": [640, 640],
+            "max_area": 512 * 768, "mod_value": 32, "frame_rule": "8k+1",
+            "default_frames": 121, "default_duration_sec": 5.0, "default_fps": 24,
+            "default_steps": 40, "default_cfg": 4.0, "prompt_lang": "en",
+            "official_note": "Modelo completo, una etapa, 40 pasos/CFG 4; no probado en GPU."
+        },
+        "description": "LTX-2.3 completo con audio nativo. Lightricks lo denomina 22B; no es el destilado ni una ruta de voz de referencia. Pesos Diffusers grandes, sin prueba GPU.",
+        "validation_state": "reviewed_recipe", "gpu_tested": False,
+        "estimated_gb": 90.0, "min_ram_gb": 100.0, "min_vram_gb": 24.0,
+        "recommended_vram_gb": 48.0, "resource_confidence": "engineering_estimate",
+        "l4_seconds_hint": "No validado en L4; requiere mucha RAM y disco",
+        "engine": "ltx2_full_av", "ltx_large": True,
+        "artifacts": [{"role": "base", "repo_id": "diffusers/LTX-2.3-Diffusers", "subdir": "base", "filename": None,
+                       "verify_file": "model_index.json", "required_shard_indexes": ["text_encoder/model.safetensors.index.json", "transformer/diffusion_pytorch_model.safetensors.index.json"],
+                       "allow_patterns": _DIFFUSERS_VIDEO_ALLOW}],
+    },
+    {
+        "id": "ltx-2.5-full-av",
+        "name": "LTX-2.5 22B Completo / SFT · Audio+Vídeo (experimental)",
+        "category": "video", "is_default": False,
+        "badge": "22B fabricante · completo · acceso HF restringido",
+        "video_modes": ["t2v", "i2v", "flf2v"],
+        "default_fps": 24, "default_steps": 30, "default_cfg": 3.0, "default_duration_sec": 5.0,
+        "official_spec": {
+            "landscape": [768, 512], "portrait": [512, 768], "square": [640, 640],
+            "max_area": 512 * 768, "mod_value": 32, "frame_rule": "8k+1",
+            "default_frames": 121, "default_duration_sec": 5.0, "default_fps": 24,
+            "default_steps": 30, "default_cfg": 3.0, "prompt_lang": "en",
+            "official_note": "Transformer completo + scheduler SFT; una etapa. Sin refinador ni prueba GPU."
+        },
+        "description": "Transformer completo 22B SFT, audio y vídeo nativos. Requiere aceptar acceso de LTX-2.5-Diffusers en Hugging Face; sin prueba GPU ni voz de referencia.",
+        "validation_state": "reviewed_recipe", "gpu_tested": False,
+        "estimated_gb": 75.0, "min_ram_gb": 80.0, "min_vram_gb": 24.0,
+        "recommended_vram_gb": 48.0, "resource_confidence": "engineering_estimate",
+        "l4_seconds_hint": "No validado; la receta BF16 puede superar la RAM de Colab",
+        "engine": "ltx2_full_av", "ltx_large": True, "ltx_full_transformer": True,
+        "artifacts": [{"role": "base", "repo_id": "Lightricks/LTX-2.5-Diffusers", "subdir": "base", "filename": None,
+                       "verify_file": "model_index.json", "required_shard_indexes": ["text_encoder/model.safetensors.index.json", "transformer_full/diffusion_pytorch_model.safetensors.index.json"],
+                       "allow_patterns": [p for p in _DIFFUSERS_VIDEO_ALLOW if p != "transformer/*"] + ["transformer_full/*"]}],
     },
     {
         "id": "ltx-2.3-distilled-av",
@@ -3062,6 +3110,20 @@ class CatalogManager:
                     return False
             elif not sub.exists():
                 return False
+            for index_name in art.get("required_shard_indexes", []):
+                try:
+                    index = sub / index_name
+                    weight_map = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
+                    if not isinstance(weight_map, dict) or not weight_map:
+                        return False
+                    for name in set(weight_map.values()):
+                        if not isinstance(name, str) or Path(name).name != name:
+                            return False
+                        shard = index.parent / name
+                        if not shard.is_file() or shard.stat().st_size == 0:
+                            return False
+                except (OSError, ValueError, KeyError, TypeError):
+                    return False
         if defn.get("category") == "image" and not image_recipe_files_complete(defn, m_dir / "base"):
             return False
         return True

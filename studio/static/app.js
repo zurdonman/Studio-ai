@@ -7,7 +7,7 @@
     catalogFilter: "all",
     gpuProfile: "auto",
     activeGpuProfile: null,
-    vidOnlyCompat: true,
+    vidOnlyCompat: false,
     catOnlyCompat: false,
     hfSearchResults: [],
     hfOffset: 0,

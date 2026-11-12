@@ -1731,10 +1731,24 @@ def _instantiate_video_pipeline(
             "active_mode": "unified",
         }
 
-    if engine in ("ltx2_av", "ltx2_distilled_av"):
+    if engine in ("ltx2_av", "ltx2_distilled_av", "ltx2_full_av"):
         from diffusers import LTX2ConditionPipeline, LTX2Pipeline  # type: ignore
 
-        pipe_cond = guarded_model_load(LTX2ConditionPipeline.from_pretrained, bdir, torch_dtype=torch.bfloat16)
+        load_kwargs = {"torch_dtype": torch.bfloat16}
+        if (defn or {}).get("id") in ("ltx-2.5-full-av", "ltx-2.5-distilled-av"):
+            # These optional model-index components are not part of the one-stage recipe.
+            load_kwargs.update(prompt_enhancer=None, duration_head=None)
+        if (defn or {}).get("ltx_full_transformer"):
+            from diffusers import FlowMatchEulerDiscreteScheduler, LTX2VideoTransformer3DModel
+            load_kwargs["transformer"] = guarded_model_load(
+                LTX2VideoTransformer3DModel.from_pretrained, bdir,
+                subfolder="transformer_full", torch_dtype=torch.bfloat16, local_files_only=True,
+            )
+        pipe_cond = guarded_model_load(LTX2ConditionPipeline.from_pretrained, bdir, local_files_only=True, **load_kwargs)
+        if (defn or {}).get("ltx_full_transformer"):
+            pipe_cond.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+                pipe_cond.scheduler.config, use_dynamic_shifting=True, shift_terminal=0.1,
+            )
         return {
             "pipe": pipe_cond,
             "all_components": dict(pipe_cond.components),
@@ -1895,20 +1909,27 @@ def _load_video_model_into_memory_locked(
             f"Faltan librerías de vídeo/GPU ({exc}). En Colab se instalan automáticamente."
         ) from exc
 
-    if defn.get("ltx_distilled"):
+    if defn.get("ltx_distilled") or defn.get("ltx_large"):
         # Validate the runtime before starting a many-gigabyte download.
         try:
             from diffusers import LTX2ConditionPipeline, LTX2Pipeline, FlowMatchEulerDiscreteScheduler  # noqa: F401
-            from diffusers.pipelines.ltx2.utils import DISTILLED_SIGMA_VALUES  # noqa: F401
-            from transformers import Gemma4UnifiedForConditionalGeneration  # noqa: F401
+            if defn.get("ltx_distilled"):
+                from diffusers.pipelines.ltx2.utils import DISTILLED_SIGMA_VALUES  # noqa: F401
+            if defn.get("ltx_full_transformer") or model_id == "ltx-2.5-distilled-av":
+                from transformers import Gemma4UnifiedForConditionalGeneration  # noqa: F401
+            if defn.get("ltx_full_transformer"):
+                from diffusers import LTX2VideoTransformer3DModel  # noqa: F401
         except (ImportError, AttributeError) as exc:
-            raise RuntimeError("LTX_DISTILLED_RUNTIME_INCOMPATIBLE: faltan componentes de Diffusers/Transformers; reinicia Studio para instalar las dependencias de Colab.") from exc
+            raise RuntimeError("LTX_RUNTIME_INCOMPATIBLE: faltan componentes de Diffusers/Transformers; reinicia Studio para instalar las dependencias de Colab.") from exc
 
     if not torch.cuda.is_available():
         raise RuntimeError(
             "No hay GPU activa en este entorno (modo CPU). "
             "Puedes usar «Cámara FFmpeg (0 GB)» o ejecutar en Google Colab con GPU."
         )
+
+    if defn.get("ltx_large") and torch.cuda.get_device_capability()[0] < 8:
+        raise RuntimeError("LTX_BF16_UNSUPPORTED: esta receta BF16 requiere una GPU con soporte nativo BF16; no se inicia la descarga automática.")
 
     if not auto_download and not catalog_manager.is_downloaded(model_id):
         raise RuntimeError(f"«{defn['name']}» no está descargado. No se modifica la memoria ni el disco.")
@@ -1998,7 +2019,7 @@ def _load_video_model_into_memory_locked(
 
         # Model CPU offload would attempt to move the entire >40 GB BF16
         # denoiser onto smaller cards. Prefer sequential offload for this recipe.
-        offload_threshold = max(min_vram, vram_total) if defn.get("ltx_distilled") else min_vram
+        offload_threshold = max(min_vram, vram_total) if (defn.get("ltx_distilled") or defn.get("ltx_large")) else min_vram
         _apply_best_offload(pipe, vram_total, offload_threshold, job=job, pct=_map_pct(0.92))
 
         vram_gb = query_gpu_info()["vram_used_gb"]
@@ -2588,7 +2609,7 @@ def generate_video_clip(
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["wan"]
     elif engine == "sana_video":
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["sana"]
-    elif engine in ("ltx_video", "ltx_video_distilled", "ltx2_av", "ltx2_distilled_av"):
+    elif engine in ("ltx_video", "ltx_video_distilled", "ltx2_av", "ltx2_distilled_av", "ltx2_full_av"):
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["ltx"]
     else:
         eff_neg = OFFICIAL_NEGATIVE_PROMPTS["default"]
@@ -2610,7 +2631,7 @@ def generate_video_clip(
     elif "num_frames" in call_sig:
         kwargs["num_frames"] = num_frames
     if "frame_rate" in call_sig:
-        kwargs["frame_rate"] = float(fps) if engine in ("ltx2_av", "ltx2_distilled_av") else int(fps)
+        kwargs["frame_rate"] = float(fps) if engine in ("ltx2_av", "ltx2_distilled_av", "ltx2_full_av") else int(fps)
     if engine == "cogvideox_i2v" and "use_dynamic_cfg" in call_sig:
         kwargs["use_dynamic_cfg"] = True
     if "callback_on_step_end" in call_sig:
@@ -2664,7 +2685,7 @@ def generate_video_clip(
                 LTXVideoCondition(image=img_pil, frame_index=0),
                 LTXVideoCondition(image=end_pil, frame_index=num_frames - 1),
             ]
-    elif engine in ("ltx2_av", "ltx2_distilled_av"):
+    elif engine in ("ltx2_av", "ltx2_distilled_av", "ltx2_full_av"):
         if submode in ("i2v", "flf2v") and img_pil is not None:
             from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition  # type: ignore
 
@@ -2684,7 +2705,7 @@ def generate_video_clip(
     generated_audio_wav: Optional[Path] = None
     checkpoint_current_operation(job=job, force=True)
     try:
-        if engine in ("ltx2_av", "ltx2_distilled_av"):
+        if engine in ("ltx2_av", "ltx2_distilled_av", "ltx2_full_av"):
             kwargs["output_type"] = "np"
             kwargs["return_dict"] = False
             res_tuple = pipe(**kwargs)
