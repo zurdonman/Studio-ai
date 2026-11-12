@@ -251,13 +251,7 @@ def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any) -> Path:
             _stop(proc)
 
 
-@serialized_gpu_operation(slots=(), managed=True)
-def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any) -> dict:
-    started = time.monotonic()
-    if not prompt.strip():
-        raise ValueError("Describe la escena")
-    if image_path is not None:
-        verify_image_file(image_path)
+def _prepare_gguf(job: Any) -> dict[str, str]:
     gpu = query_gpu_info()
     if not gpu.get("has_gpu") or not gpu.get("bf16_supported") or float(gpu.get("vram_total_gb") or 0) < 16:
         raise RuntimeError("GGUF_GPU_UNSUPPORTED: se necesita una GPU BF16 con al menos 16 GiB; no se descargó nada")
@@ -278,6 +272,34 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
     _probe_runtime(job)
     _prepare_models(job)
     names = _make_model_links(ROOT / "comfy")
+    return names
+
+
+def gguf_files_present() -> bool:
+    # File sizes are a cheap UI hint only; _prepare_models always verifies hashes before use.
+    try:
+        return (ROOT / "ready.json").is_file() and all(
+            _artifact_path(role).is_file() and _artifact_path(role).stat().st_size == size
+            for role, _, _, _, size, _ in FILES
+        )
+    except OSError:
+        return False
+
+
+@serialized_gpu_operation(slots=(), managed=True)
+def prepare_gguf(*, job: Any) -> dict:
+    _prepare_gguf(job)
+    return {"prepared": True, "note": "Archivos y entorno preparados; el modelo se carga durante la generación, no queda en VRAM."}
+
+
+@serialized_gpu_operation(slots=(), managed=True)
+def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any) -> dict:
+    started = time.monotonic()
+    if not prompt.strip():
+        raise ValueError("Describe la escena")
+    if image_path is not None:
+        verify_image_file(image_path)
+    names = _prepare_gguf(job)
     memory_manager.ensure_capacity(ram_gb=32, vram_gb=14, stage="Inicio GGUF experimental", job=job)
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)

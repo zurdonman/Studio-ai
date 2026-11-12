@@ -87,7 +87,7 @@ def test_gguf_api_input_validation_and_panel(temp_studio_env):
     client, _ = temp_studio_env
     assert client.post('/api/video/ltx-gguf', json={'prompt':'   '}).status_code == 400
     assert client.post('/api/video/ltx-gguf', json={'prompt':'test', 'image_rel':'../escape'}).status_code in (400,404)
-    assert 'id="btn-run-ltx-gguf"' in client.get('/').text
+    assert 'id="ltx-gguf-panel"' in client.get('/').text
 
 
 def test_gguf_http_submits_job_with_image(temp_studio_env, monkeypatch):
@@ -128,3 +128,38 @@ def test_setup_child_cancellation(temp_studio_env, tmp_path):
     finally:
         timer.cancel()
     assert not sentinel.exists()
+
+
+def test_gguf_catalog_filter_and_prepare_endpoint(temp_studio_env, monkeypatch):
+    import time
+    from studio.engines import ltx_gguf_backend as b
+    client, _ = temp_studio_env
+    model_id = "ltx-2.3-distilled-gguf-q4-experimental"
+    unfiltered = client.get('/api/catalog?gpu_profile=L4').json()['models']
+    entry = next(m for m in unfiltered if m['id'] == model_id)
+    assert entry['engine'] == 'ltx_gguf' and entry['compatibility']['compatible'] is False
+    assert not any(m['id'] == model_id for m in client.get('/api/catalog?gpu_profile=L4&only_compatible=true').json()['models'])
+    calls = []
+    monkeypatch.setattr(b, 'prepare_gguf', lambda *, job: calls.append(job) or {'prepared': True})
+    res = client.post('/api/video/ltx-gguf/prepare')
+    assert res.status_code == 200 and res.json()['job']['id']
+    for _ in range(50):
+        if calls:
+            break
+        time.sleep(.02)
+    assert calls
+
+
+def test_gguf_prepare_checks_guard_and_does_not_infer(temp_studio_env, monkeypatch):
+    from studio.engines import ltx_gguf_backend as b
+    from studio.jobs import JobRecord
+    calls = []
+    monkeypatch.setattr(b, 'query_gpu_info', lambda: {'has_gpu': False})
+    monkeypatch.setattr(b, '_install', lambda *_: calls.append('install'))
+    monkeypatch.setattr(b, '_infer', lambda *_: calls.append('infer'))
+    with pytest.raises(RuntimeError, match='GGUF_GPU_UNSUPPORTED'):
+        b.prepare_gguf(job=JobRecord('download', 'prepare'))
+    assert calls == []
+    monkeypatch.setattr(b, '_prepare_gguf', lambda *_: calls.append('prepare'))
+    assert b.prepare_gguf(job=JobRecord('download', 'prepare'))['prepared']
+    assert calls == ['prepare']

@@ -434,11 +434,10 @@
           <div class="ltx-gguf-callout" id="ltx-gguf-panel" aria-label="LTX 2.3 GGUF Q4 experimental">
             <div class="ltx-gguf-copy">
               <strong>🧪 LTX 2.3 GGUF Q4 · vídeo + audio</strong>
-              <p>Opción experimental separada: no aparece en el selector, no depende del filtro GPU y no requiere cargar un modelo estándar. Abajo elige Imagen a Vídeo o Texto a Vídeo, prepara el prompt y vuelve a pulsar este botón.</p>
-              <p class="muted">Usa el prompt, prompt negativo, semilla y, en Imagen a Vídeo, la imagen inicial; ignora los demás ajustes. Sin LoRA, fotograma final ni voz de referencia. Prueba fija: ~2 s, 512×320, 8 pasos.</p>
-              <p class="muted">Sin validación en GPU: puede descargar 24 GiB de pesos más dependencias. Requiere licencias LTX y Gemma; ni la carga en L4 ni las voces constantes están garantizadas.</p>
+              <p>Elígelo en la lista de modelos de Vídeo. Si no aparece, desmarca «Mostrar solo modelos con encaje estimado»: aún no hay medición de encaje en L4. Usa «Preparar» para instalar y descargar; luego «Generar Clip».</p>
+              <p class="muted">Prueba fija: ~2 s, 512×320, 8 pasos; usa prompt, prompt negativo, semilla e imagen inicial opcional. Sin LoRA, fotograma final ni voz de referencia. Descarga ~24 GiB más dependencias; se requieren licencias LTX y Gemma. Las voces constantes no están garantizadas.</p>
+              <p id="ltx-gguf-error" role="alert" hidden></p>
             </div>
-            <button type="button" class="btn btn-primary" id="btn-run-ltx-gguf">🧪 Probar LTX 2.3 GGUF Q4</button>
           </div>
 
           <!-- Filtro rápido por GPU de Google Colab en la propia pestaña de Vídeo -->

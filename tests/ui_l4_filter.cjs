@@ -27,7 +27,8 @@ const model = (id, fit, extra = {}) => ({
       if (profile === "L4") await wait(60);
       if (profile === "T4") await wait(5);
       data = {models: [model("heavy", profile === "auto", {downloaded:true,loaded_in_memory:true}),
-                       model("fits", profile !== "T4"), model("unknown", false)],
+                       model("fits", profile !== "T4"), model("unknown", false),
+                       model("ltx-2.3-distilled-gguf-q4-experimental", false, {name:"LTX 2.3 GGUF Q4", engine:"ltx_gguf", ltx_distilled:true})],
               active_gpu_profile:{id:profile,short:profile}, loaded_slots:[]};
     } else if (u.pathname === "/api/catalog/hf-search") {
       const compatOnly = u.searchParams.get("only_compatible") === "true";
@@ -69,18 +70,28 @@ const model = (id, fit, extra = {}) => ({
   if (!ggufPanel || ggufPanel.hidden || ggufPanel.closest("details") ||
       !(ggufPanel.compareDocumentPosition($("vid-gpu-pills")) & w.Node.DOCUMENT_POSITION_FOLLOWING))
     throw Error("GGUF experiment not prominently visible above GPU filter");
-  $("vsub-t2v").click();
-  $("vid-prompt").value = "A person waves";
-  $("btn-run-ltx-gguf").click();
-  await wait(20);
-  const ggufRequest = requests.find(r => r.path === "/api/video/ltx-gguf" && r.method === "POST");
-  if (!ggufRequest || JSON.parse(ggufRequest.body).prompt !== "A person waves") throw Error("GGUF action not usable when GPU filter is empty");
+  if (ids().includes("ltx-2.3-distilled-gguf-q4-experimental")) throw Error("Unknown GGUF advertised as fitting the GPU filter");
   $("btn-prepare-video").dispatchEvent(new w.Event("click"));
   $("btn-run-video").dispatchEvent(new w.Event("click"));
   await wait(20);
   if (requests.some(r => r.method === "POST" && ["/api/memory/load", "/api/video/generate"].includes(r.path))) throw Error("Empty selection submitted a default model");
   $("chk-vid-only-compat").click();
-  if (ids().length !== 3) throw Error("Unchecking filter did not restore catalogue");
+  if (ids().length !== 4) throw Error("Unchecking filter did not restore catalogue including GGUF");
+  const ggufId = "ltx-2.3-distilled-gguf-q4-experimental";
+  const card = w.document.querySelector(`[data-vmid="${ggufId}"]`);
+  if (!card) throw Error("GGUF card missing");
+  card.click();
+  if ($("select-video-model").value !== ggufId || !$("btn-prepare-video").textContent.includes("GGUF")) throw Error("GGUF selection or prepare label missing");
+  $("btn-prepare-video").click();
+  await wait(20);
+  if (!requests.some(r => r.method === "POST" && r.path === "/api/video/ltx-gguf/prepare")) throw Error("GGUF prepare used wrong endpoint");
+  $("vsub-t2v").click();
+  if ($("select-video-model").value !== ggufId) throw Error("Switching supported submode changed GGUF selection");
+  $("vid-prompt").value = "A person waves";
+  $("btn-run-video").click();
+  await wait(20);
+  const ggufRequest = requests.find(r => r.path === "/api/video/ltx-gguf" && r.method === "POST");
+  if (!ggufRequest || JSON.parse(ggufRequest.body).prompt !== "A person waves") throw Error("GGUF generation used wrong endpoint");
   pill("L4").click(); pill("T4").click();
   await wait(110);
   if (ids().length !== 0 || !w.document.querySelector('#vid-gpu-pills [data-gpu="T4"]').classList.contains("active")) throw Error("Stale profile response overrode newer selection");

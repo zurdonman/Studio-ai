@@ -52,6 +52,7 @@
   };
 
   // ==================== HELPERS ====================
+  const GGUF_MODEL_ID = "ltx-2.3-distilled-gguf-q4-experimental";
   function $(id) {
     return document.getElementById(id);
   }
@@ -425,6 +426,10 @@
         } else if (j.status === "failed") {
           state.completedHandled.add(j.id);
           toast(`Error en «${j.title}»: ${j.error || "Revisa el registro"}`, "error");
+          if (/LTX 2\.3 GGUF/.test(j.title || "") && $("ltx-gguf-error")) {
+            $("ltx-gguf-error").hidden = false;
+            $("ltx-gguf-error").textContent = `Error GGUF: ${j.error || "Revisa el registro de la tarea"}`;
+          }
         }
       }
     }
@@ -511,7 +516,7 @@
       showMontageResult(res);
       toast(`Montaje MP4 completado (${res.duration_seconds}s).`, "success");
     } else if (job.kind === "download") {
-      toast("Descarga completada y verificada en disco.", "success");
+      toast(res.prepared ? "GGUF preparado en disco; se cargará al generar." : "Descarga completada y verificada en disco.", "success");
     } else if (job.kind === "model_discovery") {
       renderDiscoveryStatus((res || {}).status);
       runHfLiveSearch();
@@ -588,6 +593,10 @@
     const sel = $("select-video-model");
     if (!btn || !sel || btn.disabled) return;
     const m = state.catalog.find((item) => item.id === sel.value);
+    if (m && m.id === GGUF_MODEL_ID) {
+      btn.textContent = m.downloaded ? "🔄 Verificar preparación GGUF" : "⬇ Preparar GGUF (~24 GiB)";
+      return;
+    }
     if (!m) {
       btn.textContent = "⚡ Descargar y Cargar Modelo";
       return;
@@ -1391,6 +1400,10 @@
   function applyVideoModelDefaults(modelId) {
     const m = state.catalog.find((x) => x.id === modelId);
     if (!m) return;
+    if (m.id === GGUF_MODEL_ID && !["i2v", "t2v"].includes(state.videoSubmode)) {
+      state.videoMode = "ai";
+      state.videoSubmode = "i2v";
+    }
     if (m.engine === "ffmpeg_motion") {
       setVideoSubmode("ffmpeg");
       $("vid-width").value = 1280;
@@ -1464,7 +1477,7 @@
     if (cardsBox) {
       cardsBox.innerHTML = vModels.length === 0
         ? `<div class="muted" style="padding:14px;">No hay modelos de vídeo con encaje estimado para este filtro. Revisa RAM y disco o desmarca el filtro para ver todos.</div>`
-        : vModels
+        : [...vModels].sort((a, b) => Number(b.id === GGUF_MODEL_ID) - Number(a.id === GGUF_MODEL_ID))
         .map((m) => {
           const comp = m.compatibility || {};
           const tier = comp.tier || "good";
@@ -1526,6 +1539,8 @@
   function renderCatalog() {
     const grid = $("catalog-grid");
     const filtered = state.catalog.filter((m) => {
+      // GGUF usa una preparación aislada disponible en Vídeo, no el gestor normal de modelos.
+      if (m.id === GGUF_MODEL_ID) return false;
       if (state.catOnlyCompat && !(m.hardware_assessment || m.compatibility || {}).compatible) return false;
       if (state.catalogFilter === "all") return true;
       if (state.catalogFilter === "image") {
@@ -3068,6 +3083,10 @@
         toast("No hay un modelo seleccionado para este filtro.", "error");
         return;
       }
+      if (mid === GGUF_MODEL_ID) {
+        prepareLtxGguf();
+        return;
+      }
       loadModelIntoMemory(mid, true);
     });
     $("btn-unload-video").addEventListener("click", () => unloadFromMemory("video"));
@@ -3342,6 +3361,10 @@
           toast("No hay un modelo seleccionado para este filtro.", "error");
           return;
         }
+        if (chosenVidModel === GGUF_MODEL_ID) {
+          await runLtxGguf();
+          return;
+        }
         const sub = state.videoSubmode || "i2v";
         const effectiveMode =
           chosenVidModel === "ffmpeg-motion-cpu" || sub === "ffmpeg" ? "ffmpeg_motion" : "ai";
@@ -3414,19 +3437,37 @@
       }
     });
 
-    if ($("btn-run-ltx-gguf")) $("btn-run-ltx-gguf").addEventListener("click", async () => {
+    async function prepareLtxGguf() {
+      if (!confirm("GGUF experimental: se comprobarán los recursos y se instalarán un entorno aislado y hasta 24 GiB de pesos. Se requieren las licencias LTX y Gemma. El modelo se carga durante la generación; no está validado en L4. ¿Continuar?")) return;
+      try {
+        $("ltx-gguf-error").hidden = true;
+        const res = await api("/api/video/ltx-gguf/prepare", {method:"POST"});
+        watchJob(res.job);
+      } catch (error) {
+        $("ltx-gguf-error").hidden = false;
+        $("ltx-gguf-error").textContent = `Error GGUF: ${error.message}`;
+        toast(error.message, "error");
+      }
+    }
+
+    async function runLtxGguf() {
       const sub = state.videoSubmode || "i2v";
       const prompt = $("vid-prompt").value.trim();
-      if (!prompt) return toast("Describe la escena antes de probar GGUF.", "error");
+      if (!prompt) return toast("Describe la escena antes de generar con GGUF.", "error");
       if (!["t2v", "i2v"].includes(sub)) return toast("GGUF experimental admite solo Texto→Vídeo o Imagen→Vídeo.", "error");
       const image_rel = sub === "i2v" ? $("vid-source-image").value : null;
       if (sub === "i2v" && !image_rel) return toast("Selecciona un primer fotograma para Imagen→Vídeo.", "error");
-      if (!confirm("Ruta experimental sin prueba GPU: instalará un entorno separado y puede descargar unos 24 GiB de pesos. ¿Iniciar comprobación y, si los mínimos preventivos se cumplen, intentar el clip?")) return;
+      if (!confirm("GGUF experimental: se comprobarán los recursos y, si falta, se preparará el entorno y se descargarán hasta 24 GiB. El encaje en L4 no está validado. ¿Generar?") ) return;
       try {
+        $("ltx-gguf-error").hidden = true;
         const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0)})});
         watchJob(res.job);
-      } catch (error) { toast(error.message, "error"); }
-    });
+      } catch (error) {
+        $("ltx-gguf-error").hidden = false;
+        $("ltx-gguf-error").textContent = `Error GGUF: ${error.message}`;
+        toast(error.message, "error");
+      }
+    }
 
     $("btn-vid-to-montage").addEventListener("click", () => {
       if (state.lastVideoResult) {

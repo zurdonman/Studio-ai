@@ -485,6 +485,16 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     models = catalog_manager.list_catalog(loaded_ids=loaded_ids, gpu_profile=gpu_profile,
         only_compatible=only_compatible, detected_gpu=hw_gpu, assessment_context_value=context)
+    if not only_compatible:
+        from studio.engines.ltx_gguf_backend import gguf_files_present
+        unknown = {"compatible": False, "tier": "incompatible", "label": "Experimental · encaje sin validar", "sticker": "🧪", "reasons": ["Sin medición de encaje en GPU, RAM y disco; desmarca el filtro para investigar."]}
+        models.append({"id": "ltx-2.3-distilled-gguf-q4-experimental", "name": "LTX 2.3 GGUF Q4 · vídeo + audio (experimental)",
+                       "category": "video", "engine": "ltx_gguf", "video_modes": ["i2v", "t2v", "av"],
+                       "estimated_gb": 24.1, "downloaded": gguf_files_present(), "loaded_in_memory": False,
+                       "compatibility": unknown, "ltx_distilled": True,
+                       "official_spec": {"fixed_resolution": [512, 320], "landscape": [512, 320], "portrait": [512, 320], "square": [512, 320],
+                                         "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
+                                         "official_note": "Prueba fija experimental; el encaje en L4 no está validado."}})
     for model in models:
         model["hardware_assessment"] = model["compatibility"]
         if model["category"] == "image":
@@ -970,6 +980,14 @@ class LTXGGUFReq(BaseModel):
     negative_prompt: str = Field(default="", max_length=3000)
     image_rel: Optional[str] = None
     seed: int = Field(default=0, ge=0, le=4294967295)
+
+
+@app.post("/api/video/ltx-gguf/prepare")
+def api_prepare_ltx_gguf() -> Dict[str, Any]:
+    from studio.engines.ltx_gguf_backend import prepare_gguf
+    job = job_manager.submit(kind="download", title="Preparar LTX 2.3 GGUF Q4 (experimental)",
+        fn=lambda j: prepare_gguf(job=j), dedup_key="ltx-gguf-prepare")
+    return {"ok": True, "job": job.to_dict()}
 
 
 @app.post("/api/video/ltx-gguf")
