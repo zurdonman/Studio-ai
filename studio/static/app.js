@@ -6,6 +6,7 @@
     catalog: [],
     catalogFilter: "all",
     gpuProfile: "auto",
+    catalogLoading: false,
     activeGpuProfile: null,
     vidOnlyCompat: false,
     catOnlyCompat: false,
@@ -413,6 +414,8 @@
       }
     }
 
+    syncVideoSelectionControls();
+
     // Detectar trabajos observados que acaban de terminar para refrescar vistas
     for (const j of state.jobs) {
       if (state.watchedJobs.has(j.id) && !state.completedHandled.has(j.id)) {
@@ -565,6 +568,21 @@
     if (catChk) catChk.checked = state.catOnlyCompat;
   }
 
+  function syncVideoSelectionControls() {
+    const sel = $("select-video-model");
+    const prep = $("btn-prepare-video");
+    const run = $("btn-run-video");
+    const unavailable = state.catalogLoading || !sel || !sel.value;
+    const loadingVideo = state.jobs.some((j) => (j.status === "running" || j.status === "queued") &&
+      (j.kind === "load_model" || j.kind === "download") &&
+      (j.kind === "video" || /wan|ltx|sana|skyreels|cogvideo|vace|vídeo|video/i.test(j.title || "")));
+    if (prep) {
+      prep.disabled = unavailable || loadingVideo;
+      if (unavailable) prep.textContent = state.catalogLoading ? "⏳ Consultando modelos..." : "No hay modelo seleccionado";
+    }
+    if (run) run.disabled = unavailable;
+  }
+
   function syncVideoPrepareButtonLabel() {
     const btn = $("btn-prepare-video");
     const sel = $("select-video-model");
@@ -585,10 +603,22 @@
     }
   }
 
+  let catalogRequestSeq = 0;
   async function loadCatalog() {
-    const data = await api(
-      `/api/catalog?gpu_profile=${encodeURIComponent(state.gpuProfile)}&only_compatible=false`
-    );
+    const requestSeq = ++catalogRequestSeq;
+    const profile = state.gpuProfile;
+    state.catalogLoading = true;
+    syncVideoSelectionControls();
+    let data;
+    try {
+      data = await api(`/api/catalog?gpu_profile=${encodeURIComponent(profile)}&only_compatible=false`);
+    } finally {
+      if (requestSeq === catalogRequestSeq) {
+        state.catalogLoading = false;
+        syncVideoSelectionControls();
+      }
+    }
+    if (requestSeq !== catalogRequestSeq) return;
     state.catalog = data.models || [];
     state.activeGpuProfile = data.active_gpu_profile || null;
     renderDiscoveryStatus(data.discovery_status);
@@ -1333,7 +1363,9 @@
 
     if (defSteps <= 10) {
       noteEl.className = "vid-steps-note turbo";
-      noteEl.textContent = `⚡ Modelo ya destilado de fábrica (${steps} pasos · CFG ${cfg}): velocidad máxima nativa (~45 s – 1 min en L4 sin necesitar LoRA externo).`;
+      noteEl.textContent = m && m.ltx_distilled
+        ? `⚡ LTX destilado: 8 pasos y CFG 1. Tiempo y encaje en L4 no validados; la RAM y la resolución importan.`
+        : `⚡ Modelo ya destilado de fábrica (${steps} pasos · CFG ${cfg}). El tiempo real depende de la GPU, RAM y resolución.`;
       return;
     }
 
@@ -1404,8 +1436,7 @@
     const prev = sel.value;
     let vModels = state.catalog.filter((m) => m.category === "video" && m.validation_state !== "candidate");
     if (state.vidOnlyCompat) {
-      const runnable = vModels.filter((m) => m.compatibility && m.compatibility.compatible);
-      if (runnable.length > 0) vModels = runnable;
+      vModels = vModels.filter((m) => m.compatibility && m.compatibility.compatible === true);
     }
 
     sel.innerHTML = vModels
@@ -1431,7 +1462,9 @@
     const activeId = sel.value;
     const curSub = state.videoSubmode;
     if (cardsBox) {
-      cardsBox.innerHTML = vModels
+      cardsBox.innerHTML = vModels.length === 0
+        ? `<div class="muted" style="padding:14px;">No hay modelos de vídeo con encaje estimado para este filtro. Revisa RAM y disco o desmarca el filtro para ver todos.</div>`
+        : vModels
         .map((m) => {
           const comp = m.compatibility || {};
           const tier = comp.tier || "good";
@@ -1475,8 +1508,15 @@
     const curSelVid = $("select-video-model") ? $("select-video-model").value : "";
     if (curSelVid) {
       populateVideoLoraSelect(curSelVid);
-      updateVideoStepsSafetyNote();
+      if (curSelVid !== prev) applyVideoModelDefaults(curSelVid);
+      else updateVideoStepsSafetyNote();
+    } else {
+      state.activeVidExtraLoras = {};
+      populateVideoLoraSelect("");
+      const note = $("vid-steps-safety-note");
+      if (note) note.textContent = "Sin modelo seleccionado.";
     }
+    syncVideoSelectionControls();
     syncVideoPrepareButtonLabel();
     renderVideoCompatBanner();
   }
@@ -1680,9 +1720,8 @@
       const sel = $("select-video-model");
       // Selection is NOT preparation. A hidden-by-filter recipe is not loaded.
       if (!Array.from(sel.options).some((option) => option.value === modelId)) {
-        state.vidOnlyCompat = false;
-        populateVideoModelSelect();
-        syncGpuPillsUI();
+        toast("Este modelo está oculto por el filtro de compatibilidad. Desmárcalo para seleccionarlo y revisa el diagnóstico.", "error");
+        return;
       }
       sel.value = modelId;
       applyVideoModelDefaults(modelId);
@@ -1740,6 +1779,16 @@
 
   let _hfDebounceTimer = null;
   let _hfAbortCtrl = null;
+
+  function refreshHfForFilterChange() {
+    const refresh = state.hfSearchResults.length > 0 || state.hfSearching;
+    if (_hfAbortCtrl) _hfAbortCtrl.abort();
+    if (!refresh) return;
+    state.hfSearchResults = [];
+    if ($("hf-live-results")) $("hf-live-results").textContent = "Actualizando resultados para el filtro de GPU…";
+    if ($("hf-inspection")) $("hf-inspection").hidden = true;
+    runHfLiveSearch();
+  }
 
   function scheduleRealtimeHfSearch() {
     if (_hfDebounceTimer) clearTimeout(_hfDebounceTimer);
@@ -3002,7 +3051,11 @@
     });
 
     $("btn-prepare-video").addEventListener("click", () => {
-      const mid = $("select-video-model").value || "wan22-ti2v-5b";
+      const mid = $("select-video-model").value;
+      if (!mid || state.catalogLoading) {
+        toast("No hay un modelo seleccionado para este filtro.", "error");
+        return;
+      }
       loadModelIntoMemory(mid, true);
     });
     $("btn-unload-video").addEventListener("click", () => unloadFromMemory("video"));
@@ -3151,9 +3204,20 @@
     document.querySelectorAll(".gpu-pill").forEach((pill) => {
       pill.addEventListener("click", async () => {
         state.gpuProfile = pill.dataset.gpu || "auto";
-        await loadCatalog();
-        if (state.hfSearchResults.length > 0) {
-          runHfLiveSearch();
+        // Selecting a GPU is a filter, not merely a change of badge.
+        state.vidOnlyCompat = true;
+        state.catOnlyCompat = true;
+        state.catalog = [];
+        $("select-video-model").innerHTML = "";
+        syncGpuPillsUI();
+        populateVideoModelSelect();
+        renderCatalog();
+        refreshHfForFilterChange();
+        try {
+          await loadCatalog();
+        } catch (error) {
+          toast(`No se pudo actualizar el filtro de GPU: ${error.message}`, "error");
+          populateVideoModelSelect();
         }
       });
     });
@@ -3168,9 +3232,7 @@
       $("chk-cat-only-compat").addEventListener("change", (ev) => {
         state.catOnlyCompat = ev.target.checked;
         renderCatalog();
-        if (state.hfSearchResults.length > 0) {
-          runHfLiveSearch();
-        }
+        refreshHfForFilterChange();
       });
     }
 
@@ -3264,6 +3326,10 @@
     $("btn-run-video").addEventListener("click", async () => {
       try {
         const chosenVidModel = $("select-video-model").value;
+        if (!chosenVidModel || state.catalogLoading) {
+          toast("No hay un modelo seleccionado para este filtro.", "error");
+          return;
+        }
         const sub = state.videoSubmode || "i2v";
         const effectiveMode =
           chosenVidModel === "ffmpeg-motion-cpu" || sub === "ffmpeg" ? "ffmpeg_motion" : "ai";

@@ -3211,7 +3211,7 @@ class CatalogManager:
             downloaded = self.is_downloaded(mid)
             actual_gb = self.disk_usage_gb(mid) if downloaded and not defn.get("builtin_no_download") else 0.0
             compat = assess_definition(defn, context, catalog=self)
-            if only_compatible and not compat.get("compatible", True) and not downloaded and mid not in loaded_set:
+            if only_compatible and not compat.get("compatible", False):
                 continue
             per_gpu_summary = []
             for gid, gshort in matrix_targets:

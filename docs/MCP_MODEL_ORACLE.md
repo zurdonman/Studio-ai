@@ -14,6 +14,8 @@ Se comprueban e informan ejes separados:
 
 `compatibility.compatible=true` significa **receta revisada con encaje estimado de capacidad**, NO «funciona garantizado». `runnable_now` además exige dependencias comprobadas, pesos locales completos (en las recetas nuevas se comprueban componentes/shards y variante, no solo un `model_index.json`), memoria actual conocida/suficiente y hardware real; una simulación nunca es ejecutable. Son prerrequisitos estáticos, no una prueba de inferencia (`readiness_level=static_prerequisites_only_not_inference_validation`). El descubridor no verifica por sí solo el permiso de descarga.
 
+Al seleccionar un perfil GPU en la interfaz, se activa el filtro estricto en Vídeo y Catálogo: muestra solo recetas con `compatible=true`, aunque las demás ya estén descargadas o cargadas. El perfil L4 simula solo la GPU; emplea la RAM total y el disco libre de la sesión real. Desmarcar el filtro permite ver las demás recetas sin declararlas aptas. Un resultado vacío permanece vacío; no se carga un modelo alternativo automáticamente. Antes de generar, comprobar memoria libre, dependencias, licencia, resolución y presupuesto combinado de los LoRAs.
+
 `gpu_tested=false`, `confidence=engineering_estimate` y `limits` hacen explícita la incertidumbre. Los números son presupuestos aproximados en GiB para valores predeterminados: ni picos medidos ni garantías de tiempo/calidad. La descarga real vuelve a comprobar el inventario de archivos y el espacio antes de bajar pesos.
 
 ## 2. Primera acción del agente

@@ -861,3 +861,37 @@ def test_search_finds_named_lora_within_shared_repository(tmp_path, catalog):
         assert target, term
         assert target[0]["catalog_model_ids"] == ["lora-wan22-ti2v-5b-fastwan"]
         assert not target[0]["access"]["weights_access_verified"]
+
+
+def test_l4_api_filter_excludes_incompatible_even_if_downloaded_or_loaded(temp_studio_env, monkeypatch):
+    """A file on disk/in RAM must not bypass the chosen profile's capacity filter."""
+    from studio.hardware import hardware_tracker
+    from studio.catalog import catalog_manager
+    from studio.memory_manager import memory_manager
+    client, _ = temp_studio_env
+    snap = hardware_tracker.get_snapshot()
+    snap["ram"].update(total_gb=53.0, available_gb=48.0)
+    snap["disk"].update(free_gb=200.0)
+    monkeypatch.setattr(hardware_tracker, "get_snapshot", lambda **_kw: snap)
+    old_is_downloaded = catalog_manager.is_downloaded
+    heavy = {"ltx-2.3-full-fp8-av", "ltx-2.5-full-av"}
+    monkeypatch.setattr(catalog_manager, "is_downloaded", lambda mid: mid in heavy or old_is_downloaded(mid))
+    monkeypatch.setattr(memory_manager, "loaded_model_ids", lambda: list(heavy))
+    all_models = client.get("/api/catalog?gpu_profile=L4&only_compatible=false").json()["models"]
+    for model_id in heavy:
+        item = next(m for m in all_models if m["id"] == model_id)
+        assert item["downloaded"] and item["loaded_in_memory"]
+        assert not item["compatibility"]["compatible"]
+    filtered = client.get("/api/catalog?gpu_profile=L4&only_compatible=true").json()["models"]
+    assert not heavy.intersection(m["id"] for m in filtered)
+    assert all(m["compatibility"]["compatible"] is True for m in filtered)
+    assert "ffmpeg-motion-cpu" in {m["id"] for m in filtered}
+    # Same L4, more host RAM: FP8 may fit by estimate; the BF16 full
+    # variant still exceeds the L4 VRAM budget including the safety reserve.
+    snap["ram"].update(total_gb=128.0, available_gb=120.0)
+    ample = client.get("/api/catalog?gpu_profile=L4&only_compatible=true").json()["models"]
+    ids = {m["id"] for m in ample}
+    assert "ltx-2.3-full-fp8-av" in ids
+    assert "ltx-2.5-full-av" not in ids
+    item = next(m for m in ample if m["id"] == "ltx-2.3-full-fp8-av")
+    assert item["compatibility"]["is_simulated"] and not item["compatibility"]["gpu_tested"]

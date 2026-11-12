@@ -443,8 +443,9 @@
             </div>
             <label class="gpu-compat-toggle">
               <input type="checkbox" id="chk-vid-only-compat" />
-              <span>Mostrar solo modelos con encaje estimado en esta GPU</span>
+              <span>Mostrar solo modelos con encaje estimado (GPU + RAM + disco)</span>
             </label>
+            <small class="muted">L4 y otros perfiles son simulaciones de GPU; RAM total y disco son los de esta sesión. Desmarca para ver todos. No garantiza carga: revisa memoria libre, dependencias, licencia y LoRAs.</small>
           </div>
 
           <!-- Selector visual de modelos de vídeo con pegatina de rendimiento -->
@@ -1025,6 +1026,7 @@
             <input type="checkbox" id="chk-cat-only-compat" />
             <span>Solo recetas con encaje estimado (GPU + RAM + disco)</span>
           </label>
+          <small class="muted">Perfil GPU simulado; RAM total y disco reales. Desmarca para ver todos. La estimación no garantiza carga, calidad ni velocidad.</small>
         </div>
 
         <!-- Metadata-only discovery, shared with the hardware-aware MCP oracle. -->

@@ -490,7 +490,7 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
         if model["category"] == "image":
             model["image_defaults"] = image_defaults(model)
     if only_compatible:
-        models = [m for m in models if m["hardware_assessment"]["compatible"] or m["downloaded"] or m["loaded_in_memory"]]
+        models = [m for m in models if m["hardware_assessment"]["compatible"]]
     return {"models": models, "gpu_profiles": COLAB_GPU_PROFILES, "active_gpu_profile": resolved_prof,
             "loaded_slots": memory_manager.status_summary(), "discovery_status": model_discovery.status()}
 
