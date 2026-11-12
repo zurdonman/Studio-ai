@@ -3414,6 +3414,20 @@
       }
     });
 
+    if ($("btn-run-ltx-gguf")) $("btn-run-ltx-gguf").addEventListener("click", async () => {
+      const sub = state.videoSubmode || "i2v";
+      const prompt = $("vid-prompt").value.trim();
+      if (!prompt) return toast("Describe la escena antes de probar GGUF.", "error");
+      if (!["t2v", "i2v"].includes(sub)) return toast("GGUF experimental admite solo Texto→Vídeo o Imagen→Vídeo.", "error");
+      const image_rel = sub === "i2v" ? $("vid-source-image").value : null;
+      if (sub === "i2v" && !image_rel) return toast("Selecciona un primer fotograma para Imagen→Vídeo.", "error");
+      if (!confirm("Ruta experimental sin prueba GPU: instalará un entorno separado y puede descargar unos 24 GiB de pesos. ¿Iniciar comprobación y, si los mínimos preventivos se cumplen, intentar el clip?")) return;
+      try {
+        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0)})});
+        watchJob(res.job);
+      } catch (error) { toast(error.message, "error"); }
+    });
+
     $("btn-vid-to-montage").addEventListener("click", () => {
       if (state.lastVideoResult) {
         addShotToTimeline({

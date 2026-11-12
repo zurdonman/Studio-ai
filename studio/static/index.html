@@ -688,6 +688,13 @@
               <button class="btn btn-primary btn-lg" id="btn-run-video">
                 🎬 Generar Clip de Vídeo
               </button>
+
+              <details class="card" style="padding:12px; margin-top:12px;">
+                <summary>🧪 Probar LTX 2.3 GGUF Q4 · vídeo + audio</summary>
+                <p class="muted">Ruta separada experimental mediante ComfyUI y GGUF, aún sin probar en GPU. Usa el prompt y, en Imagen→Vídeo, el primer fotograma de arriba. Prueba fija de 512×320, 49 fotogramas a 24 fps y 8 pasos. No admite LoRAs, fotograma final ni voz de referencia.</p>
+                <p class="muted">La primera vez instala un entorno aislado y descarga unos 24 GiB de pesos más dependencias. Se requieren licencias LTX y Gemma. Los mínimos preventivos no garantizan que quepa en tu L4 ni en tu RAM; el proceso puede fallar o tardar mucho. El audio se genera con el vídeo, pero la voz no se fija entre clips.</p>
+                <button type="button" class="btn btn-secondary" id="btn-run-ltx-gguf">Probar LTX GGUF (experimental)</button>
+              </details>
             </div>
           </div>
 

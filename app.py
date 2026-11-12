@@ -965,6 +965,26 @@ def api_id_lora_video(req: VoiceConsistencyReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict()}
 
 
+class LTXGGUFReq(BaseModel):
+    prompt: str = Field(min_length=1, max_length=3000)
+    negative_prompt: str = Field(default="", max_length=3000)
+    image_rel: Optional[str] = None
+    seed: int = Field(default=0, ge=0, le=4294967295)
+
+
+@app.post("/api/video/ltx-gguf")
+def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
+    from studio.engines.ltx_gguf_backend import generate_gguf
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="Describe la escena.")
+    image = _resolve_media_rel(req.image_rel) if req.image_rel else None
+    if req.image_rel and image is None:
+        raise HTTPException(status_code=400, detail="La imagen no está disponible.")
+    job = job_manager.submit(kind="video", title="LTX 2.3 GGUF Q4 · audio y vídeo (experimental)",
+        fn=lambda j: generate_gguf(image_path=image, prompt=req.prompt, negative_prompt=req.negative_prompt, seed=req.seed, job=j))
+    return {"ok": True, "job": job.to_dict()}
+
+
 @app.post("/api/video/generate")
 def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
     if req.reference_voice_rel:
