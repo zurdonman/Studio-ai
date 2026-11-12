@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated": "2026-11-12T01:35:31Z",
+  "updated": "2026-11-12T01:37:56Z",
   "arena_url": "http://127.0.0.1:9/mcp/arena",
   "note": "URL estable del canal. La instancia cambia de túnel en cada sesión, pero el buzón de GitHub no: el agente siempre empieza por aquí.",
   "channel": {
