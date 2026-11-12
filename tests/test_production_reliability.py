@@ -1052,7 +1052,8 @@ def test_wan_ti2v_mixed_lora_real_diffusers_and_peft(tmp_path):
     pipe.set_adapters(["test"], adapter_weights=[0.75])
     handle = {}
     assert _apply_wan_direct_deltas(handle, pipe, [(deltas, 0.75)]) == 4
-    assert torch.allclose(model.blocks[0].attn1.to_q(x), base_output + 0.75 * (0.4 + 16 * 0.1 * 2 * 0.2))
+    # Independent float32 paths can differ by a few ulps, especially near zero.
+    assert torch.allclose(model.blocks[0].attn1.to_q(x), base_output + 0.75 * (0.4 + 16 * 0.1 * 2 * 0.2), atol=1e-6)
     assert torch.allclose(model.blocks[0].attn1.norm_q.weight, originals["blocks.0.attn1.norm_q.weight"] + 0.75 * 0.3)
     assert torch.allclose(model.blocks[0].norm2.weight, originals["blocks.0.norm2.weight"] + 0.75 * 0.2)
     assert torch.allclose(model.patch_embedding.bias, originals["patch_embedding.bias"] + 0.75 * 0.25)

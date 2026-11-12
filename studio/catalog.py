@@ -1,4 +1,5 @@
 import fnmatch
+import copy
 import io
 import json
 import os
@@ -2776,6 +2777,34 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
 ]
 
 
+# Online FP8 storage recipes use the original Diffusers BF16 checkpoints. Keep
+# distinct IDs so precision, disk budgets and fast schedules are never implicit.
+for _base_id in ("ltx-2.3-full-av", "ltx-2.3-distilled-av", "ltx-2.5-full-av", "ltx-2.5-distilled-av"):
+    _base = next(item for item in DEFAULT_CATALOG if item["id"] == _base_id)
+    _quant = copy.deepcopy(_base)
+    _quant["id"] = _base_id.replace("-av", "-fp8-av")
+    _quant["name"] = _base["name"].replace(" · Audio+Vídeo", " · FP8 en memoria · Audio+Vídeo")
+    _quant["badge"] = "FP8 en memoria · audio + vídeo · experimental"
+    _quant["description"] = ("Transformer con almacenamiento FP8 y cálculo BF16, audio y vídeo conjuntos. "
+        "Se descargan pesos originales BF16, no un checkpoint FP8; carga inicial grande, CPU offload, "
+        "una etapa y calidad no validada en GPU. " + ("Acceso LTX-2.5-Diffusers restringido en Hugging Face." if "2.5" in _base_id else ""))
+    _quant["memory_strategy"] = "Transformer FP8 layerwise en memoria, cálculo BF16; encoder y VAE sin cuantizar; CPU offload. Carga inicial BF16."
+    _quant["ltx_fp8_cast"] = True
+    _quant["ltx_large"] = True
+    _quant["ltx25"] = "2.5" in _base_id
+    _quant["min_ram_gb"] = 80.0 if "2.3" in _base_id else 72.0
+    _quant["min_vram_gb"] = 20.0
+    _quant["estimated_gb"] = 90.0 if "2.3" in _base_id else 75.0
+    _quant["l4_seconds_hint"] = "Sin prueba GPU/L4; estimaciones de RAM/VRAM no garantizan encaje"
+    _art = _quant["artifacts"][0]
+    _transformer_subdir = "transformer_full" if _quant.get("ltx_full_transformer") else "transformer"
+    _art["required_shard_indexes"] = ["text_encoder/model.safetensors.index.json", f"{_transformer_subdir}/diffusion_pytorch_model.safetensors.index.json"]
+    if _base_id == "ltx-2.5-distilled-av":
+        # This repo contains two differently sharded copies of the DiT. Only
+        # download the files named by its current authoritative index.
+        _art["select_shards_from_index"] = f"{_transformer_subdir}/diffusion_pytorch_model.safetensors.index.json"
+    DEFAULT_CATALOG.append(_quant)
+
 DEFAULT_CATALOG.extend(EXTRA_IMAGE_MODELS)
 for _definition in DEFAULT_CATALOG:
     if _definition.get("category") == "lora":
@@ -3124,6 +3153,20 @@ class CatalogManager:
                             return False
                 except (OSError, ValueError, KeyError, TypeError):
                     return False
+        if defn.get("ltx_fp8_cast"):
+            try:
+                manifest = json.loads(self.marker_file(model_id).read_text(encoding="utf-8"))["files"]
+                if not isinstance(manifest, list) or not manifest:
+                    return False
+                for item in manifest:
+                    rel, expected = item["path"], int(item["size"])
+                    if not isinstance(rel, str) or Path(rel).is_absolute() or ".." in Path(rel).parts:
+                        return False
+                    file = m_dir / rel
+                    if not file.is_file() or file.stat().st_size == 0 or (expected > 0 and file.stat().st_size != expected):
+                        return False
+            except (OSError, ValueError, TypeError, KeyError):
+                return False
         if defn.get("category") == "image" and not image_recipe_files_complete(defn, m_dir / "base"):
             return False
         return True
@@ -3415,6 +3458,7 @@ class CatalogManager:
         plan_files: List[Dict[str, Any]] = []
         total_bytes = 0
         already_bytes = 0
+        pinned_index_plan = False
 
         for art in defn.get("artifacts", []):
             job.check_cancelled()
@@ -3450,6 +3494,31 @@ class CatalogManager:
             info = api.model_info(repo_id=repo_id, files_metadata=True)
             siblings = info.siblings or []
             has_model_index = any(s.rfilename == "model_index.json" for s in siblings)
+            indexed_files = None
+            indexed_dir = None
+            selected_index = art.get("select_shards_from_index")
+            revision = None
+            if selected_index:
+                pinned_index_plan = True
+                # Read only the small index before the big download. Pin this
+                # artifact to the metadata revision so index and shards agree.
+                revision = getattr(info, "sha", None)
+                if not revision or selected_index not in {x.rfilename for x in siblings}:
+                    raise RuntimeError("LTX_INDEX_UNAVAILABLE: no se puede fijar el índice y la revisión del transformer.")
+                index_path = hf_hub_download(repo_id=repo_id, filename=selected_index, local_dir=str(subdir), token=tok, revision=revision)
+                try:
+                    weight_map = json.loads(Path(index_path).read_text(encoding="utf-8"))["weight_map"]
+                    if not isinstance(weight_map, dict) or not weight_map:
+                        raise ValueError("índice vacío")
+                    names = set(weight_map.values())
+                    if not all(isinstance(n, str) and Path(n).name == n and n.endswith(".safetensors") for n in names):
+                        raise ValueError("nombre de fragmento no válido")
+                    indexed_dir = str(Path(selected_index).parent) + "/"
+                    indexed_files = {indexed_dir + n for n in names}
+                    if not indexed_files.issubset({x.rfilename for x in siblings}):
+                        raise ValueError("faltan fragmentos en los metadatos")
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    raise RuntimeError("LTX_INDEX_INVALID: no se descargarán pesos sin índice de fragmentos verificable.") from exc
 
             for sib in siblings:
                 rfilename = sib.rfilename
@@ -3460,11 +3529,18 @@ class CatalogManager:
                     if not _matches_artifact_filters(rfilename, allow_pats, ignore_pats, has_model_index):
                         continue
 
+                if indexed_files is not None and rfilename.startswith(indexed_dir) and rfilename.endswith(".safetensors") and rfilename not in indexed_files:
+                    continue
                 fsize = int(getattr(sib, "size", None) or 0)
                 local_target = subdir / rfilename
                 exists_already = local_target.exists() and (
                     fsize == 0 or local_target.stat().st_size == fsize
                 )
+                # Size alone does not prove an existing shard belongs to this
+                # revision. Let the Hub revalidate it instead of silently mixing
+                # revisions; the index itself was just fetched at that revision.
+                if selected_index and rfilename != selected_index:
+                    exists_already = False
                 total_bytes += fsize
                 if exists_already:
                     already_bytes += fsize
@@ -3473,6 +3549,7 @@ class CatalogManager:
                         "repo_id": repo_id,
                         "rfilename": rfilename,
                         "subdir": subdir,
+                        "revision": revision,
                         "size": fsize,
                         "exists": exists_already,
                     }
@@ -3481,7 +3558,10 @@ class CatalogManager:
         if not plan_files:
             raise RuntimeError("No se encontraron archivos descargables en el repositorio indicado.")
 
-        exact_check = self.check_disk_space(model_id, required_bytes_override=total_bytes)
+        # For a revision-pinned plan, unverified files cannot be counted as
+        # already downloaded: replacements may need a temporary copy on disk.
+        disk_plan = total_bytes - already_bytes + _dir_size_bytes(m_dir) if pinned_index_plan else total_bytes
+        exact_check = self.check_disk_space(model_id, required_bytes_override=disk_plan)
         if not exact_check["ok"]:
             raise RuntimeError(exact_check["message"])
 
@@ -3622,6 +3702,7 @@ class CatalogManager:
                         local_dir=str(item["subdir"]),
                         tqdm_class=_JobTqdm,
                         token=tok,
+                        **({"revision": item["revision"]} if item.get("revision") else {}),
                     )
             finally:
                 file_progress["done"] = True
@@ -3644,12 +3725,21 @@ class CatalogManager:
                 shutil.rmtree(hf_local_cache, ignore_errors=True)
 
         actual_gb = self.disk_usage_gb(model_id)
+        manifest = []
+        if defn.get("ltx_fp8_cast"):
+            for item in plan_files:
+                file = Path(item["subdir"]) / item["rfilename"]
+                expected = int(item["size"] or 0)
+                if not file.is_file() or file.stat().st_size == 0 or (expected and file.stat().st_size != expected):
+                    raise RuntimeError(f"Verificación fallida: tamaño incorrecto de {item['rfilename']}.")
+                manifest.append({"path": str(file.relative_to(m_dir)), "size": expected})
         self.marker_file(model_id).write_text(
             json.dumps(
                 {
                     "model_id": model_id,
                     "completed_at": time.time(),
                     "actual_disk_gb": actual_gb,
+                    **({"files": manifest} if defn.get("ltx_fp8_cast") else {}),
                 },
                 indent=2,
             ),

@@ -176,10 +176,11 @@ def assess_definition(defn: Dict[str, Any], context: Dict[str, Any], *, catalog:
             bf16 = False
         elif tier in {"L4", "A100", "H100"}:
             bf16 = True
-    dtype_ok = not ((contract or {}).get("native_bf16") and bf16 is False)
+    needs_native_bf16 = bool((contract or {}).get("native_bf16") or defn.get("ltx_fp8_cast"))
+    dtype_ok = not (needs_native_bf16 and bf16 is False)
     if not dtype_ok:
         reasons.append("Esta receta exige BF16 nativo (Ampere/Ada/Hopper); no se convierte ni cuantiza automáticamente para T4/V100.")
-    dtype_unknown = bool((contract or {}).get("native_bf16") and bf16 is None)
+    dtype_unknown = bool(needs_native_bf16 and bf16 is None)
     if dtype_unknown:
         warnings.append("Soporte BF16 de la GPU no comprobado.")
     needs_unload = bool(min_vram and vram_free is not None and vram_free < vram_admission and fits["vram"] == "fits_estimate")
@@ -225,7 +226,7 @@ def assess_definition(defn: Dict[str, Any], context: Dict[str, Any], *, catalog:
                      "output_reserve_gb": output_reserve, "total_required_free_gb": total_disk_budget},
         },
         "runtime": rt, "weights_prepared": downloaded, "reasons": reasons, "warnings": warnings,
-        "memory_strategy": (contract or {}).get("quantization", "CPU" if cpu else "Precisión del pipeline + CPU offload; sin cuantización automática"),
+        "memory_strategy": defn.get("memory_strategy") or (contract or {}).get("quantization", "CPU" if cpu else "Precisión del pipeline + CPU offload; sin cuantización automática"),
         "limits": "Estimación para los valores predeterminados. Resolución, frames, VAE, encoders, LoRAs y procesos externos cambian el pico; no garantiza ausencia de OOM ni tiempos.",
     }
 

@@ -55,6 +55,8 @@ FAST_VIDEO_RECIPES = {
     "ltx-video-13b-distilled": None,
     "ltx-2.3-distilled-av": None,
     "ltx-2.5-distilled-av": None,
+    "ltx-2.3-distilled-fp8-av": None,
+    "ltx-2.5-distilled-fp8-av": None,
     "wan22-ti2v-5b-turbo": None,
 }
 

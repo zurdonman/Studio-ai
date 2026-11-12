@@ -1735,17 +1735,24 @@ def _instantiate_video_pipeline(
         from diffusers import LTX2ConditionPipeline, LTX2Pipeline  # type: ignore
 
         load_kwargs = {"torch_dtype": torch.bfloat16}
-        if (defn or {}).get("id") in ("ltx-2.5-full-av", "ltx-2.5-distilled-av"):
+        if (defn or {}).get("ltx25") or (defn or {}).get("id") in ("ltx-2.5-full-av", "ltx-2.5-distilled-av"):
             # These optional model-index components are not part of the one-stage recipe.
             load_kwargs.update(prompt_enhancer=None, duration_head=None)
-        if (defn or {}).get("ltx_full_transformer"):
-            from diffusers import FlowMatchEulerDiscreteScheduler, LTX2VideoTransformer3DModel
-            load_kwargs["transformer"] = guarded_model_load(
+        if (defn or {}).get("ltx_full_transformer") or (defn or {}).get("ltx_fp8_cast"):
+            from diffusers import LTX2VideoTransformer3DModel
+            transformer = guarded_model_load(
                 LTX2VideoTransformer3DModel.from_pretrained, bdir,
-                subfolder="transformer_full", torch_dtype=torch.bfloat16, local_files_only=True,
+                subfolder="transformer_full" if (defn or {}).get("ltx_full_transformer") else "transformer",
+                torch_dtype=torch.bfloat16, local_files_only=True,
             )
+            if (defn or {}).get("ltx_fp8_cast"):
+                _enable_fp8_layerwise_casting_safe(transformer)
+                if not _is_module_layerwise_fp8(transformer):
+                    raise RuntimeError("LTX_FP8_CAST_FAILED: no se activó almacenamiento FP8; no se continúa en BF16 silenciosamente.")
+            load_kwargs["transformer"] = transformer
         pipe_cond = guarded_model_load(LTX2ConditionPipeline.from_pretrained, bdir, local_files_only=True, **load_kwargs)
         if (defn or {}).get("ltx_full_transformer"):
+            from diffusers import FlowMatchEulerDiscreteScheduler
             pipe_cond.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
                 pipe_cond.scheduler.config, use_dynamic_shifting=True, shift_terminal=0.1,
             )
@@ -1915,10 +1922,12 @@ def _load_video_model_into_memory_locked(
             from diffusers import LTX2ConditionPipeline, LTX2Pipeline, FlowMatchEulerDiscreteScheduler  # noqa: F401
             if defn.get("ltx_distilled"):
                 from diffusers.pipelines.ltx2.utils import DISTILLED_SIGMA_VALUES  # noqa: F401
-            if defn.get("ltx_full_transformer") or model_id == "ltx-2.5-distilled-av":
+            if defn.get("ltx_full_transformer") or defn.get("ltx25") or model_id == "ltx-2.5-distilled-av":
                 from transformers import Gemma4UnifiedForConditionalGeneration  # noqa: F401
-            if defn.get("ltx_full_transformer"):
-                from diffusers import LTX2VideoTransformer3DModel  # noqa: F401
+            if defn.get("ltx_full_transformer") or defn.get("ltx_fp8_cast"):
+                from diffusers import LTX2VideoTransformer3DModel
+                if defn.get("ltx_fp8_cast") and (not hasattr(torch, "float8_e4m3fn") or not callable(getattr(LTX2VideoTransformer3DModel, "enable_layerwise_casting", None))):
+                    raise RuntimeError("LTX_FP8_RUNTIME_UNSUPPORTED: faltan FP8 o layerwise casting; no se descargan pesos.")
         except (ImportError, AttributeError) as exc:
             raise RuntimeError("LTX_RUNTIME_INCOMPATIBLE: faltan componentes de Diffusers/Transformers; reinicia Studio para instalar las dependencias de Colab.") from exc
 
@@ -1995,6 +2004,8 @@ def _load_video_model_into_memory_locked(
 
     p_s = _map_pct(0.14)
     p_e = _map_pct(0.84)
+    if job and defn.get("ltx_fp8_cast"):
+        job.log("FP8: se carga primero el transformer BF16 y se convierte en memoria a FP8 por capas; el cálculo sigue en BF16. El encoder y los VAE no se cuantizan. Pico de RAM no validado.", progress=p_s)
     if job:
         job.log(
             f"Cargando pipeline «{defn['name']}» ({'transformer FP8 explícito + componentes BF16/FP32' if engine in ('wan_vace_fp8', 'wan_i2v_14b_fp8') else 'precisión de la receta'})...",
