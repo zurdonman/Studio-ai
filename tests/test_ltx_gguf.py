@@ -689,3 +689,17 @@ def test_gemma4_download_errors_distinguish_auth_network_and_unknown_without_sec
     wrapped = LocalEntryNotFoundError('outer')
     wrapped.__cause__ = GatedRepoError('secret')
     assert 'GGUF_GEMMA4_ACCESS' in p._download_error(wrapped, False)
+
+
+def test_comfy_server_command_supports_both_pinned_runtimes(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import ltx_gguf_backend as b, ltx25_gguf as b25
+    monkeypatch.setattr(b, 'ROOT', tmp_path/'base')
+    monkeypatch.setattr(b25, 'Q5_RUNTIME', tmp_path/'q5')
+    for root in [b.ROOT, b25.Q5_RUNTIME]:
+        cmd = b._server_command(18700, tmp_path/'in', tmp_path/'out', root)
+        assert cmd[0] == str(root/'venv/bin/python') and cmd[1] == str(root/'comfy/main.py')
+        assert '--disable-api-nodes' in cmd and '--offline' not in cmd
+        assert cmd[cmd.index('--listen')+1] == '127.0.0.1'
+        assert '--disable-all-custom-nodes' in cmd
+        assert cmd[cmd.index('--whitelist-custom-nodes')+1] == 'ComfyUI-GGUF'
+        assert '--reserve-vram' in cmd and '--disable-metadata' in cmd
