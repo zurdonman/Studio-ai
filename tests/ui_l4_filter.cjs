@@ -50,6 +50,7 @@ const model = (id, fit, extra = {}) => ({
       data = {hardware:{gpu:{has_gpu:false}, ram:{used_gb:1,total_gb:4,percent:25}, disk:{free_gb:9,total_gb:10,percent:10}, credits:{remaining_credits:0,estimated_hours_left:null,hourly_rate:0,session_spent:0}, ephemeral_disk_notice:""}, memory:{loaded_slots:[]}, jobs:[imageJob,ggufJob], active_jobs_count:2, hf_auth:{}, runtime:{}};
     }
     else if (u.pathname === "/api/video/ltx-gguf") { statusEnabled = true; data = {job:{id:"gguf-test"}}; }
+    else if (u.pathname === "/api/tts/clone") data = {job:{id:"clone-test"}};
     return {ok:true, json: async()=>data};
   };
   w.eval(fs.readFileSync("studio/static/app.js", "utf8"));
@@ -182,6 +183,15 @@ const model = (id, fit, extra = {}) => ({
     const req = requests.filter(r => r.path === "/api/video/ltx-gguf" && r.method === "POST").at(-1);
     if (!req || JSON.parse(req.body).model_id !== id) throw Error(`Wrong Q4 generate: ${id}`);
   }
+  const refOption = w.document.createElement("option"); refOption.value = "uploads/ref.wav"; refOption.textContent = "ref.wav";
+  $("clone-reference").appendChild(refOption); $("clone-reference").value = refOption.value;
+  $("clone-text").value = "Buenos días"; $("clone-transcript").value = "Hola";
+  $("btn-clone-voice").click(); await wait(20);
+  if (requests.some(r => r.path === "/api/tts/clone")) throw Error("Clone submitted without consent");
+  $("clone-authorized").checked = true; $("btn-clone-voice").click(); await wait(20);
+  const cloneRequest = requests.find(r => r.path === "/api/tts/clone");
+  const cloneBody = cloneRequest && JSON.parse(cloneRequest.body);
+  if (!cloneBody || !cloneBody.authorized || cloneBody.reference_rel !== refOption.value || cloneBody.text !== "Buenos días" || cloneBody.reference_text !== "Hola") throw Error("Wrong voice-clone request");
   pill("L4").click(); pill("T4").click();
   await wait(110);
   if (ids().length !== 0 || !w.document.querySelector('#vid-gpu-pills [data-gpu="T4"]').classList.contains("active")) throw Error("Stale profile response overrode newer selection");

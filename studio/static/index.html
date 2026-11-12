@@ -805,7 +805,21 @@
                 🎙️ Generar Locución
               </button>
 
-              <p class="muted">Estos motores generan locuciones, pero no clonan voces. Para probar una referencia de voz con vídeo y audio nativos, usa el panel experimental ID-LoRA.</p>
+              <p class="muted">Los motores anteriores no clonan voces. Para probar clonación independiente utiliza el panel siguiente.</p>
+              <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 10px;" />
+              <h4 class="sub-heading">🧪 Generar diálogo con voz de referencia · Qwen3-TTS</h4>
+              <p class="muted">Sube una muestra limpia autorizada de 3–15 s (unos 5 s recomendados). Reutilízala en cada frase. Modelo experimental sin prueba GPU/L4: no garantiza voz idéntica, texto o idioma. La primera vez descarga ~2,5 GB de pesos más dependencias en un entorno aislado. Apache-2.0; consulta los términos del modelo.</p>
+              <label class="field-label">Muestra de voz autorizada</label>
+              <div class="row-gap"><select id="clone-reference" class="flex-1"></select><label class="btn btn-secondary btn-sm file-btn">Subir muestra<input id="clone-upload" type="file" accept="audio/*" hidden /></label></div>
+              <label class="field-label">Transcripción exacta de la muestra (opcional; recomendada)</label>
+              <textarea id="clone-transcript" rows="2" maxlength="2000" placeholder="Escribe lo que se oye en la muestra; si la omites se usa solo la identidad vocal."></textarea>
+              <label class="field-label">Frase nueva en español (hasta 500 caracteres)</label>
+              <textarea id="clone-text" rows="3" maxlength="500" placeholder="Escribe la frase nueva que debe decir la voz."></textarea>
+              <label class="check-row"><input type="checkbox" id="clone-authorized" /> Tengo permiso de la persona para utilizar su voz.</label>
+              <button class="btn btn-primary" id="btn-clone-voice">Generar audio con esta voz</button>
+              <div class="vid-steps-note" id="clone-feedback" role="status" hidden></div>
+              <p class="muted">El audio aparecerá en la biblioteca. Para LTX GGUF elige «Audio completo guía el vídeo»; la salida puede variar por el VAE. Usa frases cortas: GGUF admite audio de 1–20 s.</p>
+              <div id="clone-result" hidden><audio id="clone-result-player" controls preload="none"></audio><div class="row-gap"><a class="btn btn-secondary btn-sm" id="clone-result-download" download>Descargar WAV</a><button class="btn btn-secondary btn-sm" id="clone-result-video">Usar en vídeo GGUF</button></div></div>
 
               <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 10px;" />
               <h4 class="sub-heading">🧪 ID-LoRA · Voz de referencia para vídeo</h4>

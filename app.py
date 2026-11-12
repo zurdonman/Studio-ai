@@ -1160,6 +1160,38 @@ def api_tts_voices() -> Dict[str, Any]:
     return {"voices": EDGE_TTS_VOICES}
 
 
+class VoiceCloneReq(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+    reference_rel: str = Field(min_length=1)
+    reference_text: str = Field(default="", max_length=2000)
+    authorized: bool = False
+
+
+@app.post("/api/tts/clone")
+def api_clone_voice(req: VoiceCloneReq) -> Dict[str, Any]:
+    from studio.engines.voice_clone_reference import validate_clone_request, MIN_REFERENCE_SECONDS, MAX_REFERENCE_SECONDS, MAX_REFERENCE_BYTES
+    from studio.engines.ffmpeg_utils import probe_media_info
+    from studio.engines.qwen_clone import ENGINE, synthesize
+    if not req.authorized:
+        raise HTTPException(status_code=400, detail="Confirma que tienes permiso para usar esta voz.")
+    try:
+        validate_clone_request(ENGINE, req.text, req.reference_text)
+        reference = _resolve_media_rel(req.reference_rel)
+        if not reference or not reference.is_file() or reference.stat().st_size > MAX_REFERENCE_BYTES:
+            raise ValueError("Selecciona un audio de referencia válido de hasta 50 MiB.")
+        info = probe_media_info(reference)
+        seconds = info.get("duration_seconds") or 0
+        if not info.get("has_audio") or info.get("has_video") or not MIN_REFERENCE_SECONDS <= seconds <= MAX_REFERENCE_SECONDS:
+            raise ValueError("La muestra debe ser audio sin vídeo de 3 a 15 segundos.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    job = job_manager.submit(kind="tts", title="Voz de referencia Qwen3-TTS (experimental)",
+        fn=lambda j: synthesize(text=req.text, reference_path=reference, reference_text=req.reference_text, job=j))
+    return {"ok": True, "job": job.to_dict()}
+
+
 @app.post("/api/tts/generate")
 def api_generate_tts(req: TTSGenReq) -> Dict[str, Any]:
     if not req.text.strip():

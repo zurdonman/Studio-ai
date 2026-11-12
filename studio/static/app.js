@@ -431,6 +431,11 @@
         } else if (j.status === "failed") {
           state.completedHandled.add(j.id);
           toast(`Error en «${j.title}»: ${j.error || "Revisa el registro"}`, "error");
+          if (j.title === "Voz de referencia Qwen3-TTS (experimental)" && $("clone-feedback")) {
+            $("clone-feedback").hidden = false;
+            $("clone-feedback").className = "vid-steps-note warn";
+            $("clone-feedback").textContent = `Error de clonación: ${j.error || "Revisa el registro de la tarea"}`;
+          }
           if (/LTX 2\.[35] GGUF/.test(j.title || "") && $("ltx-gguf-error")) {
             $("ltx-gguf-error").hidden = false;
             $("ltx-gguf-error").textContent = `Error GGUF: ${j.error || "Revisa el registro de la tarea"}`;
@@ -508,6 +513,16 @@
       showVideoResult(res);
       toast(res.duration_warning || "Clip de vídeo MP4 listo.", res.duration_warning ? "error" : "success");
     } else if (job.kind === "tts" && res.media_url) {
+      if (res.model_id === "qwen3-tts-0.6b-base") {
+        state.lastCloneResult = res;
+        $("clone-feedback").hidden = false;
+        $("clone-feedback").className = "vid-steps-note ok";
+        $("clone-feedback").textContent = "Audio generado y guardado en la biblioteca.";
+        $("clone-result").hidden = false;
+        $("clone-result-player").src = res.media_url;
+        $("clone-result-download").href = res.media_url;
+        $("clone-result-download").download = res.filename || "voz.wav";
+      }
       toast(`Locución lista (${res.duration_seconds}s).`, "success");
     } else if (["music_mix", "midi_render"].includes(job.kind) && res.media_url) {
       $("music-result").hidden = false;
@@ -2110,7 +2125,7 @@
   function renderIdLoraSelects() {
     const images = [...state.assets.images, ...state.assets.uploads.filter(x => x.type === "image")];
     const audio = [...state.assets.audio, ...state.assets.uploads.filter(x => x.type === "audio")];
-    for (const [id, items, label] of [["id-lora-image", images, "Selecciona un primer fotograma"], ["id-lora-voice", audio, "Selecciona una referencia de voz"]]) {
+    for (const [id, items, label] of [["id-lora-image", images, "Selecciona un primer fotograma"], ["id-lora-voice", audio, "Selecciona una referencia de voz"], ["clone-reference", audio, "Selecciona una muestra de voz"]]) {
       const el = $(id); if (!el) continue;
       const prev = el.value;
       el.innerHTML = `<option value="">${label}</option>` + items.map(a => `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
@@ -3611,6 +3626,41 @@
       try {
         const res = await api("/api/video/id-lora", {method: "POST", body: JSON.stringify({image_rel, reference_voice_rel, prompt, seed: Number($("id-lora-seed").value)})});
         watchJob(res.job);
+      } catch (e) { toast(e.message, "error"); }
+    });
+
+    $("clone-upload").addEventListener("change", async ev => {
+      const file = ev.target.files[0]; if (!file) return;
+      try { const asset = await uploadFile(file); $("clone-reference").value = asset.rel_path; toast(`Muestra subida: ${asset.filename}`, "success"); }
+      catch (e) { toast(e.message, "error"); } finally { ev.target.value = ""; }
+    });
+    $("btn-clone-voice").addEventListener("click", async () => {
+      const reference_rel = $("clone-reference").value, text = $("clone-text").value.trim();
+      if (!reference_rel || !text || !$("clone-authorized").checked) return toast("Elige una muestra, escribe la frase y confirma el permiso de uso de la voz.", "error");
+      if (!confirm("Qwen3-TTS es experimental y sin prueba en L4. La primera ejecución puede descargar ~2,5 GB más dependencias; podría rechazarse por memoria. ¿Continuar?")) return;
+      try {
+        const res = await api("/api/tts/clone", {method:"POST", body:JSON.stringify({reference_rel, text, reference_text:$("clone-transcript").value, authorized:true})});
+        $("clone-feedback").hidden = false;
+        $("clone-feedback").className = "vid-steps-note";
+        $("clone-feedback").textContent = "Tarea enviada; sigue el progreso en el panel de tareas.";
+        watchJob(res.job);
+      } catch (e) {
+        $("clone-feedback").hidden = false;
+        $("clone-feedback").className = "vid-steps-note warn";
+        $("clone-feedback").textContent = `Error de clonación: ${e.message}`;
+        toast(e.message, "error");
+      }
+    });
+    $("clone-result-video").addEventListener("click", async () => {
+      const result = state.lastCloneResult;
+      if (!result) return;
+      try {
+        await loadAssets();
+        switchTab("tab-video");
+        $("vid-source-audio").value = result.rel_path;
+        if ($("vid-source-audio").value !== result.rel_path) throw new Error("No se encontró el audio en la biblioteca. Intenta actualizarla.");
+        $("vid-gguf-voice-mode").value = "audio";
+        toast(result.duration_seconds > 20 ? "Audio seleccionado: supera 20 s; usa una frase más corta para LTX GGUF." : "Audio seleccionado. Elige LTX GGUF y Audio completo guía el vídeo.", result.duration_seconds > 20 ? "error" : "success");
       } catch (e) { toast(e.message, "error"); }
     });
 
