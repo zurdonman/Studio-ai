@@ -24,6 +24,11 @@ def test_gguf_graph_has_joint_audio_video_and_no_injected_user_nodes():
     assert g["19"]["inputs"]["audio"] == ["18", 0]
     assert len(g["14"]["inputs"]["sigmas"].split(",")) == 9
     assert graph(image_name=None)["10"]["inputs"]["video_latent"] == ["8", 0]
+    assert graph(image_strength=.7)["22"]["inputs"]["strength"] == .7
+    assert graph(frames=601)["9"]["inputs"]["frames_number"] == 601
+    for kw in ({"frames":609}, {"image_strength":.49}, {"image_strength":float("nan")}):
+        with pytest.raises(ValueError):
+            graph(**kw)
     for kw in ({"model": "../evil.gguf"}, {"image_name":"/tmp/x.png"}, {"width":513}, {"frames":48}, {"fps":float("nan")}):
         with pytest.raises(ValueError):
             graph(**kw)
@@ -61,7 +66,8 @@ def test_gguf_real_api_route_with_synthetic_av(temp_studio_env, monkeypatch):
     Image.new('RGB', (256, 256), 'blue').save(img)
     monkeypatch.setattr(b, 'query_gpu_info', lambda: {'has_gpu':True, 'bf16_supported':True, 'vram_total_gb':22})
     monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: None)
-    monkeypatch.setattr(b.memory_manager, 'ensure_capacity', lambda **kwargs: None)
+    capacity_calls = []
+    monkeypatch.setattr(b.memory_manager, 'ensure_capacity', lambda **kwargs: capacity_calls.append(kwargs))
     monkeypatch.setattr(b, '_install', lambda *_: None)
     monkeypatch.setattr(b, '_probe_runtime', lambda *_: None)
     monkeypatch.setattr(b, '_prepare_models', lambda *_: None)
@@ -83,11 +89,15 @@ def test_gguf_real_api_route_with_synthetic_av(temp_studio_env, monkeypatch):
         return path
     monkeypatch.setattr(b, '_infer', synth)
     result = b.generate_gguf(image_path=img, prompt='test', negative_prompt='', seed=42, job=JobRecord('video','test'),
-                             duration_sec=10, fps=24, width=512, height=320)
+                             duration_sec=20, fps=24, width=512, height=320, speech_language='es', image_strength=.7)
     info = probe_media_info(root / result['rel_path'])
     assert info['has_video'] and info['has_audio'] and result['audio_native'] is True and len(seen) == 1
-    assert seen[0]['8']['inputs']['length'] == 241 and seen[0]['9']['inputs']['frames_number'] == 241
-    assert result['frames'] == 241 and result['requested_duration_sec'] == 10
+    assert seen[0]['8']['inputs']['length'] == 481 and seen[0]['9']['inputs']['frames_number'] == 481
+    assert seen[0]['22']['inputs']['strength'] == .7
+    assert 'spoken dialogue is in Spanish' in seen[0]['5']['inputs']['text']
+    assert result['frames'] == 481 and result['requested_duration_sec'] == 20
+    assert result['speech_language_hint'] == 'es' and result['image_strength'] == .7
+    assert any(c['ram_gb'] > 32 and c['vram_gb'] > 14 for c in capacity_calls)
 
 
 def test_gguf_api_input_validation_and_panel(temp_studio_env):
@@ -109,7 +119,7 @@ def test_gguf_http_submits_job_with_image(temp_studio_env, monkeypatch):
         calls.append(kw)
         return {'media_url':'/media/outputs/videos/synthetic.mp4'}
     monkeypatch.setattr(b, 'generate_gguf', fake)
-    r = client.post('/api/video/ltx-gguf', json={'prompt':'Hola', 'image_rel':'uploads/frame.png', 'seed':7})
+    r = client.post('/api/video/ltx-gguf', json={'prompt':'Hola', 'image_rel':'uploads/frame.png', 'seed':7, 'duration_sec':20, 'speech_language':'es', 'image_strength':.75})
     assert r.status_code == 200
     ident = r.json()['job']['id']
     for _ in range(50):
@@ -117,6 +127,7 @@ def test_gguf_http_submits_job_with_image(temp_studio_env, monkeypatch):
             break
         time.sleep(.02)
     assert calls and calls[0]['image_path'] == image and calls[0]['seed'] == 7
+    assert calls[0]['duration_sec'] == 20 and calls[0]['speech_language'] == 'es' and calls[0]['image_strength'] == .75
     assert ident
 
 
@@ -269,7 +280,11 @@ def test_gguf_duration_quantization_and_api_validation(temp_studio_env):
     assert frames_for_duration(2, 24) == 49
     assert abs(frames_for_duration(7.5, 24) / 24 - 7.5) <= 4 / 24
     assert client.post('/api/video/ltx-gguf', json={'prompt': 'hola', 'width': 510}).status_code == 400
-    assert client.post('/api/video/ltx-gguf', json={'prompt': 'hola', 'duration_sec': 20}).status_code == 422
+    assert frames_for_duration(20, 24) == 481
+    assert frames_for_duration(20, 30) == 601
+    assert client.post('/api/video/ltx-gguf', json={'prompt': 'hola', 'duration_sec': 20.1}).status_code == 422
+    assert client.post('/api/video/ltx-gguf', json={'prompt': 'hola', 'image_strength': .4}).status_code == 422
+    assert client.post('/api/video/ltx-gguf', json={'prompt': 'hola', 'speech_language': 'fr'}).status_code == 422
     assert client.post('/api/video/ltx-gguf', json={'prompt': 'hola', 'width': 768, 'height': 768}).status_code == 400
 
 

@@ -10,6 +10,10 @@ const model = (id, fit, extra = {}) => ({
 });
 (async () => {
   const errors = [], requests = [];
+  let statusEnabled = false;
+  const runningJob = (id, title, kind, step, progress) => ({id, title, kind, current_step: step, progress, status: "running", elapsed_seconds: 12, speed_text: "1.2 s/it", logs: []});
+  const imageJob = runningJob("image", "Imagen Qwen", "image", "Render imagen", 22);
+  const ggufJob = runningJob("gguf-test", "LTX 2.3 GGUF Q4 · audio y vídeo (experimental)", "video", "Difusión: paso 4/8", 50);
   const vc = new VirtualConsole();
   vc.on("jsdomError", e => errors.push(e.message));
   const dom = new JSDOM(fs.readFileSync("studio/static/index.html", "utf8"), {
@@ -38,8 +42,11 @@ const model = (id, fit, extra = {}) => ({
       data = {uploads:[], images:[], videos:[], audio:[], montages:[]};
     } else if (u.pathname === "/api/tts/voices") data = {voices:[]};
     else if (u.pathname === "/api/higgsfield/catalog") data = {cameras:{},lenses:{},focal_lengths:{},apertures:{},lighting_moods:{},motions:{},characters:[]};
-    else if (u.pathname === "/api/status") { throw new Error("poll not needed"); }
-    else if (u.pathname === "/api/video/ltx-gguf") data = {job:{id:"gguf-test"}};
+    else if (u.pathname === "/api/status") {
+      if (!statusEnabled) throw new Error("poll not needed");
+      data = {hardware:{gpu:{has_gpu:false}, ram:{used_gb:1,total_gb:4,percent:25}, disk:{free_gb:9,total_gb:10,percent:10}, credits:{remaining_credits:0,estimated_hours_left:null,hourly_rate:0,session_spent:0}, ephemeral_disk_notice:""}, memory:{loaded_slots:[]}, jobs:[imageJob,ggufJob], active_jobs_count:2, hf_auth:{}, runtime:{}};
+    }
+    else if (u.pathname === "/api/video/ltx-gguf") { statusEnabled = true; data = {job:{id:"gguf-test"}}; }
     return {ok:true, json: async()=>data};
   };
   w.eval(fs.readFileSync("studio/static/app.js", "utf8"));
@@ -93,13 +100,20 @@ const model = (id, fit, extra = {}) => ({
   if ($("select-video-model").value !== ggufId) throw Error("Switching supported submode changed GGUF selection");
   $("vid-prompt").value = "A person waves";
   $("vid-width").value = "512"; $("vid-height").value = "320";
-  $("vid-duration").value = "10"; $("vid-fps").value = "24";
+  $("vid-duration").value = "20"; $("vid-fps").value = "24";
+  $("vid-gguf-spanish").checked = true; $("vid-gguf-strength").value = ".7";
+  if ($("vid-duration").max !== "20" || $("vid-gguf-guidance").hidden) throw Error("GGUF experimental options unavailable");
   if (!$("vid-steps").disabled || !$("vid-cfg").disabled) throw Error("GGUF fixed settings not disabled");
   $("btn-run-video").click();
   await wait(20);
   const ggufRequest = requests.find(r => r.path === "/api/video/ltx-gguf" && r.method === "POST");
-  if (!ggufRequest || JSON.parse(ggufRequest.body).prompt !== "A person waves" || JSON.parse(ggufRequest.body).duration_sec !== 10 || JSON.parse(ggufRequest.body).width !== 512) throw Error("GGUF generation used wrong endpoint or parameters");
+  if (!ggufRequest || JSON.parse(ggufRequest.body).prompt !== "A person waves" || JSON.parse(ggufRequest.body).duration_sec !== 20 || JSON.parse(ggufRequest.body).width !== 512 || JSON.parse(ggufRequest.body).speech_language !== "es" || JSON.parse(ggufRequest.body).image_strength !== .7) throw Error("GGUF generation used wrong endpoint or parameters");
   if ($("vid-gguf-feedback").hidden || !$("vid-gguf-feedback").textContent.includes("enviada")) throw Error("GGUF submission confirmation missing");
+  if ($("vid-gguf-live-progress").hidden || $("vid-gguf-live-step").textContent !== "Difusión: paso 4/8" || $("vid-gguf-live-bar").style.width !== "50%") throw Error("GGUF concurrent progress not displayed");
+  if ($("img-inline-progress").hidden || !$("img-iep-step").textContent.includes("Render imagen")) throw Error("Concurrent image progress hidden");
+  $("btn-cancel-gguf").click();
+  await wait(20);
+  if (!requests.some(r => r.path === "/api/jobs/gguf-test/cancel" && r.method === "POST")) throw Error("GGUF cancel targeted wrong job");
   pill("L4").click(); pill("T4").click();
   await wait(110);
   if (ids().length !== 0 || !w.document.querySelector('#vid-gpu-pills [data-gpu="T4"]').classList.contains("active")) throw Error("Stale profile response overrode newer selection");

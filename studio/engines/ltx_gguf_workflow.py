@@ -14,13 +14,15 @@ SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
 def make_graph(*, prompt: str, negative_prompt: str, width: int, height: int,
                frames: int, fps: float, seed: int, image_name: str | None,
                model: str, text_encoder: str, connectors: str,
-               video_vae: str, audio_vae: str) -> dict:
+               video_vae: str, audio_vae: str, image_strength: float = 1.0) -> dict:
     if not prompt.strip():
         raise ValueError("El prompt no puede estar vacío")
     if width < 256 or height < 256 or width % 32 or height % 32 or width * height > 768 * 512:
         raise ValueError("Resolución experimental: múltiplos de 32, mínimo 256 y máximo 768×512 píxeles")
-    if frames < 9 or frames > 305 or (frames - 1) % 8 or not math.isfinite(fps) or not 1 <= fps <= 30:
-        raise ValueError("Frames deben cumplir 8n+1 y ser 9–305; fps entre 1 y 30")
+    if frames < 9 or frames > 601 or (frames - 1) % 8 or not math.isfinite(fps) or not 1 <= fps <= 30:
+        raise ValueError("Frames deben cumplir 8n+1 y ser 9–601; fps entre 1 y 30")
+    if not math.isfinite(image_strength) or not 0.5 <= image_strength <= 1.0:
+        raise ValueError("La fidelidad del primer fotograma debe estar entre 0.5 y 1")
     if not 0 <= seed <= 2**63 - 1:
         raise ValueError("Semilla fuera de rango")
     for name in [model, text_encoder, connectors, video_vae, audio_vae, *([image_name] if image_name else [])]:
@@ -52,6 +54,6 @@ def make_graph(*, prompt: str, negative_prompt: str, width: int, height: int,
     }
     if image_name:
         graph["21"] = n("LoadImage", image=image_name)
-        graph["22"] = n("LTXVImgToVideoInplace", vae=["3", 0], image=["21", 0], latent=["8", 0], strength=1.0, bypass=False)
+        graph["22"] = n("LTXVImgToVideoInplace", vae=["3", 0], image=["21", 0], latent=["8", 0], strength=image_strength, bypass=False)
         graph["10"]["inputs"]["video_latent"] = ["22", 0]
     return graph

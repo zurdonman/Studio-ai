@@ -1467,6 +1467,20 @@ select:focus {
   cursor: pointer;
 }
 
+.vid-gguf-guidance, .gguf-live-progress {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: #172033;
+}
+.vid-gguf-guidance[hidden], .gguf-live-progress[hidden], #vid-gguf-strength-wrap[hidden] { display: none !important; }
+.vid-gguf-guidance p { margin: 6px 0 0; }
+.vid-gguf-guidance input[type="number"] { width: 80px; margin-left: 8px; }
+.gguf-progress-header { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.gguf-progress-step { margin-top: 6px; color: #bfdbfe; }
+.gguf-live-progress button { margin-top: 8px; }
+
 /* Cuadrícula compacta de tarjetas seleccionables de Vídeo */
 .video-model-cards {
   display: grid;

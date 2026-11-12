@@ -155,11 +155,16 @@
 
   // ==================== TELEMETRÍA Y TRABAJOS (POLLING) ====================
   let _pollTimer = null;
+  let _statusRequestSeq = 0;
+  let _statusAppliedSeq = 0;
 
   async function pollStatus() {
+    const requestSeq = ++_statusRequestSeq;
     let activeCount = 0;
     try {
       const snap = await api("/api/status");
+      if (requestSeq < _statusAppliedSeq) return snap.active_jobs_count || 0;
+      _statusAppliedSeq = requestSeq;
       activeCount = snap.active_jobs_count || 0;
       renderHardware(snap.hardware, snap.memory, snap.unexported_outputs_count);
       renderHfAuthStatus(snap.hf_auth);
@@ -328,7 +333,14 @@
     }
 
     // Tarjeta de trabajo activo (panel derecho + barra global superior + barra inline del motor)
-    const topRunning = running[0];
+    const topRunning = running.find(j => j.id === state.selectedJobId) ||
+      running.find(j => state.watchedJobs.has(j.id)) || running[0];
+    const isVideoJob = j => j.kind === "video" || /wan|ltx|sana|skyreels|cogvideo|vace|vídeo|video/i.test(j.title || "");
+    const isImageJob = j => j.kind === "image" || /qwen|imagen|lora/i.test(j.title || "");
+    const vidJob = running.find(j => j.id === state.selectedJobId && isVideoJob(j)) || running.find(isVideoJob);
+    const imgJob = running.find(j => j.id === state.selectedJobId && isImageJob(j)) || running.find(isImageJob);
+    const ggufJob = running.find(j => j.id === state.selectedJobId && /LTX 2\.3 GGUF/.test(j.title || "")) ||
+      running.find(j => /LTX 2\.3 GGUF/.test(j.title || ""));
     const ajCard = $("active-job-card");
     const gjs = $("global-job-strip");
     const imgInline = $("img-inline-progress");
@@ -363,61 +375,50 @@
         : "";
       $("btn-gjs-cancel").onclick = () => cancelJob(topRunning.id);
 
-      // Barra inline directa en el panel de Imagen cuando descarga/carga Qwen o edita imagen
-      const isImgRelated =
-        topRunning.kind === "image" ||
-        (topRunning.title && /qwen|imagen|lora/i.test(topRunning.title));
-      if (isImgRelated && imgInline) {
-        imgInline.hidden = false;
-        const spd = topRunning.speed_text ? ` · ${topRunning.speed_text}` : "";
-        $("img-iep-step").textContent = `${topRunning.current_step || topRunning.title}${spd}`;
-        $("img-iep-meta").textContent = `${topRunning.progress}% (${topRunning.elapsed_seconds}s)`;
-        $("img-iep-bar").style.width = `${topRunning.progress}%`;
-        if (topRunning.kind === "load_model" || topRunning.kind === "download") {
-          btnQwen.disabled = true;
-          btnQwen.textContent = `⏳ ${topRunning.progress}% · Preparando Qwen...`;
-        }
-      } else if (imgInline) {
-        imgInline.hidden = true;
-        btnQwen.disabled = false;
-      }
-
-      // Barra inline directa en el panel de Vídeo
-      const isVidRelated =
-        topRunning.kind === "video" ||
-        (topRunning.title && /wan|ltx|sana|skyreels|cogvideo|vace|vídeo|video/i.test(topRunning.title));
-      if (isVidRelated && vidInline) {
-        vidInline.hidden = false;
-        const spd = topRunning.speed_text ? ` · ${topRunning.speed_text}` : "";
-        $("vid-iep-step").textContent = `${topRunning.current_step || topRunning.title}${spd}`;
-        $("vid-iep-meta").textContent = `${topRunning.progress}% (${topRunning.elapsed_seconds}s)`;
-        $("vid-iep-bar").style.width = `${topRunning.progress}%`;
-        if (topRunning.kind === "load_model" || topRunning.kind === "download") {
-          btnVidPrep.disabled = true;
-          btnVidPrep.textContent = `⏳ ${topRunning.progress}% · Preparando...`;
-        }
-      } else if (vidInline) {
-        vidInline.hidden = true;
-        btnVidPrep.disabled = false;
-      }
-
-      state.selectedJobId = topRunning.id;
+      if (!state.selectedJobId || !running.some(j => j.id === state.selectedJobId)) state.selectedJobId = topRunning.id;
     } else {
       ajCard.hidden = true;
       gjs.hidden = true;
-      if (imgInline) imgInline.hidden = true;
-      if (vidInline) vidInline.hidden = true;
-      if (btnQwen) btnQwen.disabled = false;
-      if (btnVidPrep) {
-        btnVidPrep.disabled = false;
-        syncVideoPrepareButtonLabel();
-      }
-      if (!state.selectedJobId && state.jobs.length > 0) {
-        state.selectedJobId = state.jobs[0].id;
-      }
+      if (!state.selectedJobId && state.jobs.length > 0) state.selectedJobId = state.jobs[0].id;
     }
 
+    if (imgInline) {
+      imgInline.hidden = !imgJob;
+      if (imgJob) {
+        $("img-iep-step").textContent = `${imgJob.current_step || imgJob.title}${imgJob.speed_text ? ` · ${imgJob.speed_text}` : ""}`;
+        $("img-iep-meta").textContent = `${imgJob.progress}% (${imgJob.elapsed_seconds}s)`;
+        $("img-iep-bar").style.width = `${imgJob.progress}%`;
+      }
+    }
+    if (btnQwen) {
+      btnQwen.disabled = !!(imgJob && ["load_model", "download"].includes(imgJob.kind));
+      if (btnQwen.disabled) btnQwen.textContent = `⏳ ${imgJob.progress}% · Preparando Qwen...`;
+    }
+    if (vidInline) {
+      vidInline.hidden = !vidJob;
+      if (vidJob) {
+        $("vid-iep-step").textContent = `${vidJob.current_step || vidJob.title}${vidJob.speed_text ? ` · ${vidJob.speed_text}` : ""}`;
+        $("vid-iep-meta").textContent = `${vidJob.progress}% (${vidJob.elapsed_seconds}s)`;
+        $("vid-iep-bar").style.width = `${vidJob.progress}%`;
+      }
+    }
+    if (btnVidPrep && vidJob && ["load_model", "download"].includes(vidJob.kind)) {
+      btnVidPrep.textContent = `⏳ ${vidJob.progress}% · Preparando...`;
+    }
+    const ggufLive = $("vid-gguf-live-progress");
+    if (ggufLive) {
+      ggufLive.hidden = !ggufJob;
+      if (ggufJob) {
+        $("vid-gguf-live-title").textContent = ggufJob.title;
+        $("vid-gguf-live-pct").textContent = `${ggufJob.progress}% · ${ggufJob.elapsed_seconds}s`;
+        $("vid-gguf-live-bar").style.width = `${ggufJob.progress}%`;
+        $("vid-gguf-live-step").textContent = ggufJob.current_step || "En cola";
+        $("vid-gguf-live-speed").textContent = ggufJob.speed_text || "";
+        $("btn-cancel-gguf").onclick = () => cancelJob(ggufJob.id);
+      }
+    }
     syncVideoSelectionControls();
+    if (!vidJob || !["load_model", "download"].includes(vidJob.kind)) syncVideoPrepareButtonLabel();
 
     // Detectar trabajos observados que acaban de terminar para refrescar vistas
     for (const j of state.jobs) {
@@ -765,6 +766,8 @@
       btn.classList.toggle("active", btn.dataset.submode === sub);
     });
 
+    if ($("vid-gguf-strength-wrap")) $("vid-gguf-strength-wrap").hidden =
+      !$("select-video-model") || $("select-video-model").value !== GGUF_MODEL_ID || sub !== "i2v";
     const isFfmpeg = sub === "ffmpeg";
     const isT2v = sub === "t2v";
     const isFlf = sub === "flf2v";
@@ -1414,6 +1417,9 @@
 
   function syncGgufControls(modelId) {
     const gguf = modelId === GGUF_MODEL_ID;
+    if ($("vid-duration")) $("vid-duration").max = gguf ? "20" : "10";
+    if ($("vid-gguf-guidance")) $("vid-gguf-guidance").hidden = !gguf;
+    if ($("vid-gguf-strength-wrap")) $("vid-gguf-strength-wrap").hidden = !gguf || state.videoSubmode !== "i2v";
     ["vid-steps", "vid-steps-slider", "vid-cfg", "btn-steps-fast-safe", "btn-reset-vid-steps"].forEach(id => {
       if ($(id)) $(id).disabled = gguf;
     });
@@ -3486,11 +3492,11 @@
       if (!["t2v", "i2v"].includes(sub)) return showInputError("GGUF admite solo Texto a Vídeo o Imagen a Vídeo.");
       const image_rel = sub === "i2v" ? $("vid-source-image").value : null;
       if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
-      if (!confirm("GGUF experimental: se usarán la resolución, duración y fps elegidos (8 pasos y CFG 1 fijos). Los clips largos consumen más memoria y no están validados en L4. Si falta, se descargarán hasta 24 GiB. ¿Generar?")) return;
+      if (!confirm("GGUF experimental: se usarán la resolución, duración y fps elegidos (8 pasos y CFG 1 fijos). Más de 10 s es experimental y consume más memoria; puede ser rechazado o fallar en L4. Si falta, se descargarán hasta 24 GiB. ¿Generar?")) return;
       try {
         $("ltx-gguf-error").hidden = true;
         ggufFeedback("Enviando solicitud de generación GGUF…");
-        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value)})});
+        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value), speech_language:$("vid-gguf-spanish").checked ? "es" : "auto", image_strength:Number($("vid-gguf-strength").value)})});
         if (!res || !res.job || !res.job.id) throw new Error("El servidor no devolvió una tarea de generación.");
         ggufFeedback("Generación enviada. Puedes seguir el progreso o cancelarla en el panel de tareas.");
         watchJob(res.job);

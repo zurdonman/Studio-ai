@@ -12,7 +12,7 @@ import zipfile
 from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -495,7 +495,7 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
                        "compatibility": unknown, "ltx_distilled": True,
                        "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                          "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
-                                         "official_note": "Duración 1–10 s; 8 pasos y CFG 1 fijos. Resolución y clips largos no validados en L4."}})
+                                         "official_note": "Duración experimental 1–20 s; 8 pasos y CFG 1 fijos. Más de 10 s no validado en L4."}})
     for model in models:
         model["hardware_assessment"] = model["compatibility"]
         if model["category"] == "image":
@@ -983,8 +983,10 @@ class LTXGGUFReq(BaseModel):
     seed: int = Field(default=0, ge=0, le=4294967295)
     width: int = Field(default=512, ge=256, le=768)
     height: int = Field(default=320, ge=256, le=768)
-    duration_sec: float = Field(default=2.0, ge=1, le=10, allow_inf_nan=False)
+    duration_sec: float = Field(default=2.0, ge=1, le=20, allow_inf_nan=False)
     fps: int = Field(default=24, ge=8, le=30)
+    speech_language: Literal["auto", "es"] = "auto"
+    image_strength: float = Field(default=1.0, ge=0.5, le=1.0, allow_inf_nan=False)
 
 
 @app.post("/api/video/ltx-gguf/prepare")
@@ -1007,7 +1009,8 @@ def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="La imagen no está disponible.")
     job = job_manager.submit(kind="video", title="LTX 2.3 GGUF Q4 · audio y vídeo (experimental)",
         fn=lambda j: generate_gguf(image_path=image, prompt=req.prompt, negative_prompt=req.negative_prompt, seed=req.seed,
-                                   width=req.width, height=req.height, duration_sec=req.duration_sec, fps=req.fps, job=j))
+                                   width=req.width, height=req.height, duration_sec=req.duration_sec, fps=req.fps,
+                                   speech_language=req.speech_language, image_strength=req.image_strength, job=j))
     return {"ok": True, "job": job.to_dict()}
 
 

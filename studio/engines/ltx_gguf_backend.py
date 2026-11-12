@@ -499,23 +499,34 @@ def prepare_gguf(*, job: Any) -> dict:
 
 
 def frames_for_duration(duration_sec: float, fps: int) -> int:
-    if not math.isfinite(duration_sec) or not 1 <= duration_sec <= 10 or not 8 <= fps <= 30:
-        raise ValueError("Duración GGUF de 1 a 10 segundos y fps de 8 a 30")
+    if not math.isfinite(duration_sec) or not 1 <= duration_sec <= 20 or not 8 <= fps <= 30:
+        raise ValueError("Duración GGUF de 1 a 20 segundos y fps de 8 a 30")
     # LTX requires 8n+1 frames. The closest valid length can differ slightly.
-    return max(9, min(305, 8 * round((duration_sec * fps - 1) / 8) + 1))
+    return max(9, min(601, 8 * round((duration_sec * fps - 1) / 8) + 1))
 
 
 @serialized_gpu_operation(slots=("video",), managed=True)
 def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any,
-                  width: int = 512, height: int = 320, duration_sec: float = 2.0, fps: int = 24) -> dict:
+                  width: int = 512, height: int = 320, duration_sec: float = 2.0, fps: int = 24,
+                  speech_language: str = "auto", image_strength: float = 1.0) -> dict:
     started = time.monotonic()
     if not prompt.strip():
         raise ValueError("Describe la escena")
     if image_path is not None:
         verify_image_file(image_path)
     frames = frames_for_duration(duration_sec, fps)
+    if speech_language not in ("auto", "es"):
+        raise ValueError("Idioma de diálogo GGUF no soportado")
+    if not math.isfinite(image_strength) or not .5 <= image_strength <= 1:
+        raise ValueError("La fidelidad del fotograma debe estar entre 0.5 y 1")
+    effective_prompt = prompt
+    if speech_language == "es":
+        effective_prompt = ("All spoken dialogue is in Spanish. Characters speak the exact quoted lines in Spanish, "
+                            "without translating them into English.\n" + prompt)
     if width < 256 or height < 256 or width % 32 or height % 32 or width * height > 768 * 512:
         raise ValueError("GGUF: dimensiones múltiplos de 32 y área máxima 768×512")
+    if duration_sec > 10:
+        job.log("Más de 10 s es experimental y no está validado en L4; puede superar la memoria disponible.", level="warning")
     # Extra workload is a guardrail, not a measured peak. A longer clip may still OOM.
     scale = width * height * frames / (512 * 320 * 49)
     extra_ram = max(0.0, scale - 1) * 2
@@ -539,9 +550,9 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
             from PIL import Image
             with Image.open(image_path) as im:
                 im.convert("RGB").save(session.input_dir / image_name)
-        graph = make_graph(prompt=prompt, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
+        graph = make_graph(prompt=effective_prompt, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
                            seed=seed, image_name=image_name, model=names["dit"], text_encoder=names["text_encoder"],
-                           connectors=names["connectors"], video_vae=names["video_vae"], audio_vae=names["audio_vae"])
+                           connectors=names["connectors"], video_vae=names["video_vae"], audio_vae=names["audio_vae"], image_strength=image_strength)
         graph["20"]["inputs"]["filename_prefix"] = f"studio_gguf_{suffix}"
         generated = _infer(graph, session.input_dir, session.output_dir, job)
         info = probe_media_info(generated)
@@ -570,7 +581,9 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
             "type": "video", "model_id": MODEL_ID, "model_name": "LTX 2.3 destilado GGUF Q4 experimental",
             "video_submode": "i2v" if image_path else "t2v", "audio_native": True, "prompt": prompt, "seed": seed,
             "width": info.get("width"), "height": info.get("height"), "duration_seconds": info.get("duration_seconds"), "fps": fps, "steps": 8,
-            "requested_duration_sec": duration_sec, "frames": frames, "duration_warning": duration_warning, "guidance_scale": 1.0, "elapsed_seconds": round(time.monotonic() - started, 2),
+            "requested_duration_sec": duration_sec, "frames": frames, "duration_warning": duration_warning,
+            "speech_language_hint": speech_language, "image_strength": image_strength if image_path else None,
+            "effective_prompt": effective_prompt, "guidance_scale": 1.0, "elapsed_seconds": round(time.monotonic() - started, 2),
             "created_at": datetime.now().isoformat(timespec="seconds")}
     (VIDEOS_OUT_DIR / (dest.stem + ".json")).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf8")
     return meta
