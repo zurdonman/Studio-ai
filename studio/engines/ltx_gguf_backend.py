@@ -249,7 +249,7 @@ def _server_command(port: int, input_dir: Path, output_dir: Path, root: Path | N
     return [str(root / "venv/bin/python"), str(source / "main.py"), "--listen", "127.0.0.1", "--port", str(port),
             # Supported by both pinned Comfy versions: in newer versions this is
             # an alias of --offline; in 0.33 it disables API nodes and frontend internet.
-            "--disable-auto-launch", "--disable-api-nodes", "--disable-metadata", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "ComfyUI-GGUF", "StudioVoice",
+            "--disable-auto-launch", "--disable-api-nodes", "--disable-metadata", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "ComfyUI-GGUF", "StudioVoice", "StudioStrictMSR",
             "--cache-ram", f"{ram_reserve:.2f}", f"{ram_reserve:.2f}",
             "--input-directory", str(input_dir), "--output-directory", str(output_dir), "--reserve-vram", "1.8"]
 

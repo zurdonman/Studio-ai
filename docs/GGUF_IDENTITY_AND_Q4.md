@@ -34,11 +34,39 @@ La receta de referencia del nodo recomienda CFG 3–5 y no LightX2V; nuestra rec
 Se analizaron, además de las tarjetas de modelo, los archivos de flujo de [Bambushu/ltx-faceid-lipsync](https://github.com/Bambushu/ltx-faceid-lipsync/tree/3a133e0c06b6ab58ec86fb1516b36c518bfc66a6) (revisión `3a133e0c06b6ab58ec86fb1516b36c518bfc66a6`):
 
 * Su flujo Mac carga **LTX 2.3 dev Q4_K_M**, un LoRA de destilación a 0,6 y Best Face ID a 1, con `LTXIdentityOverlapConditioning` de BFSNodes, CFG 1 y 8 pasos. El autor publica ejemplos generados en un Mac, no en Colab L4. Su flujo CUDA apunta a **dev Q6_K**. No es la misma receta que el GGUF ya destilado de Studio: es evidencia de que GGUF + identidad + CFG 1 se puede hacer, no una validación de nuestro modelo ni de L4.
-* El flujo también propone fijar un audio proporcionado mediante VAE y máscara de ruido cero. Según su autor eso guía la animación con ese audio; es distinto de clonar una voz y no está implementado en nuestra ruta.
+* El flujo también propone fijar un audio proporcionado mediante VAE y máscara de ruido cero. Según su autor eso guía la animación con ese audio; es distinto de clonar una voz. Studio ahora ofrece una ruta experimental para audio completo tanto en 2.3 como en 2.5, sin validación GPU de la ruta 2.5.
 * [ChrisColeTech/ComfyUI-GGUF-Loader](https://github.com/ChrisColeTech/ComfyUI-GGUF-Loader) publica un nodo `LTX Face Identity Reinforcer` que combina referencia, recorte y las fases de Best Face ID; su autor describe una comparación con GPU y compatibilidad de latentes A/V. La evidencia publicada no establece que funcione en nuestra versión fijada de Comfy, nuestro DiT destilado o una L4. El proyecto integra muchos otros nodos: no conviene reemplazar sin más el cargador GGUF actual ni cargar código adicional en el runtime sin fijar y revisar.
 * [10S-Comfy-nodes](https://github.com/TenStrip/10S-Comfy-nodes) describe otra implementación del reinforcer que combina I2V y referencia facial. Es una alternativa concreta a investigar para mantener composición e identidad por separado, no una garantía de parecido.
 
 La siguiente integración razonable sería un modo optativo y aislado de 2.3 con referencia facial + Best Face ID, validación explícita de parches LoRA y un A/B frente a I2V, primero con clips cortos. Hay que determinar si usar dev Q4 + LoRA de destilación como el ejemplo, o si nuestro ya destilado Q4 responde bien; no tratar estas opciones como equivalentes. No combinarlo inicialmente con guías de pose: el flujo Bambushu documenta un fallo concreto al combinar Face-ID con IC-LoRA. Una prueba real debe recoger memoria, configuración y vídeo; no basta que Comfy acepte el grafo.
+
+## Candidato adicional: LTX 2.5 con imagen y voz emparejadas
+
+**Integrado como experimento en Studio, todavía sin validación de inferencia con GGUF, GPU ni L4.**
+[Licon MSR V2](https://huggingface.co/LiconStudio/LTX-2.5-Multiple-Subject-Reference)
+se presenta como un LoRA para LTX 2.5 con hasta cinco imágenes de referencia y
+hasta dos referencias de voz emparejadas con las imágenes 1 y 2. No es un
+IP-Adapter genérico de SD/SDXL ni una garantía de parecido o diálogo exacto.
+La tarjeta declara Apache-2.0 para el repositorio; el modelo base, Gemma y sus
+componentes mantienen sus propios términos. La tarjeta también advierte de un
+problema conocido con sonidos ambientales sin música en el audio de referencia.
+
+Revisión inspeccionada del modelo `aa19b48f845995525d8ace60cdc89b842e951ce6`:
+`LTX-2.5-Licon-MSR-V2.safetensors`, 2.215.094.328 bytes, LFS SHA-256
+`7cf982168d4f77f44b02943fb458f937f90c89335dcf7cf71b2f425e78bab713`.
+[ComfyUI-LTX2.5-MSR](https://github.com/liconstudio/ComfyUI-LTX2.5-MSR),
+commit `03061c18f8a79d26f3c63931dd8e28f5e5d872a6`, contiene cargador y
+nodo guía Apache-2.0; el ejemplo V2 carga LTX 2.5 **distilled BF16**, usa
+`euler_ancestral` y dos etapas. La receta Studio es GGUF destilada y una
+pasada: no se ha demostrado que produzca buenos resultados o que quepa en L4.
+El mismo repositorio indica que una sola etapa es posible, pero eso no valida
+nuestra combinación concreta ni sus resultados.
+
+Studio prepara la extensión en un runtime aislado, fijada por commit, y descarga y verifica el SHA-256 del adaptador. Un cargador estricto comprueba que los tensores y parches LoRA se hayan reconocido y aplicado; el cargador especializado conserva y valida las embeddings de referencia. El guía usa el latente de vídeo antes de concatenar A/V, `pic1` y el audio codificado en `audio_ref1`; después de separar A/V se aplica `LTXVCropGuides`. La misma imagen se utiliza además como primer fotograma. La muestra es condicionamiento, **no** una pista que se garantice oír literalmente; el nodo puede recortarla a su ventana interna.
+
+El modo se selecciona en Imagen a Vídeo > Audio y voz GGUF > Voz de referencia. El prompt debe describir la escena y el diálogo nuevo. Solo imagen y audio propios o autorizados. Se reserva un margen preventivo adicional de 5 GiB RAM y 3 GiB VRAM, no medido. Bajo presión puede rechazarse antes de descargar o detenerse durante la inferencia; no se garantiza cabida en L4. Si se necesita activar el nodo en un proceso residente anterior, se reinicia el proceso una vez sin borrar pesos y se vuelve a comprobar el presupuesto. Las generaciones posteriores reutilizan el proceso cuando sea seguro.
+
+Los grafos se validaron contra los esquemas reales del Comfy fijado para Gemma Q5 con archivos ficticios, y las rutas y salidas se probaron con mocks. Esto **no ejecuta los pesos reales**, no comprueba la aplicación real del adaptador, ni demuestra compatibilidad de sus tensores con el modelo cuantizado; un error explícito de nodo o `MSR_LORA_INCOMPATIBLE` es un resultado posible. El registro L4 del usuario ya mostró 0,8 GiB libres con la receta base.
 
 ## Caché y protección de memoria
 

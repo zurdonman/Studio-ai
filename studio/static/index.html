@@ -435,7 +435,7 @@
             <div class="ltx-gguf-copy">
               <strong>✅ LTX 2.3 GGUF Q4 · generación I2V probada en L4</strong>
               <p>Elígelo en la lista de modelos de Vídeo. Si no aparece, desmarca «Mostrar solo modelos con encaje estimado»: la prueba en L4 no evalúa los recursos disponibles de esta sesión. Usa «Preparar» para instalar y descargar; luego «Generar Clip».</p>
-              <p class="muted">Usa duración (1–20 s experimental), fps, ancho y alto (múltiplos de 32; área máxima 768×512), prompt, prompt negativo, semilla e imagen inicial opcional. Duración aproximada por fotogramas 8n+1. Fijos: 8 pasos y CFG 1. Sin LoRA, fotograma final ni voz de referencia. En L4 se probaron 10 y 20 s a 512×320 (20 s con caché). Otras condiciones pueden consumir más memoria, ser rechazadas o fallar.</p>
+              <p class="muted">Usa duración (1–20 s experimental), fps, ancho y alto (múltiplos de 32; área máxima 768×512), prompt, prompt negativo, semilla e imagen inicial opcional. Duración aproximada por fotogramas 8n+1. Fijos: 8 pasos y CFG 1. No admite fotograma final ni LoRA facial; LTX 2.3 ofrece modos experimentales de audio completo o referencia de voz más abajo. En L4 se probaron 10 y 20 s a 512×320 (20 s con caché). Otras condiciones pueden consumir más memoria, ser rechazadas o fallar.</p>
               <p class="muted">LTX 2.5 GGUF UD-Q2 y UD-Q4 son recetas nuevas, aún sin prueba GPU/L4: una pasada, VAE conv, sin upscale, con Gemma 4 BF16 (~24,5 GiB solo el codificador); pueden superar la memoria. No ofrecen voz de referencia.</p>
               <p class="muted">También disponible: LTX 2.5 UD-Q2 + Gemma 4 GGUF Q5 (~19,4 GiB de pesos). Experimental y sin prueba L4; requiere aceptar las condiciones del repositorio elix3r y acceso Hugging Face en Studio. No incluye voz de referencia.</p>
               <p class="muted">LTX 2.3 descarga ~24 GiB más dependencias; se requieren licencias LTX y Gemma. El motor reutiliza la caché mientras haya memoria, y «Sacar de RAM/VRAM» lo libera. Las voces constantes no están garantizadas.</p>
@@ -513,6 +513,8 @@
               <!-- Aviso automático si el modelo elegido no soporta el submodo actual -->
               <div id="vid-submode-compat-banner" class="vid-compat-banner" hidden></div>
 
+              <div id="vid-gguf-reference-info" class="vid-steps-note" role="status" hidden></div>
+
               <!-- Bloque de selección de fotogramas (1 imagen en I2V, 2 imágenes Inicio→Fin en Frame a Frame) -->
               <div id="vid-frames-area" class="vid-frames-area">
                 <div class="vid-frame-slot" id="vid-slot-start">
@@ -564,21 +566,21 @@
               <label class="field-label">Pista de voz / música opcional (se une al MP4)</label>
               <select id="vid-source-audio"></select>
               <label class="btn btn-secondary btn-sm file-btn">Subir audio<input id="vid-voice-upload" type="file" accept="audio/*" hidden /></label>
-              <p class="muted">En la ruta normal, esta pista sustituye el audio y no sincroniza labios. Para LTX 2.3 GGUF selecciona el modo de voz experimental de abajo.</p>
+              <p class="muted">En la ruta normal, esta pista sustituye el audio y no sincroniza labios. En LTX GGUF debes elegir abajo el modo de audio experimental correspondiente.</p>
 
               <div id="vid-ai-fields">
                 <label class="field-label" id="vid-prompt-label">Prompt de movimiento / escena</label>
                 <textarea id="vid-prompt" rows="2" placeholder="Ej: La cámara se acerca suavemente, brisa ligera en el cabello, iluminación cinematográfica natural..."></textarea>
                 <div id="vid-gguf-guidance" class="vid-gguf-guidance" hidden>
                   <div id="vid-gguf-voice-wrap" hidden>
-                    <label class="field-label">Voz LTX 2.3 GGUF · experimental, sin prueba GPU
+                    <label class="field-label">Audio y voz GGUF · experimental
                       <select id="vid-gguf-voice-mode">
                         <option value="none">Audio generado normalmente (sin archivo)</option>
                         <option value="audio">Audio completo guía el vídeo (1–20 s)</option>
-                        <option value="voice_reference">ID-LoRA: voz de referencia para diálogo nuevo (1–15 s; ~5 recomendado)</option>
+                        <option value="voice_reference">Voz de referencia para diálogo nuevo (1–15 s)</option>
                       </select>
                     </label>
-                    <p class="muted">Selecciona arriba un audio propio o autorizado. Audio completo ajusta la duración y pasa por el VAE. ID-LoRA descarga ~1,1 GiB, puede fallar por memoria o compatibilidad y no garantiza voz, idioma ni labios. No combina ambos modos.</p>
+                    <p class="muted">Selecciona arriba un audio propio o autorizado. Audio completo ajusta la duración y pasa por el VAE: la salida puede variar y no garantiza sincronía. La opción de LTX 2.5 no está probada con GPU. Voz de referencia: LTX 2.3 usa ID-LoRA; LTX 2.5 usa MSR V2 y exige imagen. Ambas rutas pueden fallar por memoria o compatibilidad; ninguna garantiza identidad o labios. No combina ambos modos.</p>
                   </div>
                   <label class="check-row"><input type="checkbox" id="vid-gguf-spanish" /> Reforzar que el diálogo sea en español (experimental; no garantiza idioma ni voz).</label>
                   <label id="vid-gguf-strength-wrap" class="field-label">Fidelidad del primer fotograma (experimental)
@@ -742,6 +744,7 @@
               </div>
               <div id="vid-result-content" hidden>
                 <video id="vid-result-player" class="result-media" controls playsinline></video>
+                <p id="vid-playback-error" class="muted" role="alert" hidden>No se pudo reproducir el vídeo aquí. Prueba «Guardar MP4»; si tampoco se descarga, comprueba la conexión y actualiza la biblioteca.</p>
                 <div class="provenance-box" id="vid-provenance"></div>
                 <div class="quick-send-row">
                   <button class="btn btn-primary btn-sm" id="btn-vid-to-montage">🎞️ Añadir al Montaje</button>
@@ -750,7 +753,11 @@
               </div>
             </div>
 
-            <h4 class="sub-heading">Clips Generados</h4>
+            <div class="row-gap" style="align-items:center;justify-content:space-between;">
+              <h4 class="sub-heading">Clips Generados</h4>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-refresh-clips">Actualizar clips</button>
+            </div>
+            <p class="muted">Pulsa «Ver» para abrir un clip o «Descargar» para guardarlo en tu dispositivo. Los archivos de Colab pueden perderse al finalizar la sesión.</p>
             <div class="asset-strip" id="video-gallery-strip"></div>
           </div>
         </div>
@@ -1796,6 +1803,6 @@
 
   <div id="toast-container" class="toast-container"></div>
 
-  <script src="/static/app.js?v=20261110d"></script>
+  <script src="/static/app.js?v=20261112-clips1"></script>
 </body>
 </html>

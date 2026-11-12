@@ -521,7 +521,7 @@ def test_ltx25_end_to_end_with_synthetic_audio_and_video(temp_studio_env, monkey
     from studio.engines.ffmpeg_utils import get_ffmpeg_bin
     from studio.jobs import JobRecord
     from PIL import Image
-    _, root = temp_studio_env
+    client, root = temp_studio_env
     image = root / 'uploads' / 'frame.png'
     Image.new('RGB', (256,256), 'blue').save(image)
     inp, out = root / 'fake_in25', root / 'fake_out25'
@@ -544,6 +544,15 @@ def test_ltx25_end_to_end_with_synthetic_audio_and_video(temp_studio_env, monkey
     assert result['duration_warning'] and result['image_strength'] == .8
     assert 'spoken dialogue is in Spanish' in graphs[0]['5']['inputs']['text']
     assert not list(inp.iterdir()) and not list(out.iterdir())
+    # An output is not useful unless the gallery lists it and the browser can
+    # request it (including the byte ranges used by video players).
+    assert (root / result['rel_path']).is_file()
+    listed = client.get('/api/assets').json()['videos']
+    assert any(v['rel_path'] == result['rel_path'] and v['media_url'] == result['media_url'] for v in listed)
+    response = client.get(result['media_url'])
+    assert response.status_code == 200 and response.headers['content-type'].startswith('video/mp4')
+    partial = client.get(result['media_url'], headers={'Range': 'bytes=0-31'})
+    assert partial.status_code == 206 and len(partial.content) == 32
 
 
 def test_gguf_resident_cache_never_reuses_a_different_variant(temp_studio_env, monkeypatch):
@@ -858,7 +867,7 @@ def test_voice_api_guards_and_routes(temp_studio_env, monkeypatch):
     assert client.post('/api/video/ltx-gguf', json={'prompt':'hi','voice_mode':'audio'}).status_code == 400
     assert client.post('/api/video/ltx-gguf', json={'prompt':'hi','audio_rel':'uploads/voice_test.wav'}).status_code == 400
     assert client.post('/api/video/ltx-gguf', json={'prompt':'hi','voice_mode':'audio','audio_rel':'uploads/voice_test.wav','reference_voice_rel':'uploads/voice_test.wav'}).status_code == 400
-    assert client.post('/api/video/ltx-gguf', json={'prompt':'hi','model_id':'ltx-2.5-distilled-gguf-ud-q2-experimental','voice_mode':'audio','audio_rel':'uploads/voice_test.wav'}).status_code == 400
+    assert client.post('/api/video/ltx-gguf', json={'prompt':'hi','model_id':'ltx-2.5-distilled-gguf-ud-q2-experimental','voice_mode':'voice_reference','reference_voice_rel':'uploads/voice_test.wav'}).status_code == 400
     assert client.post('/api/video/ltx-gguf', json={'prompt':'hi','voice_mode':'audio','audio_rel':'../escape'}).status_code == 400
     for mode, field in [('audio','audio_rel'), ('voice_reference','reference_voice_rel')]:
         assert client.post('/api/video/ltx-gguf',json={'prompt':'hi','voice_mode':mode, field:'uploads/voice_test.wav'}).status_code == 200
@@ -935,3 +944,127 @@ def test_voice_adapter_is_pinned_cached_linked_and_never_overwrites(temp_studio_
     with pytest.raises(RuntimeError,match='VOICE_NODE_CONFLICT'):
         b._prepare_voice_lora(JobRecord('video','test'))
     assert plugin.read_text() == 'foreign code' and link.read_bytes() == payload
+
+
+@pytest.mark.parametrize('mode', ['audio', 'voice_reference'])
+def test_ltx25_audio_modes_synthetic(temp_studio_env, monkeypatch, tmp_path, mode):
+    from types import SimpleNamespace
+    from PIL import Image
+    from studio.engines import ltx25_gguf as b, ltx25_msr as msr
+    from studio.engines.ffmpeg_utils import get_ffmpeg_bin, probe_media_info
+    from studio.jobs import JobRecord
+    image = tmp_path/'face.png'; Image.new('RGB',(64,64),'blue').save(image)
+    audio = tmp_path/'reference.wav'
+    subprocess.run([get_ffmpeg_bin(),'-v','error','-f','lavfi','-i','sine=frequency=440:duration=2.1','-y',str(audio)],check=True)
+    inp,out=tmp_path/'in',tmp_path/'out'; inp.mkdir(); out.mkdir()
+    session=SimpleNamespace(input_dir=inp,output_dir=out,base='http://unused')
+    mid = b.Q5_ID
+    budgets=[]; prepared=[]; graphs=[]
+    monkeypatch.setattr(b,'VIDEOS_OUT_DIR',tmp_path/'videos')
+    monkeypatch.setattr(b,'_prepare',lambda *args,**kw: budgets.append(kw) or {'dit':'d.gguf','text_encoder':'g.gguf','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
+    monkeypatch.setattr(msr,'prepare_msr',lambda *a,**kw: prepared.append(kw) or False)
+    monkeypatch.setattr(b.common,'_open_resident',lambda *args: session)
+    monkeypatch.setattr(b.common.requests,'get',lambda *a,**kw: SimpleNamespace(raise_for_status=lambda:None,json=lambda:{'StudioStrictMSRLoader':{},'ComfyUILTX25MSRMultiReferenceGuide':{},'LTXVCropGuides':{}}))
+    def infer(g,i,o,job,model_id):
+        wav=i/g['30' if mode=='audio' else '41']['inputs']['audio']
+        duration=probe_media_info(wav)['duration_seconds']
+        assert abs(duration-(57/24 if mode=='audio' else 2.1)) < .02
+        if mode=='audio':
+            assert g['10']['inputs']['audio_latent']==['33',0]
+        else:
+            assert g['44']['inputs']['audio_ref1']==['42',0]
+            assert g['44']['inputs']['msr_parameters']==['43',1]
+            assert g['10']['inputs']['video_latent']==['44',2]
+            assert g['11']['inputs']['model']==['43',0]
+            assert g['17']['inputs']['samples']==['45',2]
+        graphs.append(g)
+        result=o/'synthetic.mp4'
+        subprocess.run([get_ffmpeg_bin(),'-v','error','-f','lavfi','-i','color=c=blue:s=320x256:r=24:d=1','-f','lavfi','-i','sine=frequency=440:duration=1','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest','-y',str(result)],check=True)
+        return result
+    monkeypatch.setattr(b.common,'_infer',infer)
+    result=b.generate(model_id=mid,image_path=image,voice_path=audio,voice_mode=mode,prompt='Hola',negative_prompt='',seed=42,job=JobRecord('video','test'),width=512,height=320,duration_sec=2,fps=24,speech_language='es',image_strength=.8)
+    assert result['voice_mode']==mode and result['frames']==(57 if mode=='audio' else 49)
+    assert bool(prepared)==(mode=='voice_reference')
+    assert budgets[0]['extra_ram'] >= (5 if mode=='voice_reference' else 1)
+    assert graphs and not list(inp.iterdir()) and not list(out.iterdir())
+    assert (tmp_path/'videos'/result['filename']).is_file()
+
+
+def test_ltx25_voice_api_routes_and_image_guard(temp_studio_env, monkeypatch):
+    import time
+    from PIL import Image
+    from studio.engines import ltx25_gguf as b
+    from studio.engines.ffmpeg_utils import get_ffmpeg_bin
+    client,root=temp_studio_env
+    image=root/'uploads'/'face25.png'; Image.new('RGB',(64,64),'blue').save(image)
+    audio=root/'uploads'/'ref25.wav'
+    subprocess.run([get_ffmpeg_bin(),'-v','error','-f','lavfi','-i','sine=frequency=440:duration=2','-y',str(audio)],check=True)
+    calls=[]; monkeypatch.setattr(b,'generate',lambda **kw: calls.append(kw) or {})
+    base={'model_id':b.Q5_ID,'prompt':'hola'}
+    assert client.post('/api/video/ltx-gguf',json={**base,'voice_mode':'voice_reference','reference_voice_rel':'uploads/ref25.wav'}).status_code==400
+    for mode,field in [('audio','audio_rel'),('voice_reference','reference_voice_rel')]:
+        response=client.post('/api/video/ltx-gguf',json={**base,'image_rel':'uploads/face25.png','voice_mode':mode,field:'uploads/ref25.wav'})
+        assert response.status_code==200, response.text
+    for _ in range(50):
+        if len(calls)==2: break
+        time.sleep(.02)
+    assert {call['voice_mode'] for call in calls}=={'audio','voice_reference'}
+    assert all(call['voice_path']==audio and call['image_path']==image for call in calls)
+
+
+def test_msr_strict_loader_rejects_unknown_and_unapplied(monkeypatch):
+    import importlib.util
+    import sys
+    import types
+    from pathlib import Path
+    comfy=types.ModuleType('comfy'); comfy.__path__=[]
+    lora=types.ModuleType('comfy.lora'); convert=types.ModuleType('comfy.lora_convert'); sd=types.ModuleType('comfy.sd')
+    comfy.lora=lora; comfy.lora_convert=convert; comfy.sd=sd
+    for name,mod in [('comfy',comfy),('comfy.lora',lora),('comfy.lora_convert',convert),('comfy.sd',sd)]: monkeypatch.setitem(sys.modules,name,mod)
+    upstream=types.SimpleNamespace(ComfyUILTX25MSRICLoRALoader=type('Loader',(),{}),ComfyUILTX25MSRMultiReferenceGuide=type('Guide',(),{}))
+    spec=object()
+    monkeypatch.setattr(importlib.util,'spec_from_file_location',lambda *a,**k:spec)
+    monkeypatch.setattr(importlib.util,'module_from_spec',lambda _:upstream)
+    # A separate fake spec supplies the execution hook.
+    spec=types.SimpleNamespace(loader=types.SimpleNamespace(exec_module=lambda _:None))
+    module={'__file__':str(Path('studio/engines/comfy_msr_node/__init__.py').resolve())}
+    exec(compile(Path(module['__file__']).read_text(),module['__file__'],'exec'),module)
+    convert.convert_lora=lambda weights:weights
+    lora.model_lora_keys_unet=lambda *a:{'layer':'weight'}
+    lora.load_lora=lambda *a,**kw:{'weight':types.SimpleNamespace(loaded_keys={'a','b'})}
+    class Model:
+        model=object()
+        def clone(self): return self
+        def add_patches(self,*a): return {'weight'}
+        def set_attachments(self,*a): self.metadata=a
+    model=Model(); load=module['_strict_load']
+    assert load(model,None,{'a':1,'b':2},1,0,{'meta':1})[0] is model
+    with pytest.raises(RuntimeError,match='tensores sin correspondencia'): load(model,None,{'a':1,'b':2,'unknown':3},1,0)
+    model.add_patches=lambda *a:set()
+    with pytest.raises(RuntimeError,match='no se aplicaron'): load(model,None,{'a':1,'b':2},1,0)
+
+
+def test_msr_installer_cache_and_conflicts(temp_studio_env, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from studio.engines import ltx25_msr as msr
+    from studio.jobs import JobRecord
+    runtime=tmp_path/'runtime'; weights=tmp_path/'weights'; weights.mkdir()
+    source=runtime/'studio-msr-source'; (source/'.git').mkdir(parents=True)
+    item=('msr_voice','repo','rev','adapter.safetensors',4,'abc')
+    monkeypatch.setattr(msr,'LORA',item); monkeypatch.setattr(msr,'_verified',None)
+    monkeypatch.setattr(msr.shutil,'disk_usage',lambda *_:SimpleNamespace(free=10*1024**3))
+    monkeypatch.setattr(msr.subprocess,'run',lambda cmd,**kw:SimpleNamespace(stdout=msr.REV if 'rev-parse' in cmd else ''))
+    monkeypatch.setattr(msr.common,'_resident',lambda *_:None)
+    calls=[]
+    def download(cmd,*args,**kw):
+        calls.append(cmd); (weights/'ltx').mkdir(exist_ok=True); (weights/'ltx'/item[3]).write_bytes(b'test')
+    monkeypatch.setattr(msr.common,'_command',download)
+    job=JobRecord('video','test')
+    assert msr.prepare_msr(job,runtime=runtime,weights=weights,model_id='test') is False
+    assert (runtime/'comfy/models/loras'/msr.LINK).read_bytes()==b'test'
+    assert len(calls)==1 and 'studio.engines.ltx25_msr_download' in calls[0]
+    msr.prepare_msr(job,runtime=runtime,weights=weights,model_id='test')
+    assert len(calls)==1
+    wrapper=runtime/'comfy/custom_nodes/StudioStrictMSR/__init__.py'; wrapper.write_text('foreign')
+    with pytest.raises(RuntimeError,match='MSR_NODE_CONFLICT'): msr.prepare_msr(job,runtime=runtime,weights=weights,model_id='test')
+    assert wrapper.read_text()=='foreign'

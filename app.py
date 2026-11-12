@@ -1032,8 +1032,6 @@ def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
     from studio.engines.ltx25_gguf import MODELS, generate as generate25
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Describe la escena.")
-    if req.voice_mode != 'none' and req.model_id != 'ltx-2.3-distilled-gguf-q4-experimental':
-        raise HTTPException(status_code=400, detail='La voz experimental solo está disponible en LTX 2.3 GGUF Q4.')
     if ((req.voice_mode == 'none' and (req.audio_rel or req.reference_voice_rel))
         or (req.voice_mode == 'audio' and (not req.audio_rel or req.reference_voice_rel))
         or (req.voice_mode == 'voice_reference' and (not req.reference_voice_rel or req.audio_rel))):
@@ -1056,11 +1054,15 @@ def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
     image = _resolve_media_rel(req.image_rel) if req.image_rel else None
     if req.image_rel and image is None:
         raise HTTPException(status_code=400, detail="La imagen no está disponible.")
+    if req.model_id in MODELS and req.voice_mode == 'voice_reference' and image is None:
+        raise HTTPException(status_code=400, detail='MSR_IMAGE_REQUIRED: LTX 2.5 necesita imagen y voz de referencia.')
     kwargs = dict(image_path=image, prompt=req.prompt, negative_prompt=req.negative_prompt, seed=req.seed,
                   width=req.width, height=req.height, duration_sec=req.duration_sec, fps=req.fps,
                   speech_language=req.speech_language, image_strength=req.image_strength)
     if req.model_id in MODELS:
         title = f"LTX 2.5 GGUF {MODELS[req.model_id][0]} · audio y vídeo (experimental)"
+        if req.voice_mode != 'none':
+            kwargs.update(voice_mode=req.voice_mode, voice_path=voice)
         fn = lambda j: generate25(model_id=req.model_id, job=j, **kwargs)
     else:
         title = "LTX 2.3 GGUF Q4 · audio y vídeo (experimental)"

@@ -93,6 +93,7 @@ const model = (id, fit, extra = {}) => ({
   if (!card.textContent.includes("✅ Generación I2V probada en L4") || !$("ltx-gguf-panel").textContent.includes("✅ LTX")) throw Error("Scoped GGUF validation badge missing");
   card.click();
   if ($("select-video-model").value !== ggufId || !$("btn-prepare-video").textContent.includes("GGUF")) throw Error("GGUF selection or prepare label missing");
+  if ($("vid-gguf-reference-info").hidden || !$("vid-gguf-reference-info").textContent.includes("muestra de voz") || !$("vid-gguf-reference-info").textContent.includes("no una foto")) throw Error("LTX 2.3 voice and face reference distinction missing");
   $("btn-prepare-video").click();
   await wait(20);
   if (!requests.some(r => r.method === "POST" && r.path === "/api/video/ltx-gguf/prepare")) throw Error("GGUF prepare used wrong endpoint");
@@ -133,10 +134,27 @@ const model = (id, fit, extra = {}) => ({
   const q2card = w.document.querySelector(`[data-vmid="${q2}"]`);
   if (!q2card || q2card.textContent.includes("✅ Generación")) throw Error("New LTX 2.5 should be visible but not marked tested");
   q2card.click();
+  if ($("vid-gguf-reference-info").hidden || !$("vid-gguf-reference-info").textContent.includes("MSR V2")) throw Error("LTX 2.5 MSR warning missing");
+  if ($('vid-gguf-voice-wrap').hidden) throw Error("LTX 2.5 should expose experimental audio controls");
   $("btn-run-video").click();
   await wait(30);
   const q2request = requests.filter(r => r.path === "/api/video/ltx-gguf" && r.method === "POST").at(-1);
   if (!q2request || JSON.parse(q2request.body).model_id !== q2) throw Error("LTX 2.5 was not routed to GGUF API");
+  $("vid-source-audio").value = audioOption.value;
+  $("vid-gguf-voice-mode").value = "voice_reference";
+  const beforeMissingImage = requests.filter(r => r.path === "/api/video/ltx-gguf" && r.method === "POST").length;
+  $("btn-run-video").click(); await wait(20);
+  if (requests.filter(r => r.path === "/api/video/ltx-gguf" && r.method === "POST").length !== beforeMissingImage) throw Error("MSR submitted without image");
+  $("vsub-i2v").click();
+  const imageOption = w.document.createElement("option"); imageOption.value = "uploads/face.png"; imageOption.textContent = "face.png";
+  $("vid-source-image").appendChild(imageOption); $("vid-source-image").value = imageOption.value;
+  for (const mode of ["audio", "voice_reference"]) {
+    $("vid-gguf-voice-mode").value = mode;
+    $("btn-run-video").click(); await wait(20);
+    const body = JSON.parse(requests.filter(r => r.path === "/api/video/ltx-gguf" && r.method === "POST").at(-1).body);
+    if (body.model_id !== q2 || body.image_rel !== imageOption.value || body.voice_mode !== mode || (mode === "audio" ? body.audio_rel : body.reference_voice_rel) !== audioOption.value) throw Error(`Wrong 2.5 request for ${mode}`);
+  }
+  $("vid-source-audio").value = ""; $("vid-gguf-voice-mode").value = "none";
   $("btn-prepare-video").click();
   await wait(20);
   const q2prep = requests.filter(r => r.path === "/api/video/ltx-gguf/prepare").at(-1);

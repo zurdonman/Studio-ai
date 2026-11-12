@@ -173,13 +173,12 @@
       renderHfAuthStatus(snap.hf_auth);
       renderRuntimeStatus(snap.runtime);
       renderJobs(snap.jobs);
-      // Los trabajos que lanza el agente por MCP no pasan por la interfaz: si no se
-      // vuelven a leer los assets, sus imágenes y vídeos no aparecen nunca en las
-      // galerías hasta recargar. Se refresca solo cuando cambia el número o el último job.
-      const signature = `${(snap.jobs || []).length}:${(snap.jobs || [])[0]?.id || ""}:${(snap.jobs || [])[0]?.status || ""}`;
+      // Un trabajo anterior puede terminar mientras el más reciente sigue activo.
+      const signature = (snap.jobs || []).map(j => `${j.id}:${j.status}`).join("|");
       if (signature !== state.assetsSignature) {
-        state.assetsSignature = signature;
         await loadAssets();
+        // No dar por actualizado un sondeo que ya ha sido reemplazado por otro.
+        if (requestSeq === _statusAppliedSeq) state.assetsSignature = signature;
       }
     } catch (_e) {
       // Silencioso en polling puntual
@@ -494,7 +493,7 @@
   }
 
   async function handleJobCompleted(job) {
-    await Promise.all([loadCatalog(), loadAssets()]);
+    // El resultado no debe depender de que respondan el catálogo o la galería.
     const res = job.result || {};
     if (res.prepared && /LTX 2\.[35] GGUF/.test(job.title || "")) {
       ggufFeedback("Archivos GGUF preparados en disco. Para crear el vídeo: elige Imagen a Vídeo o Texto a Vídeo, escribe el prompt y pulsa «Generar Clip de Vídeo». Los pesos se cargan al generar.");
@@ -542,6 +541,10 @@
       toast(res.updated ? "Índice de metadatos actualizado; sin pesos." : "Sin actualización remota; consulta caché/estado de red.", "info");
     } else if (job.kind === "load_model") {
       toast("Modelo cargado en RAM/VRAM correctamente.", "success");
+    }
+    const updates = await Promise.allSettled([loadCatalog(), loadAssets()]);
+    if (updates[1].status === "rejected") {
+      toast("No se pudo actualizar la biblioteca. Usa «Actualizar clips» para volver a intentarlo.", "error");
     }
   }
 
@@ -1422,7 +1425,15 @@
     const gguf = isGgufModel(modelId);
     if ($("vid-duration")) $("vid-duration").max = gguf ? "20" : "10";
     if ($("vid-gguf-guidance")) $("vid-gguf-guidance").hidden = !gguf;
-    if ($("vid-gguf-voice-wrap")) $("vid-gguf-voice-wrap").hidden = modelId !== GGUF_MODEL_ID;
+    const referenceInfo = $("vid-gguf-reference-info");
+    if (referenceInfo) {
+      referenceInfo.hidden = !gguf;
+      referenceInfo.textContent = modelId === GGUF_MODEL_ID
+        ? "Referencia visual: elige Imagen a Vídeo y sube la imagen inicial abajo. No hay entrada Face ID, LoRA facial ni IP-Adapter independiente. ID-LoRA de este modelo usa una muestra de voz, no una foto de identidad; es experimental y no está validado en GPU."
+        : "LTX 2.5: usa Imagen a Vídeo con una imagen y selecciona audio completo o voz de referencia MSR V2 experimental. MSR intenta conservar identidad y voz al generar diálogo nuevo, sin garantía de parecido, idioma ni labios. No es Face ID ni IP-Adapter.";
+    }
+    if ($("vid-gguf-voice-wrap")) $("vid-gguf-voice-wrap").hidden = !gguf;
+
     if ($("vid-gguf-strength-wrap")) $("vid-gguf-strength-wrap").hidden = !gguf || state.videoSubmode !== "i2v";
     ["vid-steps", "vid-steps-slider", "vid-cfg", "btn-steps-fast-safe", "btn-reset-vid-steps"].forEach(id => {
       if ($(id)) $(id).disabled = gguf;
@@ -2056,20 +2067,37 @@
     return res.asset;
   }
 
-  async function loadAssets() {
-    if (state.assetsLoading) return;
-    state.assetsLoading = true;
-    try {
-      await _loadAssetsOnce();
-    } finally {
-      state.assetsLoading = false;
+  let assetsRefreshPromise = null;
+  let assetsRefreshAgain = false;
+  function loadAssets() {
+    // Si una generación termina durante una lectura, esa lectura puede ser
+    // anterior al archivo nuevo. Una segunda lectura evita perder el aviso.
+    if (assetsRefreshPromise) {
+      assetsRefreshAgain = true;
+      return assetsRefreshPromise;
     }
+    assetsRefreshPromise = (async () => {
+      state.assetsLoading = true;
+      try {
+        do {
+          assetsRefreshAgain = false;
+          await _loadAssetsOnce();
+        } while (assetsRefreshAgain);
+      } finally {
+        state.assetsLoading = false;
+        assetsRefreshPromise = null;
+      }
+    })();
+    return assetsRefreshPromise;
   }
 
   async function _loadAssetsOnce() {
     state.assets = await api("/api/assets");
     renderImageGallery();
     renderVideoSelectsAndGallery();
+    // También tras recargar la página: no exigir que la pestaña haya observado
+    // el trabajo en directo para poder ver el último vídeo conservado en disco.
+    if (!state.lastVideoResult && state.assets.videos.length) showVideoResult(state.assets.videos[0]);
     renderAudioList();
     renderMusicPicker();
     renderLipSyncSelects();
@@ -2500,6 +2528,7 @@
             <div class="asset-meta">${escapeHtml(v.filename)} (${v.duration_seconds || "?"}s)</div>
             <div class="asset-mini-btns">
               <button class="mini-btn" data-vplay="${idx}">Ver</button>
+              <a class="mini-btn" href="${escapeHtml(v.media_url)}" download="${escapeHtml(v.filename)}">Descargar</a>
               <button class="mini-btn" data-vmon="${idx}">+Montaje</button>
             </div>
           </div>
@@ -2557,6 +2586,8 @@
     $("vid-result-empty").hidden = true;
     $("vid-result-content").hidden = false;
     const player = $("vid-result-player");
+    const playbackWarning = $("vid-playback-error");
+    if (playbackWarning) playbackWarning.hidden = true;
     player.src = `${meta.media_url}?t=${Date.now()}`;
     $("btn-vid-download").href = meta.media_url;
     $("btn-vid-download").download = meta.filename;
@@ -3501,14 +3532,15 @@
       if (!["t2v", "i2v"].includes(sub)) return showInputError("GGUF admite solo Texto a Vídeo o Imagen a Vídeo.");
       const image_rel = sub === "i2v" ? $("vid-source-image").value : null;
       const mid = $("select-video-model").value;
-      const voice_mode = mid === GGUF_MODEL_ID ? $("vid-gguf-voice-mode").value : "none";
+      const voice_mode = $("vid-gguf-voice-mode").value;
       const audio = $("vid-source-audio").value || null;
-      if (voice_mode === "none" && audio) return showInputError("Desmarca la pista o selecciona un modo de voz para LTX 2.3 GGUF.");
+      if (voice_mode === "none" && audio) return showInputError("Desmarca la pista o selecciona un modo de audio para LTX GGUF.");
       if (voice_mode !== "none" && !audio) return showInputError("Selecciona o sube un archivo de audio para el modo de voz.");
+      if (voice_mode === "voice_reference" && mid !== GGUF_MODEL_ID && !image_rel) return showInputError("MSR LTX 2.5 necesita Imagen a Vídeo y una imagen de referencia.");
       if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
       const m = state.catalog.find(x => x.id === mid);
       const warning = mid === GGUF_MODEL_ID ? "Se probaron 20 s en L4 a 512×320 con caché." : GGUF_GEMMA_Q5_IDS.has(mid) ? "UD-Q2 + Gemma Q5 generó vídeo en una L4 según un usuario; las variantes Q4 no están probadas. Una pasada sin upscale; puede fallar por memoria. Requiere acceso a elix3r." : "LTX 2.5 no está probado en GPU ni en L4; usa una pasada sin upscale y Gemma 4 BF16, puede ser rechazado o fallar por memoria.";
-      if (!confirm(`GGUF experimental: 8 pasos y CFG 1 fijos. ${warning} ${voice_mode !== "none" ? "Modo de voz sin prueba GPU: puede fallar por memoria o compatibilidad; audio solo autorizado. " : ""}${voice_mode === "voice_reference" ? "Se descarga ID-LoRA TalkVid (~1,1 GiB). " : ""}Se descargarán hasta ${m?.estimated_gb || "varios"} GiB si faltan. ¿Generar?`)) return;
+      if (!confirm(`GGUF experimental: 8 pasos y CFG 1 fijos. ${warning} ${voice_mode !== "none" ? "Modo de voz sin prueba GPU: puede fallar por memoria o compatibilidad; audio solo autorizado. " : ""}${voice_mode === "voice_reference" ? (mid === GGUF_MODEL_ID ? "Se descarga ID-LoRA TalkVid (~1,1 GiB). " : "Se descarga MSR V2 (~2,1 GiB), sin prueba GPU/GGUF. ") : ""}Se descargarán hasta ${m?.estimated_gb || "varios"} GiB si faltan. ¿Generar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
         ggufFeedback("Enviando solicitud de generación GGUF…");
@@ -3523,6 +3555,18 @@
         toast(error.message, "error");
       }
     }
+
+    $("btn-refresh-clips").addEventListener("click", async () => {
+      try {
+        await loadAssets();
+        toast("Biblioteca de clips actualizada.", "success");
+      } catch (e) {
+        toast(`No se pudo actualizar la biblioteca: ${e.message}`, "error");
+      }
+    });
+    $("vid-result-player").addEventListener("error", () => {
+      $("vid-playback-error").hidden = false;
+    });
 
     $("btn-vid-to-montage").addEventListener("click", () => {
       if (state.lastVideoResult) {

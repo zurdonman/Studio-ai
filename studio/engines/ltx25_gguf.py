@@ -197,7 +197,9 @@ def prepare(model_id: str, *, job: Any) -> dict:
 
 @serialized_gpu_operation(slots=('video',), managed=True)
 def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any,
-             width: int, height: int, duration_sec: float, fps: int, speech_language: str, image_strength: float) -> dict:
+             width: int, height: int, duration_sec: float, fps: int, speech_language: str, image_strength: float,
+             voice_mode: str = 'none', voice_path: Path | None = None) -> dict:
+    from studio.engines.ltx23_voice import add_voice_graph, frames_for_audio
     started = time.monotonic()
     files_for(model_id)
     if not prompt.strip() or speech_language not in ('auto', 'es'):
@@ -205,6 +207,21 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
     if image_path:
         verify_image_file(image_path)
     frames = common.frames_for_duration(duration_sec, fps)
+    if voice_mode not in ('none', 'audio', 'voice_reference') or (voice_mode == 'none') != (voice_path is None):
+        raise ValueError('El modo de audio y el archivo deben coincidir.')
+    if voice_mode == 'voice_reference' and not image_path:
+        raise ValueError('MSR_IMAGE_REQUIRED: se necesita una imagen y una muestra de voz.')
+    voice_info = None
+    if voice_path is not None:
+        voice_info = probe_media_info(voice_path)
+        seconds = float(voice_info.get('duration_seconds') or 0)
+        if not voice_info.get('has_audio') or voice_info.get('has_video') or not 1 <= seconds <= (20 if voice_mode == 'audio' else 15):
+            raise ValueError('Se necesita audio sin vídeo: 1–20 s para audio completo o 1–15 s para voz de referencia.')
+        if voice_mode == 'audio':
+            frames = frames_for_audio(seconds, fps)
+            job.log(f'Audio completo: {seconds:.2f} s; duración del vídeo ajustada a {frames} fotogramas. Ruta LTX 2.5 experimental sin prueba GPU.')
+        else:
+            job.log('MSR V2 experimental: la imagen y la muestra guían identidad y voz; no garantizan parecido ni sincronización. La referencia puede recortarse al límite de MSR.')
     effective = ('All spoken dialogue is in Spanish. Do not translate quoted dialogue.\n' + prompt) if speech_language == 'es' else prompt
     # Validate the graph before any download; the file names below are placeholders only.
     make_graph25(prompt=effective, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
@@ -212,13 +229,36 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
                  names={'dit':'x.gguf','text_encoder':'x.gguf' if model_id in Q5_IDS else 'x.safetensors','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
     scale = width * height * frames / (512 * 320 * 49)
     extra_ram, extra_vram = max(0, scale - 1) * 2, max(0, scale - 1) * .5
+    if voice_mode == 'audio':
+        # Preventive allowances for the encoded waveform; not measured peaks.
+        extra_ram += 1
+        extra_vram += .5
+    elif voice_mode == 'voice_reference':
+        # Adapter weights and guide tokens; conservative estimates, not measured.
+        extra_ram += 5
+        extra_vram += 3
     names = _prepare(model_id, job, extra_ram=extra_ram, extra_vram=extra_vram)
+    if voice_mode == 'voice_reference':
+        from studio.engines.ltx25_msr import prepare_msr
+        runtime = Q5_RUNTIME if model_id in Q5_IDS else common.ROOT
+        if prepare_msr(job, runtime=runtime, weights=WEIGHTS, model_id=model_id):
+            names = _prepare(model_id, job, extra_ram=extra_ram, extra_vram=extra_vram)
     session = (common._open_resident(job, names, model_id, Q5_RUNTIME) if model_id in Q5_IDS
                else common._open_resident(job, names, model_id))
+    if voice_mode == 'voice_reference':
+        try:
+            response = common.requests.get(session.base + '/object_info', timeout=20)
+            response.raise_for_status()
+            missing = {'StudioStrictMSRLoader', 'ComfyUILTX25MSRMultiReferenceGuide', 'LTXVCropGuides'} - set(response.json())
+            if missing:
+                raise RuntimeError('MSR_RUNTIME_MISSING_NODES: ' + ', '.join(sorted(missing)))
+        except Exception:
+            memory_manager.unload_slot('video')
+            raise
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     seed = int(seed) if seed else int.from_bytes(os.urandom(4), 'big')
     job.log(f'LTX 2.5: {width}×{height}, {frames} fotogramas a {fps} fps (~{frames/fps:.2f} s), una pasada, 8 pasos.')
-    suffix, generated, image_name = uuid.uuid4().hex, None, None
+    suffix, generated, image_name, audio_name = uuid.uuid4().hex, None, None, None
     try:
         if image_path:
             from PIL import Image
@@ -227,6 +267,19 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
                 image.convert('RGB').save(session.input_dir / image_name)
         graph = make_graph25(prompt=effective, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
                              seed=seed, image_name=image_name, names=names, image_strength=image_strength)
+        if voice_path is not None:
+            from studio.engines.ffmpeg_utils import get_ffmpeg_bin
+            audio_name = f'voice_{suffix}.wav'
+            audio_command = [get_ffmpeg_bin(), '-v', 'error', '-y', '-i', str(voice_path), '-vn', '-ac', '1', '-ar', '44100']
+            if voice_mode == 'audio':
+                audio_command += ['-af', f'apad,atrim=duration={frames / fps:.6f}']
+            common._command(audio_command + ['-c:a', 'pcm_s16le', str(session.input_dir / audio_name)],
+                            job, stage='Preparando audio LTX 2.5', timeout=120)
+            if voice_mode == 'audio':
+                add_voice_graph(graph, 'audio', audio_name)
+            else:
+                from studio.engines.ltx25_msr import add_msr_graph
+                add_msr_graph(graph, image_name, audio_name)
         graph['20']['inputs']['filename_prefix'] = f'studio_gguf_{suffix}'
         generated = common._infer(graph, session.input_dir, session.output_dir, job, model_id)
         info = probe_media_info(generated)
@@ -248,6 +301,8 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
     finally:
         if image_name:
             (session.input_dir / image_name).unlink(missing_ok=True)
+        if audio_name:
+            (session.input_dir / audio_name).unlink(missing_ok=True)
         if generated:
             generated.unlink(missing_ok=True)
     meta = {'id': dest.stem, 'filename': name, 'rel_path': f'outputs/videos/{name}', 'media_url': f'/media/outputs/videos/{name}',
@@ -256,6 +311,7 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
             'seed': seed, 'width': info.get('width'), 'height': info.get('height'), 'duration_seconds': info.get('duration_seconds'),
             'fps': fps, 'steps': 8, 'guidance_scale': 1.0, 'requested_duration_sec': duration_sec, 'frames': frames,
             'duration_warning': warning, 'speech_language_hint': speech_language, 'image_strength': image_strength if image_path else None,
+            'voice_mode': voice_mode, 'source_audio_duration_seconds': voice_info.get('duration_seconds') if voice_info else None,
             'elapsed_seconds': round(time.monotonic()-started, 2), 'created_at': datetime.now().isoformat(timespec='seconds')}
     (VIDEOS_OUT_DIR / (dest.stem + '.json')).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf8')
     return meta
