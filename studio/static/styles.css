@@ -2290,6 +2290,7 @@ select:focus {
 
 
 /* Explainable metadata discovery (shared assessment with MCP). */
+.vmc-validation { color: #86efac; font-size: 12px; margin: 4px 0; }
 .gpu-sticker.candidate { color: #c4b5fd; background: rgba(139, 92, 246, .13); border-color: rgba(139, 92, 246, .3); }
 .discovery-actions { flex-wrap: wrap; }
 .discovery-tags { flex-wrap: wrap; margin: 8px 0; }

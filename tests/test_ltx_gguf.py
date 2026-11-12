@@ -156,6 +156,10 @@ def test_gguf_catalog_filter_and_prepare_endpoint(temp_studio_env, monkeypatch):
     unfiltered = client.get('/api/catalog?gpu_profile=L4').json()['models']
     entry = next(m for m in unfiltered if m['id'] == model_id)
     assert entry['engine'] == 'ltx_gguf' and entry['compatibility']['compatible'] is False
+    assert entry['compatibility']['tier'] == 'candidate'
+    assert entry['execution_validation']['status'] == 'observed'
+    assert 'I2V probada en L4' in entry['execution_validation']['label']
+    assert '20 s' in entry['execution_validation']['scope']
     assert not any(m['id'] == model_id for m in client.get('/api/catalog?gpu_profile=L4&only_compatible=true').json()['models'])
     calls = []
     monkeypatch.setattr(b, 'prepare_gguf', lambda *, job: calls.append(job) or {'prepared': True})

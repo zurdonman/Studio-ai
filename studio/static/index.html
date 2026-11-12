@@ -433,9 +433,9 @@
 
           <div class="ltx-gguf-callout" id="ltx-gguf-panel" aria-label="LTX 2.3 GGUF Q4 experimental">
             <div class="ltx-gguf-copy">
-              <strong>🧪 LTX 2.3 GGUF Q4 · vídeo + audio</strong>
-              <p>Elígelo en la lista de modelos de Vídeo. Si no aparece, desmarca «Mostrar solo modelos con encaje estimado»: aún no hay medición de encaje en L4. Usa «Preparar» para instalar y descargar; luego «Generar Clip».</p>
-              <p class="muted">Usa duración (1–20 s experimental), fps, ancho y alto (múltiplos de 32; área máxima 768×512), prompt, prompt negativo, semilla e imagen inicial opcional. Duración aproximada por fotogramas 8n+1. Fijos: 8 pasos y CFG 1. Sin LoRA, fotograma final ni voz de referencia. Más de 10 s no se ha probado en L4: exige más memoria, puede ser rechazado por seguridad o fallar.</p>
+              <strong>✅ LTX 2.3 GGUF Q4 · generación I2V probada en L4</strong>
+              <p>Elígelo en la lista de modelos de Vídeo. Si no aparece, desmarca «Mostrar solo modelos con encaje estimado»: la prueba en L4 no evalúa los recursos disponibles de esta sesión. Usa «Preparar» para instalar y descargar; luego «Generar Clip».</p>
+              <p class="muted">Usa duración (1–20 s experimental), fps, ancho y alto (múltiplos de 32; área máxima 768×512), prompt, prompt negativo, semilla e imagen inicial opcional. Duración aproximada por fotogramas 8n+1. Fijos: 8 pasos y CFG 1. Sin LoRA, fotograma final ni voz de referencia. En L4 se probaron 10 y 20 s a 512×320 (20 s con caché). Otras condiciones pueden consumir más memoria, ser rechazadas o fallar.</p>
               <p class="muted">Descarga ~24 GiB más dependencias; se requieren licencias LTX y Gemma. El motor reutiliza la caché mientras haya memoria, y «Sacar de RAM/VRAM» lo libera. Las voces constantes no están garantizadas.</p>
               <p id="ltx-gguf-error" role="alert" hidden></p>
             </div>

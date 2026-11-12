@@ -488,14 +488,16 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
         only_compatible=only_compatible, detected_gpu=hw_gpu, assessment_context_value=context)
     if not only_compatible:
         from studio.engines.ltx_gguf_backend import gguf_files_present
-        unknown = {"compatible": False, "tier": "incompatible", "label": "Experimental · encaje sin validar", "sticker": "🧪", "reasons": ["Sin medición de encaje en GPU, RAM y disco; desmarca el filtro para investigar."]}
+        unknown = {"compatible": False, "tier": "candidate", "label": "Encaje actual no evaluado", "sticker": "🧪", "reasons": ["La prueba L4 no evalúa la RAM y el disco de esta sesión; desmarca el filtro para investigar."]}
         models.append({"id": "ltx-2.3-distilled-gguf-q4-experimental", "name": "LTX 2.3 GGUF Q4 · vídeo + audio (experimental)",
                        "category": "video", "engine": "ltx_gguf", "video_modes": ["i2v", "t2v", "av"],
                        "estimated_gb": 24.1, "downloaded": gguf_files_present(), "loaded_in_memory": "ltx-2.3-distilled-gguf-q4-experimental" in loaded_ids,
                        "compatibility": unknown, "ltx_distilled": True,
+                       "execution_validation": {"status": "observed", "label": "✅ Generación I2V probada en L4",
+                           "scope": "512×320, 24 fps, 10 s y 20 s con caché residente; audio y vídeo presentes. No valida idioma, movimiento ni esta sesión."},
                        "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                          "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
-                                         "official_note": "Duración experimental 1–20 s; 8 pasos y CFG 1 fijos. Más de 10 s no validado en L4."}})
+                                         "official_note": "I2V de 10 y 20 s probado en L4 a 512×320; 8 pasos y CFG 1 fijos. Otras configuraciones y el encaje actual no garantizados."}})
     for model in models:
         model["hardware_assessment"] = model["compatibility"]
         if model["category"] == "image":

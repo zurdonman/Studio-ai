@@ -32,7 +32,7 @@ const model = (id, fit, extra = {}) => ({
       if (profile === "T4") await wait(5);
       data = {models: [model("heavy", profile === "auto", {downloaded:true,loaded_in_memory:true}),
                        model("fits", profile !== "T4"), model("unknown", false),
-                       model("ltx-2.3-distilled-gguf-q4-experimental", false, {name:"LTX 2.3 GGUF Q4", engine:"ltx_gguf", ltx_distilled:true})],
+                       model("ltx-2.3-distilled-gguf-q4-experimental", false, {name:"LTX 2.3 GGUF Q4", engine:"ltx_gguf", ltx_distilled:true, execution_validation:{status:"observed",label:"✅ Generación I2V probada en L4",scope:"20 s con caché; no garantiza esta sesión"}})],
               active_gpu_profile:{id:profile,short:profile}, loaded_slots:[]};
     } else if (u.pathname === "/api/catalog/hf-search") {
       const compatOnly = u.searchParams.get("only_compatible") === "true";
@@ -87,6 +87,7 @@ const model = (id, fit, extra = {}) => ({
   const ggufId = "ltx-2.3-distilled-gguf-q4-experimental";
   const card = w.document.querySelector(`[data-vmid="${ggufId}"]`);
   if (!card) throw Error("GGUF card missing");
+  if (!card.textContent.includes("✅ Generación I2V probada en L4") || !$("ltx-gguf-panel").textContent.includes("✅ LTX")) throw Error("Scoped GGUF validation badge missing");
   card.click();
   if ($("select-video-model").value !== ggufId || !$("btn-prepare-video").textContent.includes("GGUF")) throw Error("GGUF selection or prepare label missing");
   $("btn-prepare-video").click();

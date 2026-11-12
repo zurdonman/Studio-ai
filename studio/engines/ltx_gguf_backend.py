@@ -1,7 +1,8 @@
 """Experimental, single-pass LTX-2.3 GGUF runner using isolated ComfyUI.
 
-Not validated with real model weights or GPU. No claim that guardrails measure
-peak memory. A private child process holds GPU only for the duration of a job.
+I2V with real weights was observed on an L4 at 512×320, including 10 s and
+20 s with a resident cache. Guardrails do not measure peak memory or guarantee
+other configurations. The private child process can remain resident between jobs.
 """
 from __future__ import annotations
 
@@ -526,7 +527,7 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
     if width < 256 or height < 256 or width % 32 or height % 32 or width * height > 768 * 512:
         raise ValueError("GGUF: dimensiones múltiplos de 32 y área máxima 768×512")
     if duration_sec > 10:
-        job.log("Más de 10 s es experimental y no está validado en L4; puede superar la memoria disponible.", level="warning")
+        job.log("Más de 10 s es experimental; un clip de 20 s se probó en L4 con caché, pero otras condiciones pueden superar la memoria disponible.", level="warning")
     # Extra workload is a guardrail, not a measured peak. A longer clip may still OOM.
     scale = width * height * frames / (512 * 320 * 49)
     extra_ram = max(0.0, scale - 1) * 2

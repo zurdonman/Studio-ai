@@ -2,6 +2,10 @@
 
 **Fecha de revisión: 2026-11-05 (UTC).**
 
+## Actualización GGUF
+
+LTX 2.3 destilado GGUF Q4 ya tiene una ejecución I2V observada en Colab L4, incluidos dos clips de 20 s con caché; no se generaliza esa prueba a otros GGUF. Ver [guía de implementación, límites y candidatos](GGUF_PLAYBOOK.md). El resto de este informe describe la investigación y recetas de la fecha indicada, no una lista actualizada de inferencias GPU.
+
 ## Resultado y alcance real
 
 Se ha reunido una base reproducible de **73 familias/proyectos documentados** y **243 referencias únicas a repositorios** de modelos/compañeros, más el catálogo de **74 recetas y complementos** de Studio (8 recetas nuevas de imagen). Las referencias proceden de documentación oficial de Diffusers fijada en **v0.42.1**, publicada el **2026-10-27**, y de README oficiales fijados a commits. El inventario machine-readable es [`studio/data/upstream_models.json`](../studio/data/upstream_models.json).
@@ -14,7 +18,7 @@ Un descubrimiento NO se registra automáticamente en el catálogo ejecutable. Se
 
 1. **La memoria no se calcula solo por parámetros.** Un denoiser de 0.6B puede acompañarse de un T5/Gemma mucho mayor; un vídeo mantiene activaciones temporales y un VAE 3D. Cuantizar solo el denoiser no reduce los demás componentes.
 2. **Receta, clase y formato van juntos.** HunyuanVideo 1.5 usa un contrato/guider diferente; FramePack combina varios repositorios; FLUX.2 no es FLUX.1; Qwen-Image 2.1 no es el paquete Qwen Edit 2511. Un `DiffusionPipeline.from_pretrained` genérico no traduce esas convenciones a la API de Studio.
-3. **No extrapolar optimizaciones de otros runtimes.** GGUF/NVFP4/ComfyUI/WanGP/MLX requieren su propio cargador, precisión y offload. La disponibilidad en esas herramientas no acredita soporte aquí. Las recetas FP8 específicas ya implementadas siguen usando sus compañeros y hooks exactos.
+3. **No extrapolar optimizaciones de otros runtimes.** GGUF/NVFP4/ComfyUI/WanGP/MLX requieren su propio cargador, precisión y offload. La receta específica de LTX 2.3 GGUF se ha implementado; la disponibilidad de otro modelo en esas herramientas no acredita soporte aquí. Las recetas FP8 específicas ya implementadas siguen usando sus compañeros y hooks exactos.
 4. **BF16 importa.** Las nuevas recetas BF16 nativas no se autorizan para T4/V100. En T4 hay recetas FP16 de SDXL/PixArt; cambiar automáticamente el dtype de cualquier arquitectura puede provocar NaN, errores de kernel o picos distintos. L4/A100/H100 tampoco eliminan RAM/disco/gates.
 5. **Poca VRAM puede exigir mucha RAM y tiempo.** Las cifras mínimas de los autores suelen presuponer offload, encoder cuantizado, resolución baja o group offload específicos. No se han trasladado como mínimos universales a Studio. El ejemplo oficial de PixArt con menos de 8 GiB modifica y descarga el T5; nuestra receta FP16 completa no promete ese mínimo.
 6. **LoRA no es una base.** Compatibilidad por arquitectura, versión y submodo explícitos, incluyendo presupuesto de base + adapter. Ni todos los LoRAs son Qwen, ni todos los Wan 14B sirven para VACE/FLF2V.

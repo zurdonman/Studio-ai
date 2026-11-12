@@ -1495,7 +1495,8 @@
           ? "💾 En disco"
           : `⬇ ${m.estimated_gb} GB`;
         const stk = (m.compatibility && m.compatibility.sticker) || "";
-        return `<option value="${escapeHtml(m.id)}">${stk} · ${escapeHtml(m.name)} [${st}]</option>`;
+        const tested = m.execution_validation?.status === "observed" ? "✅ Probado en L4 · " : "";
+        return `<option value="${escapeHtml(m.id)}">${tested}${stk} · ${escapeHtml(m.name)} [${st}]</option>`;
       })
       .join("");
 
@@ -1532,6 +1533,7 @@
               <div class="vm-card-top">
                 <div class="vm-card-title">${escapeHtml(m.name)}</div>
               </div>
+              ${m.execution_validation?.status === "observed" ? `<div class="vmc-validation" title="${escapeHtml(m.execution_validation.scope || "")}">${escapeHtml(m.execution_validation.label)}</div>` : ""}
               <div class="vm-card-meta">
                 <span class="gpu-sticker ${escapeHtml(tier)}">${escapeHtml(comp.label || comp.sticker || "")}</span>
                 <span>· ${escapeHtml(diskTxt)}</span>
@@ -3492,7 +3494,7 @@
       if (!["t2v", "i2v"].includes(sub)) return showInputError("GGUF admite solo Texto a Vídeo o Imagen a Vídeo.");
       const image_rel = sub === "i2v" ? $("vid-source-image").value : null;
       if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
-      if (!confirm("GGUF experimental: se usarán la resolución, duración y fps elegidos (8 pasos y CFG 1 fijos). Más de 10 s es experimental y consume más memoria; puede ser rechazado o fallar en L4. Si falta, se descargarán hasta 24 GiB. ¿Generar?")) return;
+      if (!confirm("GGUF experimental: se usarán la resolución, duración y fps elegidos (8 pasos y CFG 1 fijos). Se probaron 20 s en L4 a 512×320 con caché; más duración consume más memoria y puede ser rechazada o fallar. Si falta, se descargarán hasta 24 GiB. ¿Generar?")) return;
       try {
         $("ltx-gguf-error").hidden = true;
         ggufFeedback("Enviando solicitud de generación GGUF…");
