@@ -942,10 +942,33 @@ def api_generate_image(req: ImageGenReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict()}
 
 
+class VoiceConsistencyReq(BaseModel):
+    image_rel: str = Field(min_length=1)
+    reference_voice_rel: str = Field(min_length=1)
+    prompt: str = Field(min_length=1, max_length=2000)
+    seed: int = Field(default=42, ge=0, le=4294967295)
+
+
+@app.post("/api/video/id-lora")
+def api_id_lora_video(req: VoiceConsistencyReq) -> Dict[str, Any]:
+    from studio.engines.id_lora_backend import generate_id_lora_clip, validate_inputs
+    image = _resolve_media_rel(req.image_rel)
+    voice = _resolve_media_rel(req.reference_voice_rel)
+    if image is None or voice is None:
+        raise HTTPException(status_code=400, detail="Se necesita un primer fotograma y una referencia de voz.")
+    try:
+        validate_inputs(image, voice, req.prompt)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    job = job_manager.submit(kind="video", title="ID-LoRA · voz y vídeo nativos (experimental)",
+        fn=lambda j: generate_id_lora_clip(image, voice, req.prompt, req.seed, j))
+    return {"ok": True, "job": job.to_dict()}
+
+
 @app.post("/api/video/generate")
 def api_generate_video(req: VideoGenReq) -> Dict[str, Any]:
     if req.reference_voice_rel:
-        raise HTTPException(status_code=400, detail="VOICE_REFERENCE_BACKEND_UNAVAILABLE: ID-LoRA todavía no está implementado; no se generó ni descargó nada. audio_rel es una pista de salida, no una referencia de identidad.")
+        raise HTTPException(status_code=400, detail="VOICE_REFERENCE_BACKEND_UNAVAILABLE: esta ruta de vídeo no admite referencia de voz. Usa la ruta experimental ID-LoRA dedicada; audio_rel solo sustituye la pista de salida.")
     img_p = _resolve_media_rel(req.image_rel)
     end_img_p = _resolve_media_rel(req.end_image_rel)
     aud_p = _resolve_media_rel(req.audio_rel)

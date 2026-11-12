@@ -1957,9 +1957,21 @@
     renderAudioList();
     renderMusicPicker();
     renderLipSyncSelects();
+    renderIdLoraSelects();
     renderHiggsfieldAssetSelects();
     renderMontagePickers();
     renderMontageGallery();
+  }
+
+  function renderIdLoraSelects() {
+    const images = [...state.assets.images, ...state.assets.uploads.filter(x => x.type === "image")];
+    const audio = [...state.assets.audio, ...state.assets.uploads.filter(x => x.type === "audio")];
+    for (const [id, items, label] of [["id-lora-image", images, "Selecciona un primer fotograma"], ["id-lora-voice", audio, "Selecciona una referencia de voz"]]) {
+      const el = $(id); if (!el) continue;
+      const prev = el.value;
+      el.innerHTML = `<option value="">${label}</option>` + items.map(a => `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
+      if (items.some(a => a.rel_path === prev)) el.value = prev;
+    }
   }
 
   function renderLipSyncSelects() {
@@ -3345,6 +3357,23 @@
         toast(e.message, "error");
       }
       ev.target.value = "";
+    });
+
+    for (const [inputId, selectId] of [["id-lora-image-upload", "id-lora-image"], ["id-lora-voice-upload", "id-lora-voice"]]) {
+      $(inputId).addEventListener("change", async ev => {
+        const file = ev.target.files[0]; if (!file) return;
+        try { const asset = await uploadFile(file); $(selectId).value = asset.rel_path; toast(`Archivo subido: ${asset.filename}`, "success"); }
+        catch (e) { toast(e.message, "error"); } finally { ev.target.value = ""; }
+      });
+    }
+    $("btn-id-lora").addEventListener("click", async () => {
+      const image_rel = $("id-lora-image").value, reference_voice_rel = $("id-lora-voice").value, prompt = $("id-lora-prompt").value.trim();
+      if (!image_rel || !reference_voice_rel || !prompt) return toast("Selecciona imagen, referencia de voz y escribe la acción y el diálogo.", "error");
+      if (!confirm("ID-LoRA es experimental, no funciona en L4 en esta versión y puede descargar ~68 GB y un entorno aislado. ¿Iniciar la comprobación de recursos y, si son suficientes, la generación?")) return;
+      try {
+        const res = await api("/api/video/id-lora", {method: "POST", body: JSON.stringify({image_rel, reference_voice_rel, prompt, seed: Number($("id-lora-seed").value)})});
+        watchJob(res.job);
+      } catch (e) { toast(e.message, "error"); }
     });
 
     $("btn-run-tts").addEventListener("click", async () => {

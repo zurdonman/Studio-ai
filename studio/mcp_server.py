@@ -355,7 +355,7 @@ MANUAL_RESOURCES: Dict[str, Dict[str, str]] = {
             "## 2. Voz TTS (`studio_generate_speech`)\n"
             "- Motor instantáneo 0 GB: `engine_id='edge-tts-cloud'` (ej. `es-ES-AlvaroNeural`, `es-ES-ElviraNeural`, `es-MX-DaliaNeural`).\n"
             "- Motores locales (según runtime y RAM/GPU): `kokoro-82m-tts`, `mms-tts-spa`, `bark-small-tts`.\n\n"
-            "- Ninguno clona una voz de referencia. ID-LoRA para LTX sigue sin backend.\n\n"
+            "- Los TTS no clonan voces. La herramienta separada `studio_generate_id_lora_video` es experimental y no se ha probado en GPU.\n\n"
             "## DAW básico\n"
             "- `studio_generate_music_or_sfx` genera MusicGen instrumental, AudioLDM2 o ambiente DSP. `studio_render_midi_synth` convierte MIDI a osciladores CPU, sin batería ni pedal; no son instrumentos acústicos. `studio_mix_music_tracks` recorta y mezcla hasta 16 pistas WAV, sin reproducción de sesión en vivo. La suma puede saturar. ACE-Step y clonación de voz aún no están integrados.\n\n"
             "## 3. Montaje Final (`studio_render_montage`)\n"
@@ -418,7 +418,7 @@ MANUAL_RESOURCES["studio://manual/audiovisual"] = {
 3. Si y solo si una receta audiovisual está disponible y el usuario autoriza el gasto y la descarga, utiliza `studio_generate_video` con su ID exacto, `video_submode='i2v'`, `image_rel` existente, `duration_sec=5` y `use_official_defaults=true`. Para audio nativo no pases `audio_rel`: el motor usaría el audio externo en vez de la salida generada. No añadas LoRAs de otras familias. Espera el mismo `job_id` con `studio_wait_for_job`, informa de los logs y confirma el vídeo y su pista de audio antes de continuar. Un archivo no demuestra inteligibilidad o calidad de voz.
 4. Para una producción de 12 planos, genera primero solo un clip de prueba y espera aprobación antes de seguir si el usuario la solicita. Describe acción rápida, movimiento corporal y gestos visibles sin pedir cámara lenta; conservar caras, ropa y escenario. No prometas coherencia perfecta. No cambies el modelo ni hagas TTS, lip-sync o vídeo mudo como sustituto sin autorización.
 5. `minimax-h3-local-candidate` es un registro informativo: Studio NO implementa todavía su backend modular y bloquea preparación y generación. Inspecciona el ID con `studio_inspect_model`, no con `studio_prepare_model`. La implementación upstream admite generación conjunta y keyframes, pero no está validada aquí; el ejemplo int8 con offload cita ~75 GB RAM y no acredita compatibilidad L4. La licencia comunitaria excluye UE, Reino Unido, EE. UU. y Corea del Sur; revisar [licencia completa](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) y autorización separada cuando corresponda.
-6. ID-LoRA de LTX-2.3 (`lora-ltx23-id-talkvid-candidate`) es solo un candidato informativo: Studio todavía no implementa el acondicionamiento de voz. No lo cargues como LoRA normal, no prometas voces constantes ni digas que `audio_rel` o `reference_voice_rel` activan el método. El primero reemplaza la banda sonora y el segundo está reservado y se rechaza antes de generar. La receta upstream usa una voz y primer frame; dos voces simultáneas y frame final no están validados aquí.
+6. ID-LoRA LTX-2.3 tiene una ruta dedicada experimental `studio_generate_id_lora_video`: usa upstream one-stage BF16, una sola referencia de voz y primer fotograma, 30 pasos y 121 frames a 25 fps. Comprueba hardware, acceso y licencias antes de descargar ~68 GB. Requiere GPU BF16 de al menos 60 GiB totales, RAM libre 72 GiB y VRAM libre 48 GiB más reservas; estimaciones conservadoras sin prueba GPU, NO es receta L4. No garantiza voz idéntica ni diálogo exacto. El `reference_voice_rel` de `studio_generate_video` sigue rechazado; `audio_rel` sustituye el audio. Dos voces simultáneas y fotograma final no están validados. No cargues el LoRA como uno normal.
 7. Si faltan recursos o hay error, detente y consulta `studio_get_work_state`; conserva los pesos y muestra el motivo. No hagas descargas alternativas en cascada, no desactives las guardas y exporta logs con `studio_export_session_log(format='md')` cuando se soliciten o tras fallos repetidos. Pruebas reales GPU/MCP: pendientes para estas recetas.
 """,
 }
@@ -1161,7 +1161,7 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                     },
                     "reference_voice_rel": {
                         "type": "string",
-                        "description": "Reservado para identidad de voz mediante ID-LoRA. Todavía no implementado: la petición se rechaza sin generar ni descargar.",
+                        "description": "No admitido en esta herramienta genérica. Para ID-LoRA utiliza studio_generate_id_lora_video; no es lo mismo que audio_rel.",
                     },
                     "orientation": {
                         "type": "string",
@@ -1485,6 +1485,16 @@ def _build_mcp_tools_schema() -> List[Dict[str, Any]]:
                 "midi_base64": {"type": "string", "description": "Archivo MIDI completo en Base64 (máximo 2 MiB decodificado)."},
                 "instrument": {"type": "string", "enum": ["piano", "bass", "strings", "synth"], "default": "piano"},
                 "wait": {"type": "boolean", "default": True}}, "required": ["midi_base64"]},
+        },
+        {
+            "name": "studio_generate_id_lora_video",
+            "description": "ID-LoRA LTX-2.3 oficial, experimental y sin prueba GPU: genera vídeo y audio nativos con un primer fotograma y una voz de referencia. No equivale a muxear audio. Admisión conservadora: GPU BF16 >=60 GiB, 72 GiB RAM y 48 GiB VRAM libres más reservas; descarga ~68 GB de pesos y dependencias aisladas tras comprobar recursos. No prometas L4, velocidad ni fidelidad.",
+            "inputSchema": {"type": "object", "properties": {
+                "image_rel": {"type": "string", "description": "Primer fotograma ya subido."},
+                "reference_voice_rel": {"type": "string", "description": "Referencia de una sola voz autorizada; 2–15 s, recomendados ~5 s limpios."},
+                "prompt": {"type": "string", "description": "Acción y diálogo; upstream sugiere [VISUAL], [SPEECH], [SOUNDS]."},
+                "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295, "default": 42},
+                "wait": {"type": "boolean", "default": False}}, "required": ["image_rel", "reference_voice_rel", "prompt"]},
         },
         {
             "name": "studio_mix_music_tracks",
@@ -2203,8 +2213,8 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if args.get("reference_voice_rel"):
             return _guided_error(
                 "VOICE_REFERENCE_BACKEND_UNAVAILABLE",
-                "ID-LoRA y la referencia de voz no están implementados en Studio; no se ha generado ni descargado nada.",
-                "No sustituyas la referencia por audio_rel: solo pega audio al MP4. Inspecciona lora-ltx23-id-talkvid-candidate y explica la limitación.",
+                "La ruta genérica no admite referencia de voz; no se ha generado ni descargado nada.",
+                "No sustituyas la referencia por audio_rel: solo pega audio al MP4. Usa la herramienta experimental dedicada studio_generate_id_lora_video y comprueba sus recursos.",
             )
         sub = str(args.get("video_submode") or "").strip().lower()
         mode = str(args.get("mode") or "ai").strip().lower()
@@ -2852,6 +2862,22 @@ def _execute_mcp_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if not wait_flag:
             return _ok_result({"ok": True, "job_id": job.id, "status": job.status})
         return _ok_result(_wait_for_job_bounded(job.id))
+
+    if name == "studio_generate_id_lora_video":
+        from studio.engines.id_lora_backend import generate_id_lora_clip, validate_inputs
+        try:
+            image = _resolve_rel_safe(args.get("image_rel"))
+            voice = _resolve_rel_safe(args.get("reference_voice_rel"))
+            prompt = str(args.get("prompt") or "").strip()
+            seed = int(args.get("seed", 42))
+            if image is None or voice is None or not prompt or len(prompt) > 2000 or not 0 <= seed <= 4294967295:
+                raise ValueError("Primer fotograma, muestra de voz, prompt y semilla válidos son obligatorios.")
+            validate_inputs(image, voice, prompt)
+        except (ValueError, TypeError, FileNotFoundError, RuntimeError, OSError) as exc:
+            return _guided_error("INVALID_ID_LORA_INPUT", str(exc), "Sube una imagen y una muestra de una sola voz de 2–15 s; indica acción y diálogo.")
+        job = job_manager.submit(kind="video", title="[MCP] ID-LoRA · voz y vídeo nativos (experimental)",
+                                 fn=lambda j: generate_id_lora_clip(image, voice, prompt, seed, j))
+        return _ok_result(_wait_for_job_bounded(job.id) if bool(args.get("wait", False)) else {"ok": True, "job_id": job.id, "status": job.status})
 
     if name == "studio_render_midi_synth":
         from studio.engines.midi_synth import INSTRUMENTS, MAX_MIDI_BYTES, synthesize_midi

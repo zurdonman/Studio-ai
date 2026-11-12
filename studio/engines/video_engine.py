@@ -2240,7 +2240,7 @@ def generate_video_clip(
       - Frame a Frame: Inicio → Fin (flf2v)
     """
     if reference_voice_path is not None:
-        raise RuntimeError("VOICE_REFERENCE_BACKEND_UNAVAILABLE: ID-LoRA no está implementado; audio_path solo muxea una pista, no condiciona la voz.")
+        raise RuntimeError("VOICE_REFERENCE_BACKEND_UNAVAILABLE: esta ruta no admite ID-LoRA; usa el backend experimental dedicado. audio_path solo muxea una pista.")
     if duration_seconds is not None:
         duration_sec = float(duration_seconds)
     t0 = time.time()

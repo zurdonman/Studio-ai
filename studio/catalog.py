@@ -1367,11 +1367,11 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "engine": "unvalidated", "estimated_gb": 1.1,
         "min_ram_gb": None, "min_vram_gb": None,
         "compatible_models": [],
-        "badge": "Voz de referencia · implementación pendiente",
+        "badge": "Adaptador informativo · ruta separada experimental",
         "description": (
             "Referencia de ID-LoRA TalkVid para LTX-2.3. La ejecución requiere codificar voz, "
             "añadir latentes con posiciones negativas y adaptar el denoiser; cargar solamente "
-            "el LoRA no habilita clonación de voz. Studio aún no implementa ese flujo."
+            "el LoRA no habilita clonación de voz. La herramienta separada studio_generate_id_lora_video usa upstream; sin prueba GPU."
         ),
         "official_spec": {
             "upstream_base": "Lightricks/LTX-2.3 22B",

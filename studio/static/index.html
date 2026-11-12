@@ -550,7 +550,7 @@
 
               <label class="field-label">Pista de voz / música opcional (se une al MP4)</label>
               <select id="vid-source-audio"></select>
-              <p class="muted">Esta pista sustituye el audio generado; no es una referencia de voz ni sincroniza los labios. ID-LoRA para mantener la voz está pendiente de integración.</p>
+              <p class="muted">Esta pista sustituye el audio generado; no es una referencia de voz ni sincroniza los labios. Para ID-LoRA experimental usa el panel separado en Estudio de Voz.</p>
 
               <div id="vid-ai-fields">
                 <label class="field-label" id="vid-prompt-label">Prompt de movimiento / escena</label>
@@ -756,7 +756,21 @@
                 🎙️ Generar Locución
               </button>
 
-              <p class="muted">Los motores actuales generan locuciones, pero no clonan voces de referencia. La coherencia de voz nativa ID-LoRA para LTX sigue pendiente.</p>
+              <p class="muted">Estos motores generan locuciones, pero no clonan voces. Para probar una referencia de voz con vídeo y audio nativos, usa el panel experimental ID-LoRA.</p>
+
+              <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 10px;" />
+              <h4 class="sub-heading">🧪 ID-LoRA · Voz de referencia para vídeo</h4>
+              <p class="muted">Receta oficial experimental sin prueba GPU: una voz por clip y un primer fotograma. No garantiza voz idéntica ni el diálogo exacto. Usa la misma muestra limpia (~5 s) en cada clip, con permiso de quien habla.</p>
+              <p class="muted">No admite L4 en esta versión: para prevenir un OOM exige GPU BF16 de al menos 60 GiB y memoria libre estimada de 72 GiB RAM y 48 GiB VRAM, más reservas. La primera ejecución puede descargar unos 68 GB de pesos y dependencias. Gemma requiere aceptar su licencia en Hugging Face y tener acceso configurado en Studio.</p>
+              <label class="field-label" for="id-lora-image">Primer fotograma</label>
+              <div class="row-gap"><select id="id-lora-image" class="flex-1"></select><label class="btn btn-secondary btn-sm file-btn">Subir imagen<input id="id-lora-image-upload" type="file" accept="image/*" hidden /></label></div>
+              <label class="field-label" for="id-lora-voice">Muestra de voz autorizada (2–15 s)</label>
+              <div class="row-gap"><select id="id-lora-voice" class="flex-1"></select><label class="btn btn-secondary btn-sm file-btn">Subir voz<input id="id-lora-voice-upload" type="file" accept="audio/*" hidden /></label></div>
+              <label class="field-label" for="id-lora-prompt">Acción, frase y sonido</label>
+              <textarea id="id-lora-prompt" rows="3" placeholder="[VISUAL]: El personaje habla en el bar. [SPEECH]: ¡Quiero mis croquetas! [SOUNDS]: Murmullo de fondo."></textarea>
+              <label class="field-label" for="id-lora-seed">Semilla</label><input id="id-lora-seed" type="number" min="0" max="4294967295" value="42" />
+              <button id="btn-id-lora" class="btn btn-secondary">Generar clip con voz de referencia (experimental)</button>
+              <p class="muted">Un clip: 121 fotogramas a 25 fps (aprox. 4,84 s), 30 pasos y un solo hablante. La preparación y la generación pueden ser lentas. Límite de inferencia: 20 min; el progreso y la cancelación aparecen en el monitor.</p>
 
               <!-- NUEVO: LipSync HD + Auto-Ducking -->
               <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 10px;" />
