@@ -25,6 +25,9 @@ REPO = 'unsloth/LTX-2.5-GGUF'
 REV = 'ac3c540c6025903784336e99b2dc179385c4c3b7'
 WEIGHTS = DATA_ROOT / 'models' / 'ltx25-gguf'
 Q5_ID = 'ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental'
+Q4_Q5_ID = 'ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental'
+UDQ4_Q5_ID = 'ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental'
+Q5_IDS = {Q5_ID, Q4_Q5_ID, UDQ4_Q5_ID}
 Q5_RUNTIME = DATA_ROOT / 'runtimes' / 'ltx25-gemma4-gguf'
 Q5_COMFY_COMMIT = '2f35f4a08176d993cded35dac3332be4f7287f41'
 Q5_ENCODER = ('text_encoder', 'elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF',
@@ -33,6 +36,8 @@ Q5_ENCODER = ('text_encoder', 'elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF',
 MODELS = {
     'ltx-2.5-distilled-gguf-ud-q2-experimental': ('UD-Q2_K_XL', 'distilled/ltx-2.5-22b-distilled-UD-Q2_K_XL.gguf', 9500270976, 'd6fdc7e117f1a9780bdbe15c898d63c12a7d747847f54b276b69a6be5ce3c57d'),
     Q5_ID: ('UD-Q2_K_XL + Gemma 4 GGUF Q5_K_M', 'distilled/ltx-2.5-22b-distilled-UD-Q2_K_XL.gguf', 9500270976, 'd6fdc7e117f1a9780bdbe15c898d63c12a7d747847f54b276b69a6be5ce3c57d'),
+    Q4_Q5_ID: ('Q4_K_M + Gemma 4 GGUF Q5_K_M', 'distilled/ltx-2.5-22b-distilled-Q4_K_M.gguf', 13584703872, 'ba40d53770314e69e88361661e55c6cc3b12a363646ba2ea53c8bcd459b66747'),
+    UDQ4_Q5_ID: ('UD-Q4_K_XL + Gemma 4 GGUF Q5_K_M', 'distilled/ltx-2.5-22b-distilled-UD-Q4_K_XL.gguf', 14000234880, '55442750eb0013d94fffaa4dadb577c5f4dc07107ec04389d41444f6e517d980'),
     'ltx-2.5-distilled-gguf-ud-q4-experimental': ('UD-Q4_K_XL', 'distilled/ltx-2.5-22b-distilled-UD-Q4_K_XL.gguf', 14000234880, '55442750eb0013d94fffaa4dadb577c5f4dc07107ec04389d41444f6e517d980'),
 }
 COMMON = (
@@ -47,7 +52,7 @@ def files_for(model_id: str) -> tuple:
     if model_id not in MODELS:
         raise ValueError('GGUF_MODEL_UNSUPPORTED: modelo LTX 2.5 desconocido')
     _, filename, size, sha = MODELS[model_id]
-    components = (Q5_ENCODER, *COMMON[1:]) if model_id == Q5_ID else COMMON
+    components = (Q5_ENCODER, *COMMON[1:]) if model_id in Q5_IDS else COMMON
     return (('dit', REPO, REV, filename, size, sha), *components)
 
 
@@ -58,7 +63,7 @@ def path_for(item) -> Path:
 
 def files_present(model_id: str) -> bool:
     try:
-        return ((Q5_RUNTIME if model_id == Q5_ID else common.ROOT) / 'ready.json').is_file() and (model_id != Q5_ID or (Q5_RUNTIME / 'gemma4-patch.json').is_file()) and all(path_for(x).is_file() and path_for(x).stat().st_size == x[4] for x in files_for(model_id))
+        return ((Q5_RUNTIME if model_id in Q5_IDS else common.ROOT) / 'ready.json').is_file() and (model_id not in Q5_IDS or (Q5_RUNTIME / 'gemma4-patch.json').is_file()) and all(path_for(x).is_file() and path_for(x).stat().st_size == x[4] for x in files_for(model_id))
     except OSError:
         return False
 
@@ -87,7 +92,7 @@ def _fingerprint(model_id: str) -> tuple | None:
 
 
 def _links(model_id: str) -> dict[str, str]:
-    runtime = Q5_RUNTIME if model_id == Q5_ID else common.ROOT
+    runtime = Q5_RUNTIME if model_id in Q5_IDS else common.ROOT
     folders = {'dit': 'diffusion_models', 'text_encoder': 'text_encoders', 'video_vae': 'vae', 'audio_vae': 'vae'}
     names = {}
     for item in files_for(model_id):
@@ -122,11 +127,12 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         job.log('Liberando el modelo de vídeo anterior para cambiar de receta; archivos intactos.')
         memory_manager.unload_slot('video')
     # Budgets are preventive estimates, not measured peaks for either variant.
-    q5 = model_id == Q5_ID
+    q5 = model_id in Q5_IDS
     runtime = Q5_RUNTIME if q5 else common.ROOT
     # The 26.3 GB BF16 Gemma 4 encoder is not the quantized Gemma 3 of LTX 2.3.
     # This conservative budget is not a measured peak and can reject an L4.
-    memory_manager.ensure_capacity(ram_gb=(32 if q5 else 45) + extra_ram, vram_gb=(14 if q5 else 16) + extra_vram,
+    memory_manager.ensure_capacity(ram_gb=(35 if model_id in {Q4_Q5_ID, UDQ4_Q5_ID} else 32 if q5 else 45) + extra_ram,
+                                   vram_gb=(16 if model_id in {Q4_Q5_ID, UDQ4_Q5_ID} else 14 if q5 else 16) + extra_vram,
                                    stage='LTX 2.5 GGUF (estimación preventiva, no medida)', job=job)
     runtime.mkdir(parents=True, exist_ok=True)
     missing = sum(x[4] for x in files if not path_for(x).is_file() or path_for(x).stat().st_size != x[4])
@@ -203,11 +209,11 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
     # Validate the graph before any download; the file names below are placeholders only.
     make_graph25(prompt=effective, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
                  seed=seed, image_name='input.png' if image_path else None, image_strength=image_strength,
-                 names={'dit':'x.gguf','text_encoder':'x.gguf' if model_id == Q5_ID else 'x.safetensors','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
+                 names={'dit':'x.gguf','text_encoder':'x.gguf' if model_id in Q5_IDS else 'x.safetensors','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
     scale = width * height * frames / (512 * 320 * 49)
     extra_ram, extra_vram = max(0, scale - 1) * 2, max(0, scale - 1) * .5
     names = _prepare(model_id, job, extra_ram=extra_ram, extra_vram=extra_vram)
-    session = (common._open_resident(job, names, model_id, Q5_RUNTIME) if model_id == Q5_ID
+    session = (common._open_resident(job, names, model_id, Q5_RUNTIME) if model_id in Q5_IDS
                else common._open_resident(job, names, model_id))
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     seed = int(seed) if seed else int.from_bytes(os.urandom(4), 'big')

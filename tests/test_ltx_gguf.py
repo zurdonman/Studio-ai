@@ -466,7 +466,7 @@ def test_ltx25_metadata_and_api_routing(temp_studio_env, monkeypatch):
     import time
     from studio.engines import ltx25_gguf as b
     client, _ = temp_studio_env
-    q2, q4 = [mid for mid in b.MODELS if mid != b.Q5_ID]
+    q2, q4 = [mid for mid in b.MODELS if mid not in b.Q5_IDS]
     entries = {x['id']: x for x in client.get('/api/catalog').json()['models']}
     assert entries[q2]['engine'] == 'ltx_gguf' and entries[q4]['engine'] == 'ltx_gguf'
     assert entries[q2]['estimated_gb'] < entries[q4]['estimated_gb']
@@ -540,7 +540,7 @@ def test_ltx25_end_to_end_with_synthetic_audio_and_video(temp_studio_env, monkey
 def test_gguf_resident_cache_never_reuses_a_different_variant(temp_studio_env, monkeypatch):
     from types import SimpleNamespace
     from studio.engines import ltx_gguf_backend as common, ltx25_gguf as ltx25
-    q2, q4 = [mid for mid in ltx25.MODELS if mid != ltx25.Q5_ID]
+    q2, q4 = [mid for mid in ltx25.MODELS if mid not in ltx25.Q5_IDS]
     session = object.__new__(common._ResidentComfy)
     session.proc = SimpleNamespace(poll=lambda: None)
     monkeypatch.setattr(common.memory_manager, 'get_slot', lambda *_: {'model_id':q2, 'handle':session})
@@ -611,7 +611,8 @@ def test_ltx25_q5_manifest_graph_catalog_and_routing(temp_studio_env, monkeypatc
     assert ('prepare',b.Q5_ID) in calls and ('generate',b.Q5_ID) in calls
 
 
-def test_ltx25_q5_uses_separate_runtime_and_memory_guard(temp_studio_env, monkeypatch, tmp_path):
+@pytest.mark.parametrize('variant,ram,vram', [('Q5_ID', 32, 14), ('Q4_Q5_ID', 35, 16), ('UDQ4_Q5_ID', 35, 16)])
+def test_ltx25_q5_uses_separate_runtime_and_memory_guard(temp_studio_env, monkeypatch, tmp_path, variant, ram, vram):
     from studio.engines import ltx25_gguf as b
     from studio.jobs import JobRecord
     calls=[]
@@ -625,12 +626,13 @@ def test_ltx25_q5_uses_separate_runtime_and_memory_guard(temp_studio_env, monkey
     monkeypatch.setattr(b.common, '_command', lambda args,job,**kw: calls.append(('command',args,kw['stage'])))
     monkeypatch.setattr(b, '_links', lambda mid: {'dit':'d.gguf'})
     monkeypatch.setattr(b.shutil, 'disk_usage', lambda p: type('Disk',(),{'free':100*1024**3})())
-    b._prepare(b.Q5_ID, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
-    assert ('capacity',34,14.5) in calls
+    mid = getattr(b, variant)
+    b._prepare(mid, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
+    assert ('capacity',ram + 2,vram + .5) in calls
     assert ('install', b.Q5_RUNTIME, b.Q5_COMFY_COMMIT) in calls
     assert any(c[0]=='probe' and c[1] == b.Q5_RUNTIME and 'CLIPLoaderGGUF' in c[2] for c in calls)
     assert any(c[0]=='command' and 'studio.engines.ltx25_gguf_patch' in c[1] for c in calls)
-    assert any(c[0]=='command' and 'studio.engines.ltx_gguf_download' in c[1] and b.Q5_ID in c[1] for c in calls)
+    assert any(c[0]=='command' and 'studio.engines.ltx_gguf_download' in c[1] and mid in c[1] for c in calls)
 
 
 def test_gemma4_patch_applies_only_verified_patch_and_preserves_changes(tmp_path, monkeypatch):
@@ -703,3 +705,39 @@ def test_comfy_server_command_supports_both_pinned_runtimes(temp_studio_env, mon
         assert '--disable-all-custom-nodes' in cmd
         assert cmd[cmd.index('--whitelist-custom-nodes')+1] == 'ComfyUI-GGUF'
         assert '--reserve-vram' in cmd and '--disable-metadata' in cmd
+
+@pytest.mark.parametrize('variant,expected_size,sha', [
+    ('Q4_Q5_ID', 13584703872, 'ba40d53770314e69e88361661e55c6cc3b12a363646ba2ea53c8bcd459b66747'),
+    ('UDQ4_Q5_ID', 14000234880, '55442750eb0013d94fffaa4dadb577c5f4dc07107ec04389d41444f6e517d980'),
+])
+def test_ltx25_q4_gemma5_manifest_catalog_and_routing(temp_studio_env, monkeypatch, variant, expected_size, sha):
+    import time
+    from studio.engines import ltx25_gguf as b
+    client, _ = temp_studio_env
+    mid = getattr(b, variant)
+    files = b.files_for(mid)
+    assert files[0][4:] == (expected_size, sha)
+    assert files[1] == b.Q5_ENCODER and files[2:] == b.files_for(b.Q5_ID)[2:]
+    assert b.path_for(files[1]) == b.path_for(b.files_for(b.Q5_ID)[1])
+    entry = next(m for m in client.get('/api/catalog').json()['models'] if m['id'] == mid)
+    assert entry['engine'] == 'ltx_gguf' and not entry['compatibility']['compatible']
+    assert entry['estimated_gb'] == round(sum(x[4] for x in files)/1024**3, 1)
+    calls = []
+    monkeypatch.setattr(b, 'prepare', lambda model_id, *, job: calls.append(('prepare',model_id)))
+    monkeypatch.setattr(b, 'generate', lambda **kw: calls.append(('generate',kw['model_id'])) or {})
+    assert client.post('/api/video/ltx-gguf/prepare', params={'model_id':mid}).status_code == 200
+    assert client.post('/api/video/ltx-gguf', json={'model_id':mid,'prompt':'Un retrato'}).status_code == 200
+    for _ in range(50):
+        if len(calls) == 2: break
+        time.sleep(.02)
+    assert ('prepare',mid) in calls and ('generate',mid) in calls
+
+
+def test_face_identity_candidates_are_informative_and_blocked(temp_studio_env):
+    client, _ = temp_studio_env
+    entries = {m['id']:m for m in client.get('/api/catalog').json()['models']}
+    for mid in ('lora-ltx23-best-face-id-candidate', 'lora-ltx23-character-sheet-candidate'):
+        assert entries[mid]['validation_state'] == 'candidate'
+        assert entries[mid]['compatible_models'] == []
+        assert client.post(f'/api/catalog/{mid}/download').status_code == 400
+        assert client.post('/api/memory/load', json={'model_id':mid}).status_code == 400

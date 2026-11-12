@@ -34,7 +34,8 @@ const model = (id, fit, extra = {}) => ({
                        model("fits", profile !== "T4"), model("unknown", false),
                        model("ltx-2.3-distilled-gguf-q4-experimental", false, {name:"LTX 2.3 GGUF Q4", engine:"ltx_gguf", ltx_distilled:true, execution_validation:{status:"observed",label:"✅ Generación I2V probada en L4",scope:"20 s con caché; no garantiza esta sesión"}}),
                        model("ltx-2.5-distilled-gguf-ud-q2-experimental", false, {name:"LTX 2.5 GGUF UD-Q2", engine:"ltx_gguf", ltx_distilled:true}),
-                       model("ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", false, {name:"LTX 2.5 UD-Q2 + Gemma 4 GGUF Q5", engine:"ltx_gguf", ltx_distilled:true})],
+                       model("ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", false, {name:"LTX 2.5 UD-Q2 + Gemma 4 GGUF Q5", engine:"ltx_gguf", ltx_distilled:true}),
+                       ...["ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental"].map(id => model(id, false, {engine:"ltx_gguf", ltx_distilled:true}))],
               active_gpu_profile:{id:profile,short:profile}, loaded_slots:[]};
     } else if (u.pathname === "/api/catalog/hf-search") {
       const compatOnly = u.searchParams.get("only_compatible") === "true";
@@ -85,7 +86,7 @@ const model = (id, fit, extra = {}) => ({
   await wait(20);
   if (requests.some(r => r.method === "POST" && ["/api/memory/load", "/api/video/generate"].includes(r.path))) throw Error("Empty selection submitted a default model");
   $("chk-vid-only-compat").click();
-  if (ids().length !== 6) throw Error("Unchecking filter did not restore catalogue including GGUF");
+  if (ids().length !== 8) throw Error("Unchecking filter did not restore catalogue including GGUF");
   const ggufId = "ltx-2.3-distilled-gguf-q4-experimental";
   const card = w.document.querySelector(`[data-vmid="${ggufId}"]`);
   if (!card) throw Error("GGUF card missing");
@@ -141,6 +142,17 @@ const model = (id, fit, extra = {}) => ({
   await wait(20);
   const q5request = requests.filter(r => r.path === "/api/video/ltx-gguf" && r.method === "POST").at(-1);
   if (!q5request || JSON.parse(q5request.body).model_id !== q5) throw Error("Gemma Q5 did not use GGUF API");
+  for (const id of ["ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental"]) {
+    const card = w.document.querySelector(`[data-vmid="${id}"]`);
+    if (!card) throw Error(`Missing Q4 variant ${id}`);
+    card.click();
+    $("btn-prepare-video").click(); await wait(20);
+    const prep = requests.filter(r => r.path === "/api/video/ltx-gguf/prepare").at(-1);
+    if (!prep || !prep.search.includes(encodeURIComponent(id))) throw Error(`Wrong Q4 prepare: ${id}`);
+    $("btn-run-video").click(); await wait(20);
+    const req = requests.filter(r => r.path === "/api/video/ltx-gguf" && r.method === "POST").at(-1);
+    if (!req || JSON.parse(req.body).model_id !== id) throw Error(`Wrong Q4 generate: ${id}`);
+  }
   pill("L4").click(); pill("T4").click();
   await wait(110);
   if (ids().length !== 0 || !w.document.querySelector('#vid-gpu-pills [data-gpu="T4"]').classList.contains("active")) throw Error("Stale profile response overrode newer selection");

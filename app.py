@@ -501,18 +501,18 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
                        "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                          "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
                                          "official_note": "I2V de 10 y 20 s probado en L4 a 512×320; 8 pasos y CFG 1 fijos. Otras configuraciones y el encaje actual no garantizados."}})
-        from studio.engines.ltx25_gguf import MODELS as LTX25_MODELS, Q5_ID, files_for as ltx25_files, files_present as ltx25_present
+        from studio.engines.ltx25_gguf import MODELS as LTX25_MODELS, Q5_ID, Q5_IDS, files_for as ltx25_files, files_present as ltx25_present
         for mid, (quant, _, _, _) in LTX25_MODELS.items():
             models.append({"id": mid, "name": f"LTX 2.5 GGUF {quant} · vídeo + audio (experimental)",
                            "category": "video", "engine": "ltx_gguf", "video_modes": ["i2v", "t2v", "av"],
                            "estimated_gb": round(sum(x[4] for x in ltx25_files(mid)) / 1024**3, 1),
                            "downloaded": ltx25_present(mid), "loaded_in_memory": mid in loaded_ids,
-                           "compatibility": {"compatible": False, "tier": "candidate", "label": "Sin prueba GPU · encaje desconocido", "sticker": "🧪",
-                                             "reasons": ["No probado en L4. " + ("Gemma 4 GGUF Q5 requiere aceptar condiciones de elix3r; la admisión puede rechazar la tarea." if mid == Q5_ID else "Gemma 4 BF16 ocupa ~24,5 GiB; la admisión puede rechazar la tarea.")]},
+                           "compatibility": {"compatible": False, "tier": "candidate", "label": "Encaje actual desconocido", "sticker": "🧪",
+                                             "reasons": [("Generó vídeo en L4 según el usuario; condiciones y calidad no verificadas. " if mid == Q5_ID else "No probado en L4. ") + ("Gemma 4 GGUF Q5 requiere aceptar condiciones de elix3r; la admisión puede rechazar la tarea." if mid in Q5_IDS else "Gemma 4 BF16 ocupa ~24,5 GiB; la admisión puede rechazar la tarea.")]},
                            "ltx_distilled": True,
                            "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                              "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
-                                             "official_note": "LTX 2.5 experimental, una pasada y VAE conv; sin upscale, sin prueba L4 ni voz de referencia."}})
+                                             "official_note": ("LTX 2.5 experimental, una pasada y VAE conv; sin upscale ni voz de referencia. " + ("UD-Q2 + Gemma Q5 generó vídeo en L4 según el usuario; parámetros no verificados." if mid == Q5_ID else "Esta variante no tiene prueba L4."))}})
     for model in models:
         model["hardware_assessment"] = model["compatibility"]
         if model["category"] == "image":
@@ -994,7 +994,7 @@ def api_id_lora_video(req: VoiceConsistencyReq) -> Dict[str, Any]:
 
 
 class LTXGGUFReq(BaseModel):
-    model_id: Literal["ltx-2.3-distilled-gguf-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental"] = "ltx-2.3-distilled-gguf-q4-experimental"
+    model_id: Literal["ltx-2.3-distilled-gguf-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", "ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental"] = "ltx-2.3-distilled-gguf-q4-experimental"
     prompt: str = Field(min_length=1, max_length=3000)
     negative_prompt: str = Field(default="", max_length=3000)
     image_rel: Optional[str] = None

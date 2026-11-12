@@ -53,8 +53,8 @@
 
   // ==================== HELPERS ====================
   const GGUF_MODEL_ID = "ltx-2.3-distilled-gguf-q4-experimental";
-  const GGUF_GEMMA_Q5_ID = "ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental";
-  const GGUF_MODEL_IDS = new Set([GGUF_MODEL_ID, "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental", GGUF_GEMMA_Q5_ID]);
+  const GGUF_GEMMA_Q5_IDS = new Set(["ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", "ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental"]);
+  const GGUF_MODEL_IDS = new Set([GGUF_MODEL_ID, "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental", ...GGUF_GEMMA_Q5_IDS]);
   const isGgufModel = (id) => GGUF_MODEL_IDS.has(id);
   function $(id) {
     return document.getElementById(id);
@@ -3479,7 +3479,7 @@
     async function prepareLtxGguf() {
       const mid = $("select-video-model").value;
       const m = state.catalog.find(x => x.id === mid);
-      const notice = mid === GGUF_MODEL_ID ? "LTX 2.3 I2V se probó en L4." : mid === GGUF_GEMMA_Q5_ID ? "Gemma 4 GGUF Q5: acepta los términos del repositorio elix3r y configura Hugging Face en Studio. No probado en L4; puede ser rechazado por memoria." : "LTX 2.5 no se ha probado en L4; usa Gemma 4 BF16 grande y puede ser rechazado por memoria.";
+      const notice = mid === GGUF_MODEL_ID ? "LTX 2.3 I2V se probó en L4." : GGUF_GEMMA_Q5_IDS.has(mid) ? "Gemma 4 GGUF Q5: acepta las condiciones de elix3r y configura Hugging Face. UD-Q2 generó vídeo en una L4 según un usuario; Q4 no está probado. El encaje actual no está garantizado." : "LTX 2.5 no se ha probado en L4; usa Gemma 4 BF16 grande y puede ser rechazado por memoria.";
       if (!confirm(`GGUF experimental: se comprobarán los recursos y se instalarán hasta ${m?.estimated_gb || "varios"} GiB de pesos más entorno. Se requieren licencias LTX y Gemma. ${notice} ¿Continuar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
@@ -3503,7 +3503,7 @@
       if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
       const mid = $("select-video-model").value;
       const m = state.catalog.find(x => x.id === mid);
-      const warning = mid === GGUF_MODEL_ID ? "Se probaron 20 s en L4 a 512×320 con caché." : mid === GGUF_GEMMA_Q5_ID ? "Gemma 4 GGUF Q5 no se ha probado en Studio ni en L4; una pasada sin upscale. Puede fallar por memoria o compatibilidad. Requiere acceso autorizado a elix3r." : "LTX 2.5 no está probado en GPU ni en L4; usa una pasada sin upscale y Gemma 4 BF16, puede ser rechazado o fallar por memoria.";
+      const warning = mid === GGUF_MODEL_ID ? "Se probaron 20 s en L4 a 512×320 con caché." : GGUF_GEMMA_Q5_IDS.has(mid) ? "UD-Q2 + Gemma Q5 generó vídeo en una L4 según un usuario; las variantes Q4 no están probadas. Una pasada sin upscale; puede fallar por memoria. Requiere acceso a elix3r." : "LTX 2.5 no está probado en GPU ni en L4; usa una pasada sin upscale y Gemma 4 BF16, puede ser rechazado o fallar por memoria.";
       if (!confirm(`GGUF experimental: 8 pasos y CFG 1 fijos. ${warning} Se descargarán hasta ${m?.estimated_gb || "varios"} GiB si faltan. ¿Generar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
