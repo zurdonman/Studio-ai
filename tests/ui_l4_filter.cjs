@@ -115,6 +115,17 @@ const model = (id, fit, extra = {}) => ({
   if ($("vid-gguf-feedback").hidden || !$("vid-gguf-feedback").textContent.includes("enviada")) throw Error("GGUF submission confirmation missing");
   if ($("vid-gguf-live-progress").hidden || $("vid-gguf-live-step").textContent !== "Difusión: paso 4/8" || $("vid-gguf-live-bar").style.width !== "50%") throw Error("GGUF concurrent progress not displayed");
   if ($("img-inline-progress").hidden || !$("img-iep-step").textContent.includes("Render imagen")) throw Error("Concurrent image progress hidden");
+  const audioOption = w.document.createElement("option");
+  audioOption.value = "uploads/voice.wav"; audioOption.textContent = "voice.wav";
+  $("vid-source-audio").appendChild(audioOption); $("vid-source-audio").value = audioOption.value;
+  for (const mode of ["audio", "voice_reference"]) {
+    $("vid-gguf-voice-mode").value = mode;
+    $("btn-run-video").click(); await wait(20);
+    const body = JSON.parse(requests.filter(r => r.path === "/api/video/ltx-gguf" && r.method === "POST").at(-1).body);
+    if (body.voice_mode !== mode || (mode === "audio" ? body.audio_rel : body.reference_voice_rel) !== audioOption.value)
+      throw Error(`Wrong voice request for ${mode}`);
+  }
+  $("vid-source-audio").value = ""; $("vid-gguf-voice-mode").value = "none";
   $("btn-cancel-gguf").click();
   await wait(20);
   if (!requests.some(r => r.path === "/api/jobs/gguf-test/cancel" && r.method === "POST")) throw Error("GGUF cancel targeted wrong job");

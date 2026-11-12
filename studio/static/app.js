@@ -1422,6 +1422,7 @@
     const gguf = isGgufModel(modelId);
     if ($("vid-duration")) $("vid-duration").max = gguf ? "20" : "10";
     if ($("vid-gguf-guidance")) $("vid-gguf-guidance").hidden = !gguf;
+    if ($("vid-gguf-voice-wrap")) $("vid-gguf-voice-wrap").hidden = modelId !== GGUF_MODEL_ID;
     if ($("vid-gguf-strength-wrap")) $("vid-gguf-strength-wrap").hidden = !gguf || state.videoSubmode !== "i2v";
     ["vid-steps", "vid-steps-slider", "vid-cfg", "btn-steps-fast-safe", "btn-reset-vid-steps"].forEach(id => {
       if ($(id)) $(id).disabled = gguf;
@@ -3499,16 +3500,19 @@
       if (!prompt) return showInputError("Escribe un prompt antes de generar con GGUF.");
       if (!["t2v", "i2v"].includes(sub)) return showInputError("GGUF admite solo Texto a Vídeo o Imagen a Vídeo.");
       const image_rel = sub === "i2v" ? $("vid-source-image").value : null;
-      if ($("vid-source-audio").value) return showInputError("La ruta GGUF no aplica la pista de audio seleccionada. Desmárcala o usa otro flujo de vídeo.");
-      if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
       const mid = $("select-video-model").value;
+      const voice_mode = mid === GGUF_MODEL_ID ? $("vid-gguf-voice-mode").value : "none";
+      const audio = $("vid-source-audio").value || null;
+      if (voice_mode === "none" && audio) return showInputError("Desmarca la pista o selecciona un modo de voz para LTX 2.3 GGUF.");
+      if (voice_mode !== "none" && !audio) return showInputError("Selecciona o sube un archivo de audio para el modo de voz.");
+      if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
       const m = state.catalog.find(x => x.id === mid);
       const warning = mid === GGUF_MODEL_ID ? "Se probaron 20 s en L4 a 512×320 con caché." : GGUF_GEMMA_Q5_IDS.has(mid) ? "UD-Q2 + Gemma Q5 generó vídeo en una L4 según un usuario; las variantes Q4 no están probadas. Una pasada sin upscale; puede fallar por memoria. Requiere acceso a elix3r." : "LTX 2.5 no está probado en GPU ni en L4; usa una pasada sin upscale y Gemma 4 BF16, puede ser rechazado o fallar por memoria.";
-      if (!confirm(`GGUF experimental: 8 pasos y CFG 1 fijos. ${warning} Se descargarán hasta ${m?.estimated_gb || "varios"} GiB si faltan. ¿Generar?`)) return;
+      if (!confirm(`GGUF experimental: 8 pasos y CFG 1 fijos. ${warning} ${voice_mode !== "none" ? "Modo de voz sin prueba GPU: puede fallar por memoria o compatibilidad; audio solo autorizado. " : ""}${voice_mode === "voice_reference" ? "Se descarga ID-LoRA TalkVid (~1,1 GiB). " : ""}Se descargarán hasta ${m?.estimated_gb || "varios"} GiB si faltan. ¿Generar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
         ggufFeedback("Enviando solicitud de generación GGUF…");
-        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({model_id:mid, prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value), speech_language:$("vid-gguf-spanish").checked ? "es" : "auto", image_strength:Number($("vid-gguf-strength").value)})});
+        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({model_id:mid, prompt, image_rel, voice_mode, audio_rel:voice_mode === "audio" ? audio : null, reference_voice_rel:voice_mode === "voice_reference" ? audio : null, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value), speech_language:$("vid-gguf-spanish").checked ? "es" : "auto", image_strength:Number($("vid-gguf-strength").value)})});
         if (!res || !res.job || !res.job.id) throw new Error("El servidor no devolvió una tarea de generación.");
         ggufFeedback("Generación enviada. Puedes seguir el progreso o cancelarla en el panel de tareas.");
         watchJob(res.job);
@@ -3528,6 +3532,12 @@
           type: "video",
         });
       }
+    });
+
+    $("vid-voice-upload").addEventListener("change", async ev => {
+      const file = ev.target.files[0]; if (!file) return;
+      try { const asset = await uploadFile(file); $("vid-source-audio").value = asset.rel_path; toast(`Audio subido: ${asset.filename}`, "success"); }
+      catch (e) { toast(e.message, "error"); } finally { ev.target.value = ""; }
     });
 
     // Pestaña 3: Voces / TTS

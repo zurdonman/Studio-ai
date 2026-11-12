@@ -1000,6 +1000,7 @@ class LTXGGUFReq(BaseModel):
     image_rel: Optional[str] = None
     audio_rel: Optional[str] = None
     reference_voice_rel: Optional[str] = None
+    voice_mode: Literal['none', 'audio', 'voice_reference'] = 'none'
     seed: int = Field(default=0, ge=0, le=4294967295)
     width: int = Field(default=512, ge=256, le=768)
     height: int = Field(default=320, ge=256, le=768)
@@ -1031,8 +1032,25 @@ def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
     from studio.engines.ltx25_gguf import MODELS, generate as generate25
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Describe la escena.")
-    if req.audio_rel or req.reference_voice_rel:
-        raise HTTPException(status_code=400, detail="GGUF no admite pista de audio ni referencia de voz; no se ignorará la entrada.")
+    if req.voice_mode != 'none' and req.model_id != 'ltx-2.3-distilled-gguf-q4-experimental':
+        raise HTTPException(status_code=400, detail='La voz experimental solo está disponible en LTX 2.3 GGUF Q4.')
+    if ((req.voice_mode == 'none' and (req.audio_rel or req.reference_voice_rel))
+        or (req.voice_mode == 'audio' and (not req.audio_rel or req.reference_voice_rel))
+        or (req.voice_mode == 'voice_reference' and (not req.reference_voice_rel or req.audio_rel))):
+        raise HTTPException(status_code=400, detail='Selecciona exactamente el archivo correspondiente al modo de voz, sin entradas ignoradas.')
+    voice_rel = req.audio_rel if req.voice_mode == 'audio' else req.reference_voice_rel if req.voice_mode == 'voice_reference' else None
+    voice = _resolve_media_rel(voice_rel) if voice_rel else None
+    if voice_rel:
+        if voice is None:
+            raise HTTPException(status_code=400, detail='El archivo de audio no está disponible.')
+        try:
+            from studio.engines.ffmpeg_utils import probe_media_info
+            voice_info = probe_media_info(voice)
+            seconds = float(voice_info.get('duration_seconds') or 0)
+            if not voice_info.get('has_audio') or voice_info.get('has_video') or not 1 <= seconds <= (20 if req.voice_mode == 'audio' else 15):
+                raise ValueError('Audio completo: 1–20 s; referencia ID-LoRA: 1–15 s; sin pista de vídeo.')
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if req.width % 32 or req.height % 32 or req.width * req.height > 768 * 512:
         raise HTTPException(status_code=400, detail="GGUF: ancho y alto deben ser múltiplos de 32 y su área no puede superar 768×512.")
     image = _resolve_media_rel(req.image_rel) if req.image_rel else None
@@ -1046,6 +1064,8 @@ def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
         fn = lambda j: generate25(model_id=req.model_id, job=j, **kwargs)
     else:
         title = "LTX 2.3 GGUF Q4 · audio y vídeo (experimental)"
+        if req.voice_mode != 'none':
+            kwargs.update(voice_mode=req.voice_mode, voice_path=voice)
         fn = lambda j: generate_gguf(job=j, **kwargs)
     job = job_manager.submit(kind="video", title=title, fn=fn)
     return {"ok": True, "job": job.to_dict()}

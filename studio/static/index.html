@@ -563,12 +563,23 @@
 
               <label class="field-label">Pista de voz / música opcional (se une al MP4)</label>
               <select id="vid-source-audio"></select>
-              <p class="muted">En la ruta de vídeo normal, esta pista sustituye el audio generado; no es una referencia de voz ni sincroniza los labios. Las rutas GGUF no admiten esta pista: desmárcala antes de generar. Para ID-LoRA experimental usa el panel separado en Estudio de Voz.</p>
+              <label class="btn btn-secondary btn-sm file-btn">Subir audio<input id="vid-voice-upload" type="file" accept="audio/*" hidden /></label>
+              <p class="muted">En la ruta normal, esta pista sustituye el audio y no sincroniza labios. Para LTX 2.3 GGUF selecciona el modo de voz experimental de abajo.</p>
 
               <div id="vid-ai-fields">
                 <label class="field-label" id="vid-prompt-label">Prompt de movimiento / escena</label>
                 <textarea id="vid-prompt" rows="2" placeholder="Ej: La cámara se acerca suavemente, brisa ligera en el cabello, iluminación cinematográfica natural..."></textarea>
                 <div id="vid-gguf-guidance" class="vid-gguf-guidance" hidden>
+                  <div id="vid-gguf-voice-wrap" hidden>
+                    <label class="field-label">Voz LTX 2.3 GGUF · experimental, sin prueba GPU
+                      <select id="vid-gguf-voice-mode">
+                        <option value="none">Audio generado normalmente (sin archivo)</option>
+                        <option value="audio">Audio completo guía el vídeo (1–20 s)</option>
+                        <option value="voice_reference">ID-LoRA: voz de referencia para diálogo nuevo (1–15 s; ~5 recomendado)</option>
+                      </select>
+                    </label>
+                    <p class="muted">Selecciona arriba un audio propio o autorizado. Audio completo ajusta la duración y pasa por el VAE. ID-LoRA descarga ~1,1 GiB, puede fallar por memoria o compatibilidad y no garantiza voz, idioma ni labios. No combina ambos modos.</p>
+                  </div>
                   <label class="check-row"><input type="checkbox" id="vid-gguf-spanish" /> Reforzar que el diálogo sea en español (experimental; no garantiza idioma ni voz).</label>
                   <label id="vid-gguf-strength-wrap" class="field-label">Fidelidad del primer fotograma (experimental)
                     <input type="number" id="vid-gguf-strength" min="0.5" max="1" step="0.05" value="1" />

@@ -249,7 +249,7 @@ def _server_command(port: int, input_dir: Path, output_dir: Path, root: Path | N
     return [str(root / "venv/bin/python"), str(source / "main.py"), "--listen", "127.0.0.1", "--port", str(port),
             # Supported by both pinned Comfy versions: in newer versions this is
             # an alias of --offline; in 0.33 it disables API nodes and frontend internet.
-            "--disable-auto-launch", "--disable-api-nodes", "--disable-metadata", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "ComfyUI-GGUF",
+            "--disable-auto-launch", "--disable-api-nodes", "--disable-metadata", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "ComfyUI-GGUF", "StudioVoice",
             "--cache-ram", f"{ram_reserve:.2f}", f"{ram_reserve:.2f}",
             "--input-directory", str(input_dir), "--output-directory", str(output_dir), "--reserve-vram", "1.8"]
 
@@ -515,16 +515,92 @@ def frames_for_duration(duration_sec: float, fps: int) -> int:
     return max(9, min(601, 8 * round((duration_sec * fps - 1) / 8) + 1))
 
 
+_voice_lora_fingerprint = None
+
+
+def _prepare_voice_lora(job: Any) -> None:
+    """Verify a pinned adapter and install the small local strict loader, never overwrite foreign files."""
+    global _voice_lora_fingerprint
+    from studio.engines.ltx23_voice import LORA, LORA_LINK
+    path = WEIGHTS / 'ltx' / LORA[3]
+    needed = (0 if path.is_file() and path.stat().st_size == LORA[4] else LORA[4]) + 1024**3
+    if shutil.disk_usage(WEIGHTS).free < needed:
+        raise RuntimeError('GGUF_DISK_LOW: falta espacio para ID-LoRA y margen')
+    def fingerprint():
+        try:
+            st = path.stat()
+            return (st.st_size, st.st_mtime_ns, st.st_ino)
+        except OSError:
+            return None
+    if fingerprint() is None or fingerprint() != _voice_lora_fingerprint:
+        from studio.catalog import catalog_manager
+        env = os.environ.copy()
+        token = catalog_manager.get_hf_token()
+        if token:
+            env['HF_TOKEN'] = token
+        repo = str(Path(__file__).resolve().parents[2])
+        env['PYTHONPATH'] = repo + os.pathsep + env.get('PYTHONPATH', '')
+        _command([sys.executable, '-m', 'studio.engines.ltx23_voice_download', str(WEIGHTS)], job,
+                 env=env, cwd=repo, stage='Descargando y verificando ID-LoRA TalkVid', timeout=7200)
+        _voice_lora_fingerprint = fingerprint()
+        if _voice_lora_fingerprint is None:
+            raise RuntimeError('GGUF_VOICE_LORA_MISSING: falta el adaptador verificado')
+    source = Path(__file__).with_name('comfy_voice_node') / '__init__.py'
+    plugin = ROOT / 'comfy' / 'custom_nodes' / 'StudioVoice' / '__init__.py'
+    if plugin.exists() and plugin.read_bytes() != source.read_bytes():
+        raise RuntimeError('GGUF_VOICE_NODE_CONFLICT: nodo local diferente; no se sobrescribe')
+    created = not plugin.exists()
+    if created:
+        plugin.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, plugin)
+    dest = ROOT / 'comfy' / 'models' / 'loras' / LORA_LINK
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink():
+        if dest.resolve() != path.resolve():
+            raise RuntimeError('GGUF_VOICE_LINK_CONFLICT: enlace ID-LoRA diferente')
+    elif dest.exists():
+        raise RuntimeError('GGUF_VOICE_LINK_CONFLICT: archivo ID-LoRA existente no gestionado')
+    else:
+        dest.symlink_to(path.resolve())
+    session = _resident()
+    if session is not None:
+        if created:
+            job.log('Reiniciando Comfy una vez para activar el nodo estricto de voz; pesos en disco intactos.')
+            memory_manager.unload_slot('video')
+        else:
+            try:
+                info = requests.get(session.base + '/object_info/StudioStrictVoiceLoRA', timeout=10).json()
+                if 'StudioStrictVoiceLoRA' not in info:
+                    memory_manager.unload_slot('video')
+            except requests.RequestException:
+                memory_manager.unload_slot('video')
+
+
 @serialized_gpu_operation(slots=("video",), managed=True)
 def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any,
                   width: int = 512, height: int = 320, duration_sec: float = 2.0, fps: int = 24,
-                  speech_language: str = "auto", image_strength: float = 1.0) -> dict:
+                  speech_language: str = "auto", image_strength: float = 1.0,
+                  voice_mode: str = "none", voice_path: Path | None = None) -> dict:
+    from studio.engines.ltx23_voice import add_voice_graph, frames_for_audio
     started = time.monotonic()
     if not prompt.strip():
         raise ValueError("Describe la escena")
     if image_path is not None:
         verify_image_file(image_path)
     frames = frames_for_duration(duration_sec, fps)
+    if voice_mode not in ('none', 'audio', 'voice_reference') or (voice_mode == 'none') != (voice_path is None):
+        raise ValueError('Modo de voz y archivo no coinciden')
+    voice_info = None
+    if voice_path is not None:
+        voice_info = probe_media_info(voice_path)
+        audio_seconds = float(voice_info.get('duration_seconds') or 0)
+        if not voice_info.get('has_audio') or voice_info.get('has_video') or not 1 <= audio_seconds <= (20 if voice_mode == 'audio' else 15):
+            raise ValueError('Se necesita un archivo de audio de 1 a 20 s (referencia ID-LoRA: 1 a 15 s)')
+        if voice_mode == 'audio':
+            frames = frames_for_audio(audio_seconds, fps)
+            job.log(f'Audio completo: duración {audio_seconds:.2f} s; vídeo ajustado a {frames} fotogramas (8n+1).')
+        else:
+            job.log('ID-LoRA GGUF experimental, no validado en L4; usa una muestra autorizada de una sola voz (~5 s).')
     if speech_language not in ("auto", "es"):
         raise ValueError("Idioma de diálogo GGUF no soportado")
     if not math.isfinite(image_strength) or not .5 <= image_strength <= 1:
@@ -541,7 +617,15 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
     scale = width * height * frames / (512 * 320 * 49)
     extra_ram = max(0.0, scale - 1) * 2
     extra_vram = max(0.0, scale - 1) * 0.5
+    if voice_mode == 'voice_reference':
+        extra_ram += 4
+        extra_vram += 2
+    elif voice_mode == 'audio':
+        extra_ram += 1
+        extra_vram += .5
     names = _prepare_gguf(job, extra_ram=extra_ram, extra_vram=extra_vram)
+    if voice_mode == 'voice_reference':
+        _prepare_voice_lora(job)
     resident = _resident()
     if resident is None:
         memory_manager.ensure_capacity(ram_gb=32 + extra_ram, vram_gb=14 + extra_vram, stage="Inicio GGUF: carga y parámetros solicitados (estimación no medida)", job=job)
@@ -553,6 +637,7 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
     job.log(f"GGUF: {width}×{height}, {frames} fotogramas a {fps} fps (~{frames / fps:.2f} s), 8 pasos fijos. La duración se ajusta a 8n+1.")
     suffix = uuid.uuid4().hex
     image_name = None
+    audio_name = None
     generated = None
     try:
         if image_path is not None:
@@ -563,6 +648,16 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
         graph = make_graph(prompt=effective_prompt, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
                            seed=seed, image_name=image_name, model=names["dit"], text_encoder=names["text_encoder"],
                            connectors=names["connectors"], video_vae=names["video_vae"], audio_vae=names["audio_vae"], image_strength=image_strength)
+        if voice_path is not None:
+            from studio.engines.ffmpeg_utils import get_ffmpeg_bin
+            audio_name = f'voice_{suffix}.wav'
+            args = [get_ffmpeg_bin(), '-v', 'error', '-y', '-i', str(voice_path), '-vn', '-ac', '1', '-ar', '44100']
+            if voice_mode == 'audio':
+                # Pad, never truncate, to the 8n+1 duration selected above.
+                args += ['-af', f'apad,atrim=duration={frames / fps:.6f}']
+            args += ['-c:a', 'pcm_s16le', str(session.input_dir / audio_name)]
+            _command(args, job, stage='Preparando audio GGUF', timeout=120)
+            add_voice_graph(graph, voice_mode, audio_name)
         graph["20"]["inputs"]["filename_prefix"] = f"studio_gguf_{suffix}"
         generated = _infer(graph, session.input_dir, session.output_dir, job)
         info = probe_media_info(generated)
@@ -585,6 +680,8 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
     finally:
         if image_name:
             (session.input_dir / image_name).unlink(missing_ok=True)
+        if audio_name:
+            (session.input_dir / audio_name).unlink(missing_ok=True)
         if generated:
             generated.unlink(missing_ok=True)
     meta = {"id": dest.stem, "filename": name, "rel_path": f"outputs/videos/{name}", "media_url": f"/media/outputs/videos/{name}",
@@ -592,6 +689,7 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
             "video_submode": "i2v" if image_path else "t2v", "audio_native": True, "prompt": prompt, "seed": seed,
             "width": info.get("width"), "height": info.get("height"), "duration_seconds": info.get("duration_seconds"), "fps": fps, "steps": 8,
             "requested_duration_sec": duration_sec, "frames": frames, "duration_warning": duration_warning,
+            "voice_mode": voice_mode, "source_audio_duration_seconds": voice_info.get('duration_seconds') if voice_info else None,
             "speech_language_hint": speech_language, "image_strength": image_strength if image_path else None,
             "effective_prompt": effective_prompt, "guidance_scale": 1.0, "elapsed_seconds": round(time.monotonic() - started, 2),
             "created_at": datetime.now().isoformat(timespec="seconds")}
