@@ -121,6 +121,9 @@ async def studio_lifespan(_app: FastAPI):
         model_discovery.stop()
         memory_manager.stop()
         memory_manager.unload_by_model_id("ltx-2.3-distilled-gguf-q4-experimental")
+        from studio.engines.ltx25_gguf import MODELS as LTX25_MODELS
+        for model_id in LTX25_MODELS:
+            memory_manager.unload_by_model_id(model_id)
 
 
 app = FastAPI(
@@ -498,6 +501,18 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
                        "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                          "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
                                          "official_note": "I2V de 10 y 20 s probado en L4 a 512×320; 8 pasos y CFG 1 fijos. Otras configuraciones y el encaje actual no garantizados."}})
+        from studio.engines.ltx25_gguf import MODELS as LTX25_MODELS, files_for as ltx25_files, files_present as ltx25_present
+        for mid, (quant, _, _, _) in LTX25_MODELS.items():
+            models.append({"id": mid, "name": f"LTX 2.5 GGUF {quant} · vídeo + audio (experimental)",
+                           "category": "video", "engine": "ltx_gguf", "video_modes": ["i2v", "t2v", "av"],
+                           "estimated_gb": round(sum(x[4] for x in ltx25_files(mid)) / 1024**3, 1),
+                           "downloaded": ltx25_present(mid), "loaded_in_memory": mid in loaded_ids,
+                           "compatibility": {"compatible": False, "tier": "candidate", "label": "Sin prueba GPU · encaje desconocido", "sticker": "🧪",
+                                             "reasons": ["No probado en L4. Gemma 4 BF16 ocupa ~24,5 GiB; la admisión puede rechazar la tarea."]},
+                           "ltx_distilled": True,
+                           "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
+                                             "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
+                                             "official_note": "LTX 2.5 experimental, una pasada y VAE conv; sin upscale, sin prueba L4 ni voz de referencia."}})
     for model in models:
         model["hardware_assessment"] = model["compatibility"]
         if model["category"] == "image":
@@ -979,9 +994,12 @@ def api_id_lora_video(req: VoiceConsistencyReq) -> Dict[str, Any]:
 
 
 class LTXGGUFReq(BaseModel):
+    model_id: Literal["ltx-2.3-distilled-gguf-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental"] = "ltx-2.3-distilled-gguf-q4-experimental"
     prompt: str = Field(min_length=1, max_length=3000)
     negative_prompt: str = Field(default="", max_length=3000)
     image_rel: Optional[str] = None
+    audio_rel: Optional[str] = None
+    reference_voice_rel: Optional[str] = None
     seed: int = Field(default=0, ge=0, le=4294967295)
     width: int = Field(default=512, ge=256, le=768)
     height: int = Field(default=320, ge=256, le=768)
@@ -992,27 +1010,44 @@ class LTXGGUFReq(BaseModel):
 
 
 @app.post("/api/video/ltx-gguf/prepare")
-def api_prepare_ltx_gguf() -> Dict[str, Any]:
+def api_prepare_ltx_gguf(model_id: str = "ltx-2.3-distilled-gguf-q4-experimental") -> Dict[str, Any]:
     from studio.engines.ltx_gguf_backend import prepare_gguf
-    job = job_manager.submit(kind="download", title="Preparar LTX 2.3 GGUF Q4 (experimental)",
-        fn=lambda j: prepare_gguf(job=j), dedup_key="ltx-gguf-prepare")
+    from studio.engines.ltx25_gguf import MODELS, prepare as prepare25
+    if model_id == "ltx-2.3-distilled-gguf-q4-experimental":
+        title = "Preparar LTX 2.3 GGUF Q4 (experimental)"
+        fn = lambda j: prepare_gguf(job=j)
+    elif model_id in MODELS:
+        title = f"Preparar LTX 2.5 GGUF {MODELS[model_id][0]} (experimental)"
+        fn = lambda j: prepare25(model_id, job=j)
+    else:
+        raise HTTPException(status_code=400, detail="Modelo GGUF desconocido")
+    job = job_manager.submit(kind="download", title=title, fn=fn, dedup_key=f"ltx-gguf-prepare:{model_id}")
     return {"ok": True, "job": job.to_dict()}
 
 
 @app.post("/api/video/ltx-gguf")
 def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
     from studio.engines.ltx_gguf_backend import generate_gguf
+    from studio.engines.ltx25_gguf import MODELS, generate as generate25
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Describe la escena.")
+    if req.audio_rel or req.reference_voice_rel:
+        raise HTTPException(status_code=400, detail="GGUF no admite pista de audio ni referencia de voz; no se ignorará la entrada.")
     if req.width % 32 or req.height % 32 or req.width * req.height > 768 * 512:
         raise HTTPException(status_code=400, detail="GGUF: ancho y alto deben ser múltiplos de 32 y su área no puede superar 768×512.")
     image = _resolve_media_rel(req.image_rel) if req.image_rel else None
     if req.image_rel and image is None:
         raise HTTPException(status_code=400, detail="La imagen no está disponible.")
-    job = job_manager.submit(kind="video", title="LTX 2.3 GGUF Q4 · audio y vídeo (experimental)",
-        fn=lambda j: generate_gguf(image_path=image, prompt=req.prompt, negative_prompt=req.negative_prompt, seed=req.seed,
-                                   width=req.width, height=req.height, duration_sec=req.duration_sec, fps=req.fps,
-                                   speech_language=req.speech_language, image_strength=req.image_strength, job=j))
+    kwargs = dict(image_path=image, prompt=req.prompt, negative_prompt=req.negative_prompt, seed=req.seed,
+                  width=req.width, height=req.height, duration_sec=req.duration_sec, fps=req.fps,
+                  speech_language=req.speech_language, image_strength=req.image_strength)
+    if req.model_id in MODELS:
+        title = f"LTX 2.5 GGUF {MODELS[req.model_id][0]} · audio y vídeo (experimental)"
+        fn = lambda j: generate25(model_id=req.model_id, job=j, **kwargs)
+    else:
+        title = "LTX 2.3 GGUF Q4 · audio y vídeo (experimental)"
+        fn = lambda j: generate_gguf(job=j, **kwargs)
+    job = job_manager.submit(kind="video", title=title, fn=fn)
     return {"ok": True, "job": job.to_dict()}
 
 
@@ -1839,6 +1874,13 @@ def _generate_current_session_report(fmt: str = "md") -> tuple[str, str]:
         downloaded.append({"id": MODEL_ID, "name": "LTX 2.3 GGUF Q4", "category": "video",
                            "disk_gb": round(gguf["size_bytes"] / 1024**3, 2),
                            "details": f"{gguf['complete_sizes']}/{gguf['total']} componentes con tamaño esperado; hashes no comprobados al exportar"})
+    from studio.engines.ltx25_gguf import MODELS as LTX25_MODELS, files_for as ltx25_files, path_for as ltx25_path
+    unique_files = {ltx25_path(item): item for mid in LTX25_MODELS for item in ltx25_files(mid)}
+    existing = [(path, item) for path, item in unique_files.items() if path.is_file()]
+    if existing:
+        downloaded.append({"id": "ltx-2.5-gguf-shared-inventory", "name": "LTX 2.5 GGUF Q2/Q4 y componentes compartidos", "category": "video",
+                           "disk_gb": round(sum(path.stat().st_size for path, _ in existing) / 1024**3, 2),
+                           "details": f"{sum(path.stat().st_size == item[4] for path, item in existing)}/{len(unique_files)} archivos con tamaño esperado; comunes contados una vez; hashes no comprobados al exportar"})
     return build_full_session_log_document(
         jobs_list=job_manager.list_jobs(limit=500, include_logs=True),
         loaded_summary=memory_manager.status_summary(),

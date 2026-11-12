@@ -30,8 +30,8 @@ import os, subprocess; subprocess.run("rm -rf /content/studio && (git clone -b a
 2. **Catálogo Bajo Demanda + Control Separado de Disco y RAM/VRAM:**
    - No se descargan pesos al iniciar. El índice puede refrescar metadatos públicos en segundo plano.
    - **Imagen:** Qwen-Image-Edit 2511 (4-bit) + Lightning 4 pasos ★, LoRA Extra Qwen Edit Plus, + repositorios propios de Hugging Face.
-   - **Vídeo:** `Wan 2.2 TI2V-5B` ★, Wan 2.1 VACE/FLF2V FP8, LTX 13B destilado/LTX-2 AV según hardware y receta, **LTX 2.3 destilado GGUF Q4** (I2V probado en L4; [guía y límites](docs/GGUF_PLAYBOOK.md)), `LTX-Video 2B` (rápido para T4/L4) + **Animación FFmpeg en CPU (0 VRAM)**.
-   - **Voz (TTS):** `Edge-TTS` instantáneo sin descarga (`Álvaro`, `Elvira`, etc.), MMS español, `Kokoro-82M` (backend opcional) y Bark pequeño. Qwen3-TTS es un candidato investigado, no un motor integrado.
+   - **Vídeo:** `Wan 2.2 TI2V-5B` ★, Wan 2.1 VACE/FLF2V FP8, LTX 13B destilado/LTX-2 AV según hardware y receta, **LTX 2.3 destilado GGUF Q4** (I2V probado en L4), **LTX 2.5 GGUF UD-Q2/Q4** (una pasada experimental, sin prueba GPU/L4; [guía y límites](docs/GGUF_PLAYBOOK.md)), `LTX-Video 2B` (rápido para T4/L4) + **Animación FFmpeg en CPU (0 VRAM)**.
+   - **Voz (TTS):** [coherencia de voz y opciones](docs/VOICE_GGUF_RESEARCH.md). `Edge-TTS` instantáneo sin descarga (`Álvaro`, `Elvira`, etc.), MMS español, `Kokoro-82M` (backend opcional) y Bark pequeño. Qwen3-TTS es un candidato investigado, no un motor integrado.
    - **Memoria autogestionada:** vigilancia continua de RAM/VRAM, márgenes preventivos y expulsión LRU de modelos inactivos. Protege inferencias activas y comprueba base + todos los LoRA antes de descargar/cargar; no borra pesos ni descarga alternativas como remedio. [Política, diagnóstico y límites](docs/MEMORY_MANAGEMENT.md).
    - Tres acciones independientes por modelo:
      - **Descargar de HF** con porcentaje real `0–100 %` y velocidad `MB/s` (comprueba antes si cabe en disco; si falta espacio te dice cuántos GB faltan y qué modelo puedes borrar).

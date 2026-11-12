@@ -265,7 +265,7 @@ def _wait_server(proc: subprocess.Popen, base: str, logfile: Any, job: Any) -> N
     raise TimeoutError("GGUF_SERVER_TIMEOUT: ComfyUI no arrancó en 3 minutos")
 
 
-def _probe_runtime(job: Any) -> None:
+def _probe_runtime(job: Any, extra_required: set[str] | None = None) -> None:
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="gguf-probe-", dir=TEMP_DIR) as tmp, tempfile.TemporaryFile() as log:
         inp, out = Path(tmp) / "in", Path(tmp) / "out"
@@ -276,6 +276,7 @@ def _probe_runtime(job: Any) -> None:
             _wait_server(proc, base, log, job)
             info = requests.get(base + "/object_info", timeout=20).json()
             required = {"UnetLoaderGGUF", "DualCLIPLoaderGGUF", "LTXVAudioVAEDecode", "LTXVEmptyLatentAudio", "LTXVConcatAVLatent", "LTXVSeparateAVLatent", "LTXVImgToVideoInplace", "CreateVideo", "SaveVideo"}
+            required |= extra_required or set()
             missing = sorted(required - set(info))
             if missing:
                 raise RuntimeError("GGUF_RUNTIME_MISSING_NODES: " + ", ".join(missing))
@@ -315,9 +316,9 @@ class _ResidentComfy:
         self.temp.cleanup()
 
 
-def _resident() -> _ResidentComfy | None:
+def _resident(model_id: str = MODEL_ID) -> _ResidentComfy | None:
     slot = memory_manager.get_slot("video")
-    if not slot or slot.get("model_id") != MODEL_ID:
+    if not slot or slot.get("model_id") != model_id:
         return None
     session = slot.get("handle")
     if not isinstance(session, _ResidentComfy) or not session.alive():
@@ -326,13 +327,13 @@ def _resident() -> _ResidentComfy | None:
     return session
 
 
-def _open_resident(job: Any, names: dict[str, str]) -> _ResidentComfy:
-    session = _resident()
+def _open_resident(job: Any, names: dict[str, str], model_id: str = MODEL_ID) -> _ResidentComfy:
+    session = _resident(model_id)
     if session is not None:
         return session
     session = _ResidentComfy(job, names)
     try:
-        memory_manager.register_loaded("video", MODEL_ID, "LTX 2.3 GGUF · motor activo", session)
+        memory_manager.register_loaded("video", model_id, "LTX GGUF · motor activo", session)
     except BaseException:
         session.unload()
         raise
@@ -360,8 +361,8 @@ def _events_listener(base: str, client_id: str, events: queue.Queue, stop: threa
         ready.set()  # History polling remains available if websocket is unavailable.
 
 
-def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any) -> Path:
-    session = _resident()
+def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any, model_id: str = MODEL_ID) -> Path:
+    session = _resident(model_id)
     if session is None:
         raise RuntimeError("GGUF_ENGINE_EXITED: el motor aislado no está activo")
     client_id = uuid.uuid4().hex

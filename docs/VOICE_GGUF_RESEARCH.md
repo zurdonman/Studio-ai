@@ -1,0 +1,31 @@
+# Voz coherente entre clips y modelos GGUF A/V
+
+## Respuesta breve
+
+Sí se puede **intentar** mantener una voz de un personaje entre clips, pero hay que proporcionar una referencia de voz o usar el mismo motor de voz. Una descripción en el prompt, la semilla fija y el audio generado de forma independiente no aseguran que la voz sea la misma. La identidad de voz, la claridad del texto en español y la sincronía de labios son tres resultados diferentes que deben comprobarse por separado.
+
+### 1. Dentro del generador: referencia de voz + ID-LoRA
+
+[ID-LoRA](https://github.com/ID-LoRA/ID-LoRA-LTX2.3-ComfyUI) para LTX 2.3 permite condicionar conjuntamente vídeo y audio con un fotograma, una muestra breve y un adaptador entrenado. [ComfyUI incluye `LTXVReferenceAudio`](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_lt.py); su entrada de referencia no se reproduce como pista final: condiciona la identidad del hablante. [La tarjeta de TalkVid](https://huggingface.co/AviadDahan/LTX-2.3-ID-LoRA-TalkVid-3K) describe el adaptador y el flujo oficial. Utilizar la misma muestra limpia de una única voz (aprox. cinco segundos) en cada clip puede reducir el cambio de timbre, pero no promete identidad perfecta, diálogo literal en español ni sincronía perfecta. Usar solo una voz propia o autorizada.
+
+**Estado en Studio:** ya hay un panel ID-LoRA experimental en Estudio de Voz, pero usa una ruta separada de LTX 2.3 BF16; no está probada en GPU y exige una GPU BF16 de al menos 60 GiB, 72 GiB de RAM libre y 48 GiB de VRAM libre más márgenes. **No funciona en L4 con esa receta.** No se ha implementado ni validado el acoplamiento entre ID-LoRA, un DiT GGUF concreto y la receta destilada de Studio. El nodo `LTXVReferenceAudio` existe en el Comfy fijado y el plugin GGUF tiene un patcher de LoRA, pero eso no prueba que el adaptador se aplique completo a los tensores cuantizados ni que funcione con la variante destilada, la memoria de L4 o las voces españolas.
+
+Para intentar una integración posterior: verificar primero una receta upstream para **base dev exacta + GGUF + TalkVid/CelebVHQ**, pesos y hash del adaptador, nodos, sigma/guider y compatibilidad de claves; instrumentar y fallar ante parches faltantes. Medir presupuesto que incluya adaptador, audio de referencia y, si se usa, el paso extra de identidad. Probar en GPU con clips distintos usando la misma referencia, sin adaptar automáticamente el LoRA ni reducir el presupuesto de memoria. Comparar timbre, comprensión en español y labios con escucha y, si hay herramientas adecuadas, métricas; pedir al usuario confirmar calidad. Hasta entonces no mostrar un selector de voz inexistente como si resolviera la coherencia.
+
+### 2. Fuera del generador: una voz TTS elegida + labios
+
+Generar cada línea en un motor TTS usando siempre la misma voz seleccionada permite controlar mejor el texto y mantener una identidad vocal aproximada; por ejemplo, Studio dispone de voces españolas de Edge TTS, que requiere servicio de red. Un modelo de clonación dedicado puede usar una muestra autorizada si se integra su backend, pero **Qwen3-TTS no está integrado aquí**. Después hay que usar un flujo real de audio-a-vídeo o de sincronización labial; **añadir una pista al MP4 no mueve los labios**. Studio tiene un panel separado EDTalk/LipSync experimental; su calidad depende de rostro visible, encuadre y audio y no se ha acreditado automáticamente para todos los clips GGUF.
+
+Ventajas: más control sobre el español y la voz. Limitaciones: la pista puede sustituir sonidos ambientales del generador y el lipsync puede fallar en planos amplios, varios hablantes o caras ocultas. Lo más controlable para una conversación es trabajar una intervención/hablante por clip y repetir la misma voz, sin prometer resultado idéntico. Actualmente la ruta GGUF de Studio rechaza pista de audio y referencia de voz en vez de ignorarlas; la producción de voz y el lipsync son etapas separadas.
+
+### 3. Ovi y otros A/V
+
+[Ovi](https://github.com/character-ai/Ovi) genera audio y vídeo conjuntamente, pero su documentación upstream enumera la **referencia de voz como tarea futura**; no inferir que tiene clonación por publicidad de terceros. No hay una receta GGUF de Ovi validada aquí. No asumir que otro modelo conserva voces por generar audio nativo.
+
+## LTX 2.5 GGUF añadido como experimento
+
+Se han integrado **dos cuantizaciones del mismo modelo LTX 2.5 destilado**, no dos arquitecturas: Unsloth UD-Q2_K_XL y UD-Q4_K_XL. `studio/engines/ltx25_gguf.py` fija los hashes y la revisión de los cuatro componentes: DiT GGUF, Gemma 4 BF16 con proyección, VAE de vídeo conv y VAE audio. Comparten archivos auxiliares; el encoder ocupa ~24,5 GiB por sí solo y el total de archivos es ~35,0 GiB en Q2 o ~39,2 GiB en Q4, más entorno/temporales.
+
+El grafo utiliza el ComfyUI fijado, encoder y guider propios de 2.5, audio/vídeo conjuntos y **una sola pasada de ocho pasos, CFG 1 y VAE conv**; no implementa la receta completa de dos etapas 8+3, upscale ni el VAE de difusión del [ejemplo de Unsloth](https://huggingface.co/unsloth/LTX-2.5-GGUF). Se puede seleccionar T2V o I2V, pero no voz de referencia ni una pista de audio externa. La opción de refuerzo del español solo modifica el prompt, no es un selector lingüístico.
+
+La prueba automatizada ha usado archivos vacíos y ha comprobado que el ComfyUI fijado acepte la estructura de los grafos T2V e I2V, además de pruebas simuladas de streams/cancelación/validación; **no se han descargado pesos ni ejecutado inferencia real**, y no hay prueba de encaje o calidad en L4. La admisión exige una estimación conservadora de 45 GiB de RAM libre y 16 GiB de VRAM libre más márgenes y carga adicional por duración/área; puede rechazar una L4 y no garantiza evitar OOM. Los candidatos se mantienen fuera del filtro estricto hasta que exista una estimación justificada y no llevan ✅. No usar el resultado de LTX 2.3 como validación de LTX 2.5. Ver también [guía GGUF](GGUF_PLAYBOOK.md).

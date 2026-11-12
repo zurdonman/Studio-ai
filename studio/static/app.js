@@ -53,6 +53,8 @@
 
   // ==================== HELPERS ====================
   const GGUF_MODEL_ID = "ltx-2.3-distilled-gguf-q4-experimental";
+  const GGUF_MODEL_IDS = new Set([GGUF_MODEL_ID, "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental"]);
+  const isGgufModel = (id) => GGUF_MODEL_IDS.has(id);
   function $(id) {
     return document.getElementById(id);
   }
@@ -299,7 +301,7 @@
     const vidDot = $("vid-engine-dot");
     if (vidSlot) {
       vidDot.className = "status-dot loaded";
-      $("vid-engine-state").textContent = vidSlot.model_id === GGUF_MODEL_ID
+      $("vid-engine-state").textContent = isGgufModel(vidSlot.model_id)
         ? "Motor GGUF activo · caché en RAM/VRAM gestionada por Comfy"
         : `Activo en VRAM: ${vidSlot.name}`;
     } else {
@@ -339,8 +341,8 @@
     const isImageJob = j => j.kind === "image" || /qwen|imagen|lora/i.test(j.title || "");
     const vidJob = running.find(j => j.id === state.selectedJobId && isVideoJob(j)) || running.find(isVideoJob);
     const imgJob = running.find(j => j.id === state.selectedJobId && isImageJob(j)) || running.find(isImageJob);
-    const ggufJob = running.find(j => j.id === state.selectedJobId && /LTX 2\.3 GGUF/.test(j.title || "")) ||
-      running.find(j => /LTX 2\.3 GGUF/.test(j.title || ""));
+    const ggufJob = running.find(j => j.id === state.selectedJobId && /LTX 2\.[35] GGUF/.test(j.title || "")) ||
+      running.find(j => /LTX 2\.[35] GGUF/.test(j.title || ""));
     const ajCard = $("active-job-card");
     const gjs = $("global-job-strip");
     const imgInline = $("img-inline-progress");
@@ -429,7 +431,7 @@
         } else if (j.status === "failed") {
           state.completedHandled.add(j.id);
           toast(`Error en «${j.title}»: ${j.error || "Revisa el registro"}`, "error");
-          if (/LTX 2\.3 GGUF/.test(j.title || "") && $("ltx-gguf-error")) {
+          if (/LTX 2\.[35] GGUF/.test(j.title || "") && $("ltx-gguf-error")) {
             $("ltx-gguf-error").hidden = false;
             $("ltx-gguf-error").textContent = `Error GGUF: ${j.error || "Revisa el registro de la tarea"}`;
             ggufFeedback(`Error GGUF: ${j.error || "Revisa el registro de la tarea"}`, true);
@@ -493,7 +495,7 @@
   async function handleJobCompleted(job) {
     await Promise.all([loadCatalog(), loadAssets()]);
     const res = job.result || {};
-    if (res.prepared && /LTX 2\.3 GGUF/.test(job.title || "")) {
+    if (res.prepared && /LTX 2\.[35] GGUF/.test(job.title || "")) {
       ggufFeedback("Archivos GGUF preparados en disco. Para crear el vídeo: elige Imagen a Vídeo o Texto a Vídeo, escribe el prompt y pulsa «Generar Clip de Vídeo». Los pesos se cargan al generar.");
     }
     if (res && res.media_url && state.workspaceMode === "higgsfield") {
@@ -609,8 +611,8 @@
     const sel = $("select-video-model");
     if (!btn || !sel || btn.disabled) return;
     const m = state.catalog.find((item) => item.id === sel.value);
-    if (m && m.id === GGUF_MODEL_ID) {
-      btn.textContent = m.loaded_in_memory ? "✅ Motor GGUF activo" : m.downloaded ? "🔄 Verificar preparación GGUF" : "⬇ Preparar GGUF (~24 GiB)";
+    if (m && isGgufModel(m.id)) {
+      btn.textContent = m.loaded_in_memory ? "✅ Motor GGUF activo" : m.downloaded ? "🔄 Verificar preparación GGUF" : `⬇ Preparar GGUF (~${m.estimated_gb} GiB)`;
       return;
     }
     if (!m) {
@@ -767,7 +769,7 @@
     });
 
     if ($("vid-gguf-strength-wrap")) $("vid-gguf-strength-wrap").hidden =
-      !$("select-video-model") || $("select-video-model").value !== GGUF_MODEL_ID || sub !== "i2v";
+      !$("select-video-model") || !isGgufModel($("select-video-model").value) || sub !== "i2v";
     const isFfmpeg = sub === "ffmpeg";
     const isT2v = sub === "t2v";
     const isFlf = sub === "flf2v";
@@ -1416,7 +1418,7 @@
   }
 
   function syncGgufControls(modelId) {
-    const gguf = modelId === GGUF_MODEL_ID;
+    const gguf = isGgufModel(modelId);
     if ($("vid-duration")) $("vid-duration").max = gguf ? "20" : "10";
     if ($("vid-gguf-guidance")) $("vid-gguf-guidance").hidden = !gguf;
     if ($("vid-gguf-strength-wrap")) $("vid-gguf-strength-wrap").hidden = !gguf || state.videoSubmode !== "i2v";
@@ -1432,7 +1434,7 @@
     const m = state.catalog.find((x) => x.id === modelId);
     if (!m) return;
     syncGgufControls(modelId);
-    if (m.id === GGUF_MODEL_ID && !["i2v", "t2v"].includes(state.videoSubmode)) {
+    if (isGgufModel(m.id) && !["i2v", "t2v"].includes(state.videoSubmode)) {
       state.videoMode = "ai";
       state.videoSubmode = "i2v";
     }
@@ -1488,7 +1490,7 @@
     sel.innerHTML = vModels
       .map((m) => {
         const st = m.loaded_in_memory
-          ? (m.id === GGUF_MODEL_ID ? "🟢 Motor activo · caché" : "🟢 En VRAM")
+          ? (isGgufModel(m.id) ? "🟢 Motor activo · caché" : "🟢 En VRAM")
           : m.builtin_no_download
           ? "⚡ 0 GB"
           : m.downloaded
@@ -1511,7 +1513,7 @@
     if (cardsBox) {
       cardsBox.innerHTML = vModels.length === 0
         ? `<div class="muted" style="padding:14px;">No hay modelos de vídeo con encaje estimado para este filtro. Revisa RAM y disco o desmarca el filtro para ver todos.</div>`
-        : [...vModels].sort((a, b) => Number(b.id === GGUF_MODEL_ID) - Number(a.id === GGUF_MODEL_ID))
+        : [...vModels].sort((a, b) => Number(isGgufModel(b.id)) - Number(isGgufModel(a.id)))
         .map((m) => {
           const comp = m.compatibility || {};
           const tier = comp.tier || "good";
@@ -1524,7 +1526,7 @@
           const diskTxt = m.builtin_no_download
             ? "0 GB (integrado)"
             : m.loaded_in_memory
-            ? (m.id === GGUF_MODEL_ID ? "🟢 Motor activo · caché" : "🟢 Activo en VRAM")
+            ? (isGgufModel(m.id) ? "🟢 Motor activo · caché" : "🟢 Activo en VRAM")
             : m.downloaded
             ? `💾 En disco (${m.actual_disk_gb || m.estimated_gb} GB)`
             : `☁️ ${m.estimated_gb} GB`;
@@ -1576,7 +1578,7 @@
     const grid = $("catalog-grid");
     const filtered = state.catalog.filter((m) => {
       // GGUF usa una preparación aislada disponible en Vídeo, no el gestor normal de modelos.
-      if (m.id === GGUF_MODEL_ID) return false;
+      if (isGgufModel(m.id)) return false;
       if (state.catOnlyCompat && !(m.hardware_assessment || m.compatibility || {}).compatible) return false;
       if (state.catalogFilter === "all") return true;
       if (state.catalogFilter === "image") {
@@ -3119,7 +3121,7 @@
         toast("No hay un modelo seleccionado para este filtro.", "error");
         return;
       }
-      if (mid === GGUF_MODEL_ID) {
+      if (isGgufModel(mid)) {
         prepareLtxGguf();
         return;
       }
@@ -3397,7 +3399,7 @@
           toast("No hay un modelo seleccionado para este filtro.", "error");
           return;
         }
-        if (chosenVidModel === GGUF_MODEL_ID) {
+        if (isGgufModel(chosenVidModel)) {
           await runLtxGguf();
           return;
         }
@@ -3474,10 +3476,13 @@
     });
 
     async function prepareLtxGguf() {
-      if (!confirm("GGUF experimental: se comprobarán los recursos y se instalarán un entorno aislado y hasta 24 GiB de pesos. Se requieren las licencias LTX y Gemma. El modelo se carga durante la generación; no está validado en L4. ¿Continuar?")) return;
+      const mid = $("select-video-model").value;
+      const m = state.catalog.find(x => x.id === mid);
+      const notice = mid === GGUF_MODEL_ID ? "LTX 2.3 I2V se probó en L4." : "LTX 2.5 no se ha probado en L4; usa Gemma 4 BF16 grande y puede ser rechazado por memoria.";
+      if (!confirm(`GGUF experimental: se comprobarán los recursos y se instalarán hasta ${m?.estimated_gb || "varios"} GiB de pesos más entorno. Se requieren licencias LTX y Gemma. ${notice} ¿Continuar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
-        const res = await api("/api/video/ltx-gguf/prepare", {method:"POST"});
+        const res = await api(`/api/video/ltx-gguf/prepare?model_id=${encodeURIComponent(mid)}`, {method:"POST"});
         watchJob(res.job);
       } catch (error) {
         $("ltx-gguf-error").hidden = false;
@@ -3493,12 +3498,16 @@
       if (!prompt) return showInputError("Escribe un prompt antes de generar con GGUF.");
       if (!["t2v", "i2v"].includes(sub)) return showInputError("GGUF admite solo Texto a Vídeo o Imagen a Vídeo.");
       const image_rel = sub === "i2v" ? $("vid-source-image").value : null;
+      if ($("vid-source-audio").value) return showInputError("La ruta GGUF no aplica la pista de audio seleccionada. Desmárcala o usa otro flujo de vídeo.");
       if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
-      if (!confirm("GGUF experimental: se usarán la resolución, duración y fps elegidos (8 pasos y CFG 1 fijos). Se probaron 20 s en L4 a 512×320 con caché; más duración consume más memoria y puede ser rechazada o fallar. Si falta, se descargarán hasta 24 GiB. ¿Generar?")) return;
+      const mid = $("select-video-model").value;
+      const m = state.catalog.find(x => x.id === mid);
+      const warning = mid === GGUF_MODEL_ID ? "Se probaron 20 s en L4 a 512×320 con caché." : "LTX 2.5 no está probado en GPU ni en L4; usa una pasada sin upscale y Gemma 4 BF16, puede ser rechazado o fallar por memoria.";
+      if (!confirm(`GGUF experimental: 8 pasos y CFG 1 fijos. ${warning} Se descargarán hasta ${m?.estimated_gb || "varios"} GiB si faltan. ¿Generar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
         ggufFeedback("Enviando solicitud de generación GGUF…");
-        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value), speech_language:$("vid-gguf-spanish").checked ? "es" : "auto", image_strength:Number($("vid-gguf-strength").value)})});
+        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({model_id:mid, prompt, image_rel, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value), speech_language:$("vid-gguf-spanish").checked ? "es" : "auto", image_strength:Number($("vid-gguf-strength").value)})});
         if (!res || !res.job || !res.job.id) throw new Error("El servidor no devolvió una tarea de generación.");
         ggufFeedback("Generación enviada. Puedes seguir el progreso o cancelarla en el panel de tareas.");
         watchJob(res.job);

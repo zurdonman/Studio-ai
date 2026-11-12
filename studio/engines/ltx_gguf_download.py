@@ -37,13 +37,14 @@ def verify(path: Path, size: int, sha: str, progress=None) -> bool:
     return digest.hexdigest() == sha
 
 
-def main(root: Path) -> None:
-    total_bytes = sum(item[4] for item in FILES)
+def main(root: Path, files=None) -> None:
+    files = FILES if files is None else files
+    total_bytes = sum(item[4] for item in files)
     before = 0
-    for index, (role, repo, revision, filename, size, sha) in enumerate(FILES, 1):
+    for index, (role, repo, revision, filename, size, sha) in enumerate(files, 1):
         target_dir = root / ('ltx' if role != 'text_encoder' else 'gemma')
         target = target_dir / filename
-        print(f'[{index}/{len(FILES)}] Preparando {role} ({size / 1024**3:.2f} GiB)', flush=True)
+        print(f'[{index}/{len(files)}] Preparando {role} ({size / 1024**3:.2f} GiB)', flush=True)
         if not target.exists():
             target_dir.mkdir(parents=True, exist_ok=True)
             kwargs = dict(repo_id=repo, revision=revision, filename=filename,
@@ -83,8 +84,12 @@ def main(root: Path) -> None:
         if not verify(target, size, sha, lambda n: _emit(role, 'verificación', n, size, before, total_bytes)):
             raise RuntimeError(f'GGUF_CORRUPT_EXISTING: {role} no coincide con SHA-256; no se modifica. Revisa el archivo antes de reintentar.')
         before += size
-        print(f'[{index}/{len(FILES)}] Verificado {role}', flush=True)
+        print(f'[{index}/{len(files)}] Verificado {role}', flush=True)
 
 
 if __name__ == '__main__':
-    main(Path(sys.argv[1]))
+    if len(sys.argv) > 2:
+        from studio.engines.ltx25_gguf import files_for
+        main(Path(sys.argv[1]), files_for(sys.argv[2]))
+    else:
+        main(Path(sys.argv[1]))

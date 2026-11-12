@@ -442,3 +442,144 @@ def test_gguf_disk_inventory_and_session_log(temp_studio_env, monkeypatch, tmp_p
     assert report.status_code == 200
     assert b.MODEL_ID in report.text
     assert '1/2 componentes con tamaño esperado; hashes no comprobados' in report.text
+
+
+def test_ltx25_graph_has_its_own_encoder_and_joint_audio_video():
+    from studio.engines.ltx25_gguf import make_graph25
+    names = {'dit':'model.gguf', 'text_encoder':'gemma4.safetensors', 'video_vae':'video.safetensors', 'audio_vae':'audio.safetensors'}
+    g = make_graph25(prompt='A person speaks', negative_prompt='', width=512, height=320, frames=49, fps=24,
+                     seed=42, image_name='frame.png', names=names, image_strength=.7)
+    assert g['1']['inputs']['unet_name'] == 'model.gguf'
+    assert g['2']['class_type'] == 'CLIPLoader' and g['2']['inputs']['clip_name'] == 'gemma4.safetensors'
+    assert g['11']['class_type'] == 'LTXVDualCFGGuider' and g['11']['inputs']['audio_cfg'] == 1
+    assert g['13']['inputs']['sampler_name'] == 'euler_ancestral'
+    assert g['17']['class_type'] == 'VAEDecodeTiled' and g['19']['inputs']['audio'] == ['18', 0]
+    assert g['22']['inputs']['strength'] == .7
+    assert make_graph25(prompt='test', negative_prompt='', width=512, height=320, frames=49, fps=24,
+                        seed=1, image_name=None, names=names)['10']['inputs']['video_latent'] == ['8', 0]
+    with pytest.raises(ValueError):
+        make_graph25(prompt='test', negative_prompt='', width=513, height=320, frames=49, fps=24,
+                     seed=1, image_name=None, names=names)
+
+
+def test_ltx25_metadata_and_api_routing(temp_studio_env, monkeypatch):
+    import time
+    from studio.engines import ltx25_gguf as b
+    client, _ = temp_studio_env
+    q2, q4 = list(b.MODELS)
+    entries = {x['id']: x for x in client.get('/api/catalog').json()['models']}
+    assert entries[q2]['engine'] == 'ltx_gguf' and entries[q4]['engine'] == 'ltx_gguf'
+    assert entries[q2]['estimated_gb'] < entries[q4]['estimated_gb']
+    assert not entries[q2]['compatibility']['compatible'] and 'execution_validation' not in entries[q2]
+    assert not any(x['id'] in b.MODELS for x in client.get('/api/catalog?gpu_profile=L4&only_compatible=true').json()['models'])
+    assert b.files_for(q2)[0][2] == b.REV and b.files_for(q2)[0][4] == 9500270976
+    assert b.files_for(q4)[0][4] == 14000234880 and b.files_for(q2)[1:] == b.files_for(q4)[1:]
+    assert client.post('/api/video/ltx-gguf/prepare?model_id=invalid').status_code == 400
+    assert client.post('/api/video/ltx-gguf', json={'prompt': 'test', 'model_id':'invalid'}).status_code == 422
+    assert client.post('/api/video/ltx-gguf', json={'prompt': 'test', 'model_id':q2, 'reference_voice_rel':'uploads/voice.wav'}).status_code == 400
+    assert client.post('/api/video/ltx-gguf', json={'prompt': 'test', 'audio_rel':'uploads/voice.wav'}).status_code == 400
+    calls = []
+    monkeypatch.setattr(b, 'prepare', lambda mid, *, job: calls.append(('prepare',mid)) or {'prepared':True})
+    monkeypatch.setattr(b, 'generate', lambda **kwargs: calls.append(('generate',kwargs)) or {'media_url':'/fake.mp4'})
+    assert client.post('/api/video/ltx-gguf/prepare', params={'model_id':q2}).status_code == 200
+    assert client.post('/api/video/ltx-gguf', json={'prompt':'Hola', 'model_id':q4, 'speech_language':'es', 'duration_sec':10}).status_code == 200
+    for _ in range(50):
+        if len(calls) == 2: break
+        time.sleep(.02)
+    assert ('prepare',q2) in calls
+    request = next(v for k,v in calls if k == 'generate')
+    assert request['model_id'] == q4 and request['speech_language'] == 'es' and request['duration_sec'] == 10
+
+
+def test_ltx25_guards_gpu_before_downloading_and_switches_models(temp_studio_env, monkeypatch):
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord
+    q2, _ = list(b.MODELS)
+    installed = []
+    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':False})
+    monkeypatch.setattr(b.common, '_install', lambda *_: installed.append('install'))
+    with pytest.raises(RuntimeError, match='GGUF_GPU_UNSUPPORTED'):
+        b._prepare(q2, JobRecord('video','test'))
+    assert installed == []
+    with pytest.raises(ValueError, match='GGUF_MODEL_UNSUPPORTED'):
+        b._prepare('unknown', JobRecord('video','test'))
+
+
+def test_ltx25_end_to_end_with_synthetic_audio_and_video(temp_studio_env, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from studio.engines import ltx25_gguf as b
+    from studio.engines.ffmpeg_utils import get_ffmpeg_bin
+    from studio.jobs import JobRecord
+    from PIL import Image
+    _, root = temp_studio_env
+    image = root / 'uploads' / 'frame.png'
+    Image.new('RGB', (256,256), 'blue').save(image)
+    inp, out = root / 'fake_in25', root / 'fake_out25'
+    inp.mkdir(); out.mkdir()
+    mid = next(iter(b.MODELS))
+    monkeypatch.setattr(b, '_prepare', lambda *a, **k: {'dit':'q2.gguf', 'text_encoder':'g4.safetensors', 'video_vae':'v.safetensors', 'audio_vae':'a.safetensors'})
+    monkeypatch.setattr(b.common, '_open_resident', lambda job,names,model_id: SimpleNamespace(input_dir=inp, output_dir=out))
+    graphs = []
+    def infer(graph, i, o, job, model_id):
+        assert model_id == mid
+        assert (i / graph['21']['inputs']['image']).is_file()
+        graphs.append(graph)
+        path = o / 'test.mp4'
+        subprocess.run([get_ffmpeg_bin(), '-v','error','-f','lavfi','-i','color=c=blue:s=320x256:r=24:d=1', '-f','lavfi','-i','sine=frequency=440:sample_rate=24000:duration=1', '-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest','-y',str(path)], check=True)
+        return path
+    monkeypatch.setattr(b.common, '_infer', infer)
+    result = b.generate(model_id=mid, image_path=image, prompt='Hola', negative_prompt='', seed=42, job=JobRecord('video','test'),
+                        width=512, height=320, duration_sec=2, fps=24, speech_language='es', image_strength=.8)
+    assert result['model_id'] == mid and result['audio_native'] and result['frames'] == 49
+    assert result['duration_warning'] and result['image_strength'] == .8
+    assert 'spoken dialogue is in Spanish' in graphs[0]['5']['inputs']['text']
+    assert not list(inp.iterdir()) and not list(out.iterdir())
+
+
+def test_gguf_resident_cache_never_reuses_a_different_variant(temp_studio_env, monkeypatch):
+    from types import SimpleNamespace
+    from studio.engines import ltx_gguf_backend as common, ltx25_gguf as ltx25
+    q2, q4 = list(ltx25.MODELS)
+    session = object.__new__(common._ResidentComfy)
+    session.proc = SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(common.memory_manager, 'get_slot', lambda *_: {'model_id':q2, 'handle':session})
+    assert common._resident(q2) is session
+    assert common._resident(q4) is None and common._resident() is None
+
+
+def test_ltx25_memory_rejection_precedes_install_and_download(temp_studio_env, monkeypatch):
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord
+    mid = next(iter(b.MODELS))
+    calls = []
+    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True, 'bf16_supported':True, 'vram_total_gb':22})
+    monkeypatch.setattr(b.common, '_resident', lambda *_: None)
+    monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: None)
+    def reject(**kw):
+        calls.append((kw['ram_gb'],kw['vram_gb']))
+        raise RuntimeError('insufficient memory')
+    monkeypatch.setattr(b.memory_manager, 'ensure_capacity', reject)
+    monkeypatch.setattr(b.common, '_install', lambda *_: pytest.fail('must not install'))
+    with pytest.raises(RuntimeError, match='insufficient memory'):
+        b._prepare(mid, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
+    assert calls == [(47,16.5)]
+
+
+def test_ltx25_cancel_unloads_resident_process(temp_studio_env, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord, JobCancelledError
+    inp, out = tmp_path/'in25', tmp_path/'out25'
+    inp.mkdir(); out.mkdir()
+    mid = next(iter(b.MODELS))
+    monkeypatch.setattr(b, '_prepare', lambda *a, **k: {'dit':'x.gguf', 'text_encoder':'g.safetensors', 'video_vae':'v.safetensors','audio_vae':'a.safetensors'})
+    monkeypatch.setattr(b.common, '_open_resident', lambda *a: SimpleNamespace(input_dir=inp, output_dir=out))
+    def fail(*args): raise JobCancelledError('cancelled')
+    monkeypatch.setattr(b.common, '_infer', fail)
+    released=[]
+    monkeypatch.setattr(b.memory_manager, 'unload_slot', lambda slot: released.append(slot))
+    with pytest.raises(JobCancelledError):
+        b.generate(model_id=mid, image_path=None, prompt='test', negative_prompt='', seed=1, job=JobRecord('video','test'),
+                   width=512, height=320, duration_sec=2, fps=24, speech_language='auto', image_strength=1)
+    assert released == ['video']
