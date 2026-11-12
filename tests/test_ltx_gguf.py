@@ -163,3 +163,93 @@ def test_gguf_prepare_checks_guard_and_does_not_infer(temp_studio_env, monkeypat
     monkeypatch.setattr(b, '_prepare_gguf', lambda *_: calls.append('prepare'))
     assert b.prepare_gguf(job=JobRecord('download', 'prepare'))['prepared']
     assert calls == ['prepare']
+
+
+def test_gguf_repairs_partial_venv_without_touching_data(temp_studio_env, monkeypatch, tmp_path):
+    import os
+    import sys
+    from studio.engines import ltx_gguf_backend as b
+    from studio.jobs import JobRecord
+    root = tmp_path / 'runtime'
+    root.mkdir()
+    monkeypatch.setattr(b, 'ROOT', root)
+    subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(root / 'venv')], check=True)
+    saved = root / 'venv' / 'preserved.txt'
+    saved.write_text('keep')
+    monkeypatch.setenv('PIP_USER', '1')
+    monkeypatch.setenv('PYTHONPATH', '/nonexistent')
+    py = b._prepare_venv(JobRecord('download', 'repair'))
+    assert saved.read_text() == 'keep'
+    assert 'include-system-site-packages = true' in (root / 'venv' / 'pyvenv.cfg').read_text()
+    script = 'import pathlib, sys, pip; print(pathlib.Path(pip.__file__).is_relative_to(pathlib.Path(sys.prefix)))'
+    env = os.environ.copy()
+    env.pop('PYTHONPATH', None)
+    assert subprocess.check_output([str(py), '-c', script], env=env, text=True).strip() == 'True'
+
+
+def test_gguf_venv_bootstrap_fallback_is_isolated(temp_studio_env, monkeypatch, tmp_path):
+    import ensurepip
+    import os
+    from pathlib import Path
+    from studio.engines import ltx_gguf_backend as b
+    from studio.jobs import JobRecord
+    bundled = Path(getattr(ensurepip, '_WHEEL_PKG_DIR', None) or Path(ensurepip.__file__).parent / '_bundled')
+    if not list(bundled.glob('pip*.whl')):
+        pytest.skip('Python has no bundled pip wheel')
+    root = tmp_path / 'runtime'
+    root.mkdir()
+    monkeypatch.setattr(b, 'ROOT', root)
+    monkeypatch.setenv('PIP_NO_INDEX', '1')
+    monkeypatch.setenv('PIP_FIND_LINKS', str(bundled))
+    monkeypatch.setenv('PIP_USER', '1')
+    original = b._command
+    calls = []
+    def fail_ensurepip(args, job, **kwargs):
+        calls.append(args)
+        if '-m' in args and 'ensurepip' in args:
+            raise RuntimeError('simulated ensurepip failure')
+        return original(args, job, **kwargs)
+    monkeypatch.setattr(b, '_command', fail_ensurepip)
+    py = b._prepare_venv(JobRecord('download', 'fallback'))
+    assert any('--python' in args and str(py) in args for args in calls)
+    env = os.environ.copy()
+    env.pop('PYTHONPATH', None)
+    code = 'import pathlib, sys, pip; print(pathlib.Path(pip.__file__).is_relative_to(pathlib.Path(sys.prefix)))'
+    assert subprocess.check_output([str(py), '-c', code], env=env, text=True).strip() == 'True'
+
+
+def test_gguf_refuses_unmanaged_venv(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import ltx_gguf_backend as b
+    from studio.jobs import JobRecord
+    monkeypatch.setattr(b, 'ROOT', tmp_path)
+    venv = tmp_path / 'venv'
+    venv.mkdir()
+    (venv / 'user-file').write_text('keep')
+    with pytest.raises(RuntimeError, match='GGUF_VENV_CONFLICT'):
+        b._prepare_venv(JobRecord('download', 'conflict'))
+    assert (venv / 'user-file').read_text() == 'keep'
+
+
+def test_gguf_bootstrap_reports_both_errors_and_does_not_retry_cancellation(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import ltx_gguf_backend as b
+    from studio.jobs import JobRecord, JobCancelledError
+    monkeypatch.setattr(b, 'ROOT', tmp_path)
+    calls = []
+    def fail(args, job, **kwargs):
+        calls.append(args)
+        if 'ensurepip' in args:
+            raise RuntimeError('ensurepip detail')
+        if '--python' in args:
+            raise RuntimeError('fallback detail')
+    monkeypatch.setattr(b, '_command', fail)
+    with pytest.raises(RuntimeError, match='ensurepip detail.*fallback detail'):
+        b._prepare_venv(JobRecord('download', 'failure'))
+    calls.clear()
+    def cancel(args, job, **kwargs):
+        calls.append(args)
+        if 'ensurepip' in args:
+            raise JobCancelledError('cancelled')
+    monkeypatch.setattr(b, '_command', cancel)
+    with pytest.raises(JobCancelledError):
+        b._prepare_venv(JobRecord('download', 'cancel'))
+    assert not any('--python' in args for args in calls)

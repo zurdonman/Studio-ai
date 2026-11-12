@@ -80,6 +80,55 @@ def _command(args: list[str], job: Any, *, stage: str, timeout: int, env: dict |
             _stop(proc)
 
 
+def _setup_env() -> dict:
+    """Prevent Colab/user Python and pip settings from redirecting a venv install."""
+    env = os.environ.copy()
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__",
+                 "PIP_USER", "PIP_TARGET", "PIP_PREFIX", "PIP_ROOT", "PIP_REQUIRE_VIRTUALENV"):
+        env.pop(name, None)
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PIP_CONFIG_FILE"] = os.devnull
+    return env
+
+
+def _prepare_venv(job: Any) -> Path:
+    venv = ROOT / "venv"
+    py = venv / "bin" / "python"
+    if venv.is_symlink() or (venv.exists() and not venv.is_dir()):
+        raise RuntimeError("GGUF_VENV_CONFLICT: el entorno existente no es un directorio gestionado; no se modifica")
+    if venv.is_dir() and not (venv / "pyvenv.cfg").is_file() and any(venv.iterdir()):
+        raise RuntimeError("GGUF_VENV_CONFLICT: entorno existente sin pyvenv.cfg; no se modifica")
+    env = _setup_env()
+    # venv/ensurepip can leave bin/python behind after failing. Re-run without
+    # ensurepip: this repairs pyvenv.cfg and never removes the partial directory.
+    _command([sys.executable, "-m", "venv", "--without-pip", "--system-site-packages", str(venv)],
+             job, stage="Creando o reparando entorno GGUF", timeout=120, env=env)
+    verify_pip = ("import pathlib,sys,pip; "
+                  "p=pathlib.Path(sys.prefix).resolve(); "
+                  "assert p == pathlib.Path(sys.argv[1]).resolve(), 'Python no usa el entorno GGUF'; "
+                  "assert pathlib.Path(pip.__file__).resolve().is_relative_to(p), 'pip no está instalado dentro del entorno GGUF'")
+    # Call ensurepip separately so its real error, normally hidden by venv, is logged.
+    ensure_error = None
+    try:
+        _command([str(py), "-m", "ensurepip", "--upgrade", "--default-pip"], job,
+                 stage="Preparando pip en entorno GGUF", timeout=120, env=env)
+        _command([str(py), "-c", verify_pip, str(venv)], job,
+                 stage="Verificando pip aislado", timeout=30, env=env)
+    except RuntimeError as exc:
+        ensure_error = str(exc)
+        job.log("El pip integrado no pudo prepararse; se intenta instalar pip solo en el entorno GGUF.")
+    if ensure_error:
+        try:
+            # --python targets the venv even when pip is not installed there.
+            _command([sys.executable, "-m", "pip", "--python", str(py), "install", "--ignore-installed", "--no-deps", "pip"],
+                     job, stage="Recuperando pip aislado GGUF", timeout=300, env=env)
+            _command([str(py), "-c", verify_pip, str(venv)], job,
+                     stage="Verificando pip aislado", timeout=30, env=env)
+        except RuntimeError as exc:
+            raise RuntimeError(f"GGUF_VENV_BOOTSTRAP_FAILED: {ensure_error} | Recuperación: {exc}") from exc
+    return py
+
+
 def _install(job: Any) -> None:
     marker = ROOT / "ready.json"
     source = ROOT / "comfy"
@@ -100,10 +149,10 @@ def _install(job: Any) -> None:
         if not (dest / ".git").is_dir():
             raise RuntimeError("GGUF_RUNTIME_CONFLICT: directorio de runtime existente no gestionado; no se borra")
         _command(["git", "-C", str(dest), "checkout", "--detach", revision], job, stage="Fijando versión de GGUF", timeout=120)
-    if not py.exists():
-        _command([sys.executable, "-m", "venv", "--system-site-packages", str(ROOT / "venv")], job, stage="Creando entorno separado", timeout=120)
-    _command([str(py), "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", "-r", str(source / "requirements.txt"), "-r", str(plugin / "requirements.txt")], job, stage="Instalando dependencias GGUF", timeout=2400)
-    _command([str(py), str(source / "main.py"), "--help"], job, stage="Comprobando entorno GGUF", timeout=90)
+    py = _prepare_venv(job)
+    env = _setup_env()
+    _command([str(py), "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", "-r", str(source / "requirements.txt"), "-r", str(plugin / "requirements.txt")], job, stage="Instalando dependencias GGUF", timeout=2400, env=env)
+    _command([str(py), str(source / "main.py"), "--help"], job, stage="Comprobando entorno GGUF", timeout=90, env=env)
     marker.write_text(json.dumps({"comfy": COMFY_COMMIT, "gguf": GGUF_COMMIT}), encoding="utf8")
 
 
@@ -164,8 +213,7 @@ def _tail(logfile: Any) -> str:
 
 
 def _runtime_env() -> dict:
-    env = os.environ.copy()
-    env.pop("PYTHONPATH", None)
+    env = _setup_env()
     for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
         env.pop(name, None)
     env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
