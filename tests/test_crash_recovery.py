@@ -339,3 +339,130 @@ def test_diagnostics_http_zip_and_notebook_recovery_cell(temp_studio_env):
     for cell in notebook["cells"]:
         if cell["cell_type"] == "code":
             compile("".join(cell["source"]), "colab_cell", "exec")
+
+
+def test_quick_tunnel_url_does_not_treat_cloudflare_api_as_a_public_tunnel():
+    import launch_colab as launcher
+    assert launcher._quick_tunnel_url('Request failed: POST https://api.trycloudflare.com/tunnel') is None
+    assert launcher._quick_tunnel_url('GET https://API.trycloudflare.com/v1: timeout') is None
+    assert launcher._quick_tunnel_url('| https://apple-ocean-flower-lake.trycloudflare.com |') == 'https://apple-ocean-flower-lake.trycloudflare.com'
+    assert launcher._quick_tunnel_url('https://api.trycloudflare.com and https://fresh-quick.trycloudflare.com') == 'https://fresh-quick.trycloudflare.com'
+    assert launcher._quick_tunnel_url('https://fresh-quick.trycloudflare.com.evil.example') is None
+
+
+def test_tunnel_start_rejects_api_error_and_accepts_real_url(monkeypatch, tmp_path):
+    import launch_colab as launcher
+    monkeypatch.setattr(launcher, 'ROOT_DIR', tmp_path)
+    binary = tmp_path / 'cloudflared'
+    binary.write_text('#!/bin/sh\necho "error connecting to https://api.trycloudflare.com"\nexit 1\n')
+    binary.chmod(0o755)
+    proc, url = launcher.start_cloudflared_tunnel(7860)
+    assert proc is None and url is None
+    binary.write_text('#!/bin/sh\necho "| https://apple-ocean-flower-lake.trycloudflare.com |"\nsleep 5\n')
+    proc, url = launcher.start_cloudflared_tunnel(7860)
+    try:
+        assert proc is not None and proc.poll() is None
+        assert url == 'https://apple-ocean-flower-lake.trycloudflare.com'
+    finally:
+        launcher._stop_process(proc)
+
+
+def test_launcher_reconnects_tunnel_without_restarting_server(monkeypatch, tmp_path, capsys):
+    import subprocess
+    import launch_colab as launcher
+    from studio import diagnostics as diag
+    monkeypatch.setenv('STUDIO_DATA_DIR', str(tmp_path / 'data'))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'app.py').write_text('import time\nprint("SERVER_ONCE", flush=True)\ntime.sleep(1.0)\n')
+    monkeypatch.setattr(launcher, 'ROOT_DIR', repo)
+    monkeypatch.setattr(launcher, 'ensure_dependencies', lambda: None)
+    monkeypatch.setattr(launcher, 'wait_for_local_server', lambda *a, **k: {'hardware': {}})
+    monkeypatch.setattr(launcher, 'try_colab_proxy_url', lambda _: None)
+    monkeypatch.setattr(launcher, 'TUNNEL_RETRY_INITIAL_SECONDS', .02)
+    monkeypatch.setattr(launcher, 'TUNNEL_RETRY_SECONDS', .02)
+    monkeypatch.setattr(launcher, 'MONITOR_INTERVAL_SECONDS', .02)
+    monkeypatch.setattr(diag, '_command', lambda _: 'offline')
+    monkeypatch.setattr(diag.importlib.metadata, 'distributions', lambda: [])
+    calls, registrations = [], []
+    def fake_start(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return None, None
+        return subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)']), 'https://fresh-quick.trycloudflare.com'
+    monkeypatch.setattr(launcher, 'start_cloudflared_tunnel', fake_start)
+    monkeypatch.setattr(launcher, '_register_tunnel', lambda port, url: registrations.append(url))
+    launcher.main()
+    output = capsys.readouterr().out
+    assert output.count('SERVER_ONCE') == 1
+    assert 'Sin enlace público' in output and 'Túnel reconectado' in output
+    assert registrations == ['https://fresh-quick.trycloudflare.com']
+    assert len(calls) == 2
+    events_file = next((tmp_path / 'data' / 'state' / 'diagnostics').iterdir()) / 'events.jsonl'
+    assert 'tunnel_reconnected' in events_file.read_text()
+
+
+def test_launcher_recovers_tunnel_exit_while_server_keeps_running(monkeypatch, tmp_path, capsys):
+    import subprocess
+    import launch_colab as launcher
+    from studio import diagnostics as diag
+    monkeypatch.setenv('STUDIO_DATA_DIR', str(tmp_path / 'data'))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'app.py').write_text('import time\nprint("ONE_SERVER", flush=True)\ntime.sleep(1.2)\n')
+    monkeypatch.setattr(launcher, 'ROOT_DIR', repo)
+    monkeypatch.setattr(launcher, 'ensure_dependencies', lambda: None)
+    monkeypatch.setattr(launcher, 'wait_for_local_server', lambda *a, **k: {'hardware': {}})
+    monkeypatch.setattr(launcher, 'try_colab_proxy_url', lambda _: None)
+    monkeypatch.setattr(launcher, 'TUNNEL_RETRY_INITIAL_SECONDS', .02)
+    monkeypatch.setattr(launcher, 'MONITOR_INTERVAL_SECONDS', .02)
+    monkeypatch.setattr(diag, '_command', lambda _: 'offline')
+    monkeypatch.setattr(diag.importlib.metadata, 'distributions', lambda: [])
+    calls, registrations = [], []
+    def fake_start(*args, **kwargs):
+        calls.append(1)
+        sleep_time = '.2' if len(calls) == 1 else '20'
+        proc = subprocess.Popen([sys.executable, '-c', f'import time; time.sleep({sleep_time})'])
+        return proc, f'https://quick-{len(calls)}.trycloudflare.com'
+    monkeypatch.setattr(launcher, 'start_cloudflared_tunnel', fake_start)
+    monkeypatch.setattr(launcher, '_register_tunnel', lambda port, url: registrations.append(url))
+    launcher.main()
+    output = capsys.readouterr().out
+    assert output.count('ONE_SERVER') == 1 and len(calls) == 2
+    assert 'El túnel terminó' in output and 'Túnel reconectado' in output
+    assert registrations == ['https://quick-1.trycloudflare.com', 'https://quick-2.trycloudflare.com']
+
+
+def test_retry_closing_while_start_in_flight_stops_late_process(monkeypatch):
+    import subprocess
+    import threading
+    import launch_colab as launcher
+    gate, entered = threading.Event(), threading.Event()
+    processes = []
+    def delayed(*args):
+        entered.set()
+        gate.wait(timeout=3)
+        proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])
+        processes.append(proc)
+        return proc, 'https://quick-late.trycloudflare.com'
+    monkeypatch.setattr(launcher, 'start_cloudflared_tunnel', delayed)
+    retry = launcher.TunnelRetry(7860, types.SimpleNamespace(write=lambda *args: None))
+    assert retry.start() and entered.wait(timeout=3)
+    assert not retry.start()
+    retry.close()
+    gate.set()
+    retry._worker.join(timeout=3)
+    assert not retry._worker.is_alive() and processes[0].poll() is not None
+    assert retry.result() is None
+
+
+def test_failed_tunnel_download_does_not_leave_binary_for_next_retry(monkeypatch, tmp_path):
+    import launch_colab as launcher
+    monkeypatch.setattr(launcher, 'ROOT_DIR', tmp_path)
+    def incomplete(url, path):
+        Path(path).write_text('partial')
+        raise OSError('network interrupted')
+    monkeypatch.setattr(launcher.urllib.request, 'urlretrieve', incomplete)
+    assert launcher.start_cloudflared_tunnel(7860) == (None, None)
+    assert not (tmp_path / 'cloudflared').exists()
+    assert not (tmp_path / 'cloudflared.download').exists()
