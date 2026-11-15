@@ -494,26 +494,46 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
         unknown = {"compatible": False, "tier": "candidate", "label": "Encaje actual no evaluado", "sticker": "🧪", "reasons": ["La prueba L4 no evalúa la RAM y el disco de esta sesión; desmarca el filtro para investigar."]}
         models.append({"id": "ltx-2.3-distilled-gguf-q4-experimental", "name": "LTX 2.3 GGUF Q4 · vídeo + audio (experimental)",
                        "category": "video", "engine": "ltx_gguf", "video_modes": ["i2v", "t2v", "av"],
-                       "estimated_gb": 24.1, "downloaded": gguf_files_present(), "loaded_in_memory": "ltx-2.3-distilled-gguf-q4-experimental" in loaded_ids,
+                       "estimated_gb": 24.1, "min_ram_gb": 32.0, "min_vram_gb": 14.0, "downloaded": gguf_files_present(), "loaded_in_memory": "ltx-2.3-distilled-gguf-q4-experimental" in loaded_ids,
                        "compatibility": unknown, "ltx_distilled": True,
                        "execution_validation": {"status": "observed", "label": "✅ Generación I2V probada en L4",
                            "scope": "512×320, 24 fps, 10 s y 20 s con caché residente; audio y vídeo presentes. No valida idioma, movimiento ni esta sesión."},
                        "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                          "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
                                          "official_note": "I2V de 10 y 20 s probado en L4 a 512×320; 8 pasos y CFG 1 fijos. Otras configuraciones y el encaje actual no garantizados."}})
-        from studio.engines.ltx25_gguf import MODELS as LTX25_MODELS, Q5_ID, Q5_IDS, FP8_Q5_ID, files_for as ltx25_files, files_present as ltx25_present
+        from studio.engines.ltx25_gguf import MODELS as LTX25_MODELS, Q5_ID, Q5_IDS, UDQ4_Q5_ID, FP8_Q5_ID, NVFP4_Q5_ID, base_memory_budget, files_for as ltx25_files, files_present as ltx25_present
         for mid, (quant, _, _, _) in LTX25_MODELS.items():
-            models.append({"id": mid, "name": f"LTX 2.5 {'' if mid == FP8_Q5_ID else 'GGUF '}{quant} · vídeo + audio (experimental)",
+            ram_gb, vram_gb = base_memory_budget(mid)
+            models.append({"id": mid, "name": f"LTX 2.5 {'' if mid in {FP8_Q5_ID, NVFP4_Q5_ID} else 'GGUF '}{quant} · vídeo + audio (experimental)",
                            "category": "video", "engine": "ltx_gguf", "video_modes": ["i2v", "t2v", "av"],
                            "estimated_gb": round(sum(x[4] for x in ltx25_files(mid)) / 1024**3, 1),
+                           "min_ram_gb": ram_gb, "min_vram_gb": vram_gb,
                            "downloaded": ltx25_present(mid), "loaded_in_memory": mid in loaded_ids,
                            "compatibility": {"compatible": False, "tier": "candidate", "label": "Encaje actual desconocido", "sticker": "🧪",
-                                             "reasons": [("Generó vídeo en L4 según el usuario; condiciones y calidad no verificadas. " if mid == Q5_ID else "No probado en L4. ") + ("Gemma 4 GGUF Q5 requiere aceptar condiciones de elix3r; la admisión puede rechazar la tarea." if mid in Q5_IDS else "Gemma 4 BF16 ocupa ~24,5 GiB; la admisión puede rechazar la tarea.")]},
+                                             "reasons": [("Generó vídeo en L4 según el usuario; condiciones y calidad no verificadas. " if mid in {Q5_ID, UDQ4_Q5_ID} else "No probado en L4. ") + ("Gemma 4 GGUF Q5 requiere aceptar condiciones de elix3r; la admisión puede rechazar la tarea." if mid in Q5_IDS else "Gemma 4 BF16 ocupa ~24,5 GiB; la admisión puede rechazar la tarea.")]},
                            "ltx_distilled": True,
                            "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                              "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
-                                             "official_note": ("LTX 2.5 experimental, una pasada y VAE conv; sin upscale. Audio completo y referencia MSR son experimentales sin prueba GPU. " + ("UD-Q2 + Gemma Q5 generó vídeo en L4 según el usuario; parámetros no verificados." if mid == Q5_ID else "Esta variante no tiene prueba L4."))}})
+                                             "official_note": ("LTX 2.5 experimental, una pasada y VAE conv; sin upscale. Audio completo y referencia MSR son experimentales sin prueba GPU. " + ("UD-Q2 + Gemma Q5 generó vídeo en L4 según el usuario; parámetros no verificados." if mid == Q5_ID else "UD-Q4 + Gemma Q5 generó tres vídeos en L4, con dos fallos posteriores al reutilizar caché." if mid == UDQ4_Q5_ID else "Esta variante no tiene prueba L4."))}})
+        for model in models:
+            if model["id"] == UDQ4_Q5_ID:
+                model["execution_validation"] = {"status": "observed", "label": "✅ Generación I2V observada en L4",
+                    "scope": "Tres clips de ~10 s a 320×512 y 24 fps según registro; dos intentos con caché fallaron. No valida calidad ni otros ajustes."}
+    from studio.memory_policy import model_budget, number
     for model in models:
+        budget = model_budget(model, has_gpu=True)
+        # LoRA memory is incremental, not the cost of its base pipeline.
+        # Use the same conservative disk-size heuristic as model_budget when
+        # composing adapter admission, never invent numbers for candidates.
+        if model.get("category") == "lora" and model.get("validation_state") != "candidate":
+            weight = number(model.get("estimated_gb"))
+            if budget["ram_gb"] is None and weight is not None and weight > 0:
+                budget["ram_gb"] = round(weight * 2 + .25, 2)
+        model["memory_estimate"] = {
+            "ram_gb": budget["ram_gb"], "vram_gb": budget["vram_gb"],
+            "scope": "adapter_increment" if model.get("category") == "lora" else "base_recipe",
+            "confidence": "planning_estimate_not_measured_peak",
+        }
         model["hardware_assessment"] = model["compatibility"]
         if model["category"] == "image":
             model["image_defaults"] = image_defaults(model)
@@ -994,7 +1014,7 @@ def api_id_lora_video(req: VoiceConsistencyReq) -> Dict[str, Any]:
 
 
 class LTXGGUFReq(BaseModel):
-    model_id: Literal["ltx-2.3-distilled-gguf-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", "ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental", "ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental"] = "ltx-2.3-distilled-gguf-q4-experimental"
+    model_id: Literal["ltx-2.3-distilled-gguf-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", "ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental", "ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental", "ltx-2.5-distilled-comfy-nvfp4-gemma-q5-experimental"] = "ltx-2.3-distilled-gguf-q4-experimental"
     prompt: str = Field(min_length=1, max_length=3000)
     negative_prompt: str = Field(default="", max_length=3000)
     image_rel: Optional[str] = None
@@ -1013,12 +1033,12 @@ class LTXGGUFReq(BaseModel):
 @app.post("/api/video/ltx-gguf/prepare")
 def api_prepare_ltx_gguf(model_id: str = "ltx-2.3-distilled-gguf-q4-experimental") -> Dict[str, Any]:
     from studio.engines.ltx_gguf_backend import prepare_gguf
-    from studio.engines.ltx25_gguf import MODELS, FP8_Q5_ID, prepare as prepare25
+    from studio.engines.ltx25_gguf import MODELS, FP8_Q5_ID, NVFP4_Q5_ID, prepare as prepare25
     if model_id == "ltx-2.3-distilled-gguf-q4-experimental":
         title = "Preparar LTX 2.3 GGUF Q4 (experimental)"
         fn = lambda j: prepare_gguf(job=j)
     elif model_id in MODELS:
-        title = f"Preparar LTX 2.5 {'' if model_id == FP8_Q5_ID else 'GGUF '}{MODELS[model_id][0]} (experimental)"
+        title = f"Preparar LTX 2.5 {'' if model_id in {FP8_Q5_ID, NVFP4_Q5_ID} else 'GGUF '}{MODELS[model_id][0]} (experimental)"
         fn = lambda j: prepare25(model_id, job=j)
     else:
         raise HTTPException(status_code=400, detail="Modelo GGUF desconocido")
@@ -1029,7 +1049,7 @@ def api_prepare_ltx_gguf(model_id: str = "ltx-2.3-distilled-gguf-q4-experimental
 @app.post("/api/video/ltx-gguf")
 def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
     from studio.engines.ltx_gguf_backend import generate_gguf
-    from studio.engines.ltx25_gguf import MODELS, FP8_Q5_ID, generate as generate25
+    from studio.engines.ltx25_gguf import MODELS, FP8_Q5_ID, NVFP4_Q5_ID, generate as generate25
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Describe la escena.")
     if ((req.voice_mode == 'none' and (req.audio_rel or req.reference_voice_rel))
@@ -1060,7 +1080,7 @@ def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
                   width=req.width, height=req.height, duration_sec=req.duration_sec, fps=req.fps,
                   speech_language=req.speech_language, image_strength=req.image_strength)
     if req.model_id in MODELS:
-        title = f"LTX 2.5 {'' if req.model_id == FP8_Q5_ID else 'GGUF '}{MODELS[req.model_id][0]} · audio y vídeo (experimental)"
+        title = f"LTX 2.5 {'' if req.model_id in {FP8_Q5_ID, NVFP4_Q5_ID} else 'GGUF '}{MODELS[req.model_id][0]} · audio y vídeo (experimental)"
         if req.voice_mode != 'none':
             kwargs.update(voice_mode=req.voice_mode, voice_path=voice)
         fn = lambda j: generate25(model_id=req.model_id, job=j, **kwargs)

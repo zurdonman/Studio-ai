@@ -64,17 +64,17 @@ nuestra combinación concreta ni sus resultados.
 
 Studio prepara la extensión en un runtime aislado, fijada por commit, y descarga y verifica el SHA-256 del adaptador. Un cargador estricto comprueba que los tensores y parches LoRA se hayan reconocido y aplicado; el cargador especializado conserva y valida las embeddings de referencia. El guía usa el latente de vídeo antes de concatenar A/V, `pic1` y el audio codificado en `audio_ref1`; después de separar A/V se aplica `LTXVCropGuides`. La misma imagen se utiliza además como primer fotograma. La muestra es condicionamiento, **no** una pista que se garantice oír literalmente; el nodo puede recortarla a su ventana interna.
 
-El modo se selecciona en Imagen a Vídeo > Audio y voz GGUF > Voz de referencia. El prompt debe describir la escena y el diálogo nuevo. Solo imagen y audio propios o autorizados. Se reserva un margen preventivo adicional de 5 GiB RAM y 3 GiB VRAM, no medido. Bajo presión puede rechazarse antes de descargar o detenerse durante la inferencia; no se garantiza cabida en L4. Si se necesita activar el nodo en un proceso residente anterior, se reinicia el proceso una vez sin borrar pesos y se vuelve a comprobar el presupuesto. Las generaciones posteriores reutilizan el proceso cuando sea seguro.
+El modo se selecciona en Imagen a Vídeo > Audio y voz GGUF > Voz de referencia. El prompt debe describir la escena y el diálogo nuevo. Solo imagen y audio propios o autorizados. Se reserva un margen preventivo adicional de 5 GiB RAM y 3 GiB VRAM, no medido. Bajo presión puede rechazarse antes de descargar o detenerse durante la inferencia; no se garantiza cabida en L4. Si se necesita activar el nodo en un proceso residente anterior, se reinicia el proceso una vez sin borrar pesos y se vuelve a comprobar el presupuesto. Después de generar, el proceso se cierra y los archivos permanecen en disco.
 
 Los grafos se validaron contra los esquemas reales del Comfy fijado para Gemma Q5 con archivos ficticios, y las rutas y salidas se probaron con mocks. Esto **no ejecuta los pesos reales**, no comprueba la aplicación real del adaptador, ni demuestra compatibilidad de sus tensores con el modelo cuantizado; un error explícito de nodo o `MSR_LORA_INCOMPATIBLE` es un resultado posible. El registro L4 del usuario ya mostró 0,8 GiB libres con la receta base.
 
 ## Caché y protección de memoria
 
-Para las variantes 2.3 y 2.5, una segunda petición del mismo modelo reutiliza el **mismo proceso Comfy residente**, sus nodos y, si Comfy los conserva, los pesos en caché. El registro `Comfy reutiliza de caché` indica los componentes que Comfy informó como reutilizados: la existencia del proceso, por sí sola, no garantiza que todos los pesos permanezcan en VRAM. Comfy puede mover o liberar pesos; una sesión de Colab reiniciada también pierde la caché RAM/VRAM.
+Para las variantes 2.3 y 2.5, Studio cierra Comfy al terminar cada vídeo o al fallar/cancelar. La generación siguiente arranca un proceso nuevo y carga los pesos desde disco, sin volver a descargarlos si los archivos siguen presentes y verificados. Comfy gestiona su memoria y offload durante cada ejecución; otros procesos también pueden ocupar VRAM.
 
 Si se cambia de modelo, Studio descarga el proceso anterior de la memoria antes de admitir el nuevo. Bajo presión el guardián libera modelos inactivos; una generación activa no se descarga desde otro hilo a mitad de uso. Ante presión crítica durante la ejecución o cancelación, la tarea se detiene y se libera el proceso. Si la capacidad estimada no alcanza, no comienza la nueva instalación/descarga. Ninguna de estas acciones borra pesos ya guardados en disco: tras liberar memoria habrá que recargarlos, pero no descargarlos otra vez si siguen intactos. Una unidad temporal de Colab puede desaparecer al cerrar el entorno; Studio no puede conservarla por sí solo.
 
-Se añadieron pruebas simuladas para las tres variantes con Gemma Q5: reutilización de sesión sin reinstalación, cambio de modelo y rechazo por memoria antes de descargar, liberación al cancelar o en presión crítica, y expulsión segura de caché inactiva sin borrar archivos. No miden memoria real ni prueban la inferencia en GPU.
+Las pruebas simuladas comprueban generaciones consecutivas con procesos separados, conservación de archivos, rechazo por memoria y liberación al cancelar o en presión crítica. No miden memoria real ni prueban la inferencia en GPU.
 
 ## Diagnóstico de carga en L4 (registro del 15 de noviembre)
 
@@ -103,5 +103,26 @@ offload a CPU y fallar o ir lento. Clips largos y MSR aumentan el presupuesto.
 No se ha probado la carga de los pesos ni la inferencia GPU en Studio. En L4 prueba
 primero 512×320, ~2 s y sin referencia, y verifica la galería. El filtro de modelos
 compatibles oculta las recetas de encaje desconocido: desactívalo para seleccionarla.
-La caché residente y los archivos compartidos se reutilizan; la liberación bajo
-presión no borra pesos. El grafo de audio completo y MSR también sigue experimental.
+Los archivos compartidos se reutilizan; tras cada vídeo se libera el proceso sin borrar pesos. El grafo de audio completo y MSR también sigue experimental.
+
+
+### LTX 2.5 22B distilled NVFP4 (DDB Comfy, experimental)
+
+Opción comunitaria de [DmitryDB](https://huggingface.co/DmitryDB/LTX-2.5-ComfyUI-Quants)
+con transformer NVFP4 (12,64 GiB), Gemma Q5 y VAE compartidos. Es distinta del
+checkpoint NVFP4 oficial. Se fija revisión y SHA-256; se aplican las licencias
+LTX y el acceso a elix3r. El autor reporta carga y prueba de proyección en una
+RTX 4090, **no un vídeo completo**. La L4 es Ada: no tiene aceleración nativa
+NVFP4; el autor describe un fallback para Ada, pero no se ha verificado este
+workflow en Studio/L4. No se garantiza encaje, velocidad, resultado ni compatibilidad
+con MSR. El presupuesto inicial estimado es 40 GiB RAM y 18 GiB VRAM, más
+reservas, activaciones y aumentos por duración y audio; no es un pico medido.
+Prueba primero 512×320, ~2 s, sin referencia, y revisa la galería.
+
+### Registro del 15 de noviembre, 18:40
+
+UD-Q4 + Gemma Q5 completó tres clips de ~10 s en L4; los dos trabajos
+intermedios se detuvieron tras reutilizar caché con ~0,77 GiB de VRAM libre.
+No prueba que todos los fallos futuros tengan esa causa. Desde este cambio el
+motor se cierra después de cada vídeo; la próxima carga tarda más, pero usa los
+mismos archivos en disco.

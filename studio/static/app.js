@@ -54,7 +54,8 @@
   // ==================== HELPERS ====================
   const GGUF_MODEL_ID = "ltx-2.3-distilled-gguf-q4-experimental";
   const FP8_COMFY_ID = "ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental";
-  const GGUF_GEMMA_Q5_IDS = new Set([FP8_COMFY_ID, "ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", "ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental"]);
+  const NVFP4_COMFY_ID = "ltx-2.5-distilled-comfy-nvfp4-gemma-q5-experimental";
+  const GGUF_GEMMA_Q5_IDS = new Set([FP8_COMFY_ID, NVFP4_COMFY_ID, "ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", "ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental"]);
   const GGUF_MODEL_IDS = new Set([GGUF_MODEL_ID, "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental", ...GGUF_GEMMA_Q5_IDS]);
   const isGgufModel = (id) => GGUF_MODEL_IDS.has(id);
   function $(id) {
@@ -342,8 +343,8 @@
     const isImageJob = j => j.kind === "image" || /qwen|imagen|lora/i.test(j.title || "");
     const vidJob = running.find(j => j.id === state.selectedJobId && isVideoJob(j)) || running.find(isVideoJob);
     const imgJob = running.find(j => j.id === state.selectedJobId && isImageJob(j)) || running.find(isImageJob);
-    const ggufJob = running.find(j => j.id === state.selectedJobId && /LTX 2\.[35] (?:GGUF|FP8)/.test(j.title || "")) ||
-      running.find(j => /LTX 2\.[35] (?:GGUF|FP8)/.test(j.title || ""));
+    const ggufJob = running.find(j => j.id === state.selectedJobId && /LTX 2\.[35] (?:GGUF|FP8|NVFP4)/.test(j.title || "")) ||
+      running.find(j => /LTX 2\.[35] (?:GGUF|FP8|NVFP4)/.test(j.title || ""));
     const ajCard = $("active-job-card");
     const gjs = $("global-job-strip");
     const imgInline = $("img-inline-progress");
@@ -437,7 +438,7 @@
             $("clone-feedback").className = "vid-steps-note warn";
             $("clone-feedback").textContent = `Error de clonación: ${j.error || "Revisa el registro de la tarea"}`;
           }
-          if (/LTX 2\.[35] (?:GGUF|FP8)/.test(j.title || "") && $("ltx-gguf-error")) {
+          if (/LTX 2\.[35] (?:GGUF|FP8|NVFP4)/.test(j.title || "") && $("ltx-gguf-error")) {
             $("ltx-gguf-error").hidden = false;
             $("ltx-gguf-error").textContent = `Error LTX: ${j.error || "Revisa el registro de la tarea"}`;
             ggufFeedback(`Error LTX: ${j.error || "Revisa el registro de la tarea"}`, true);
@@ -501,7 +502,7 @@
   async function handleJobCompleted(job) {
     // El resultado no debe depender de que respondan el catálogo o la galería.
     const res = job.result || {};
-    if (res.prepared && /LTX 2\.[35] (?:GGUF|FP8)/.test(job.title || "")) {
+    if (res.prepared && /LTX 2\.[35] (?:GGUF|FP8|NVFP4)/.test(job.title || "")) {
       ggufFeedback("Archivos de la receta preparados en disco. Para crear el vídeo: elige Imagen a Vídeo o Texto a Vídeo, escribe el prompt y pulsa «Generar Clip de Vídeo». Los pesos se cargan al generar.");
     }
     if (res && res.media_url && state.workspaceMode === "higgsfield") {
@@ -632,7 +633,7 @@
     if (!btn || !sel || btn.disabled) return;
     const m = state.catalog.find((item) => item.id === sel.value);
     if (m && isGgufModel(m.id)) {
-      const label = m.id === FP8_COMFY_ID ? "FP8 Comfy" : "GGUF";
+      const label = m.id === FP8_COMFY_ID ? "FP8 Comfy" : m.id === NVFP4_COMFY_ID ? "NVFP4 Comfy" : "GGUF";
       btn.textContent = m.loaded_in_memory ? `✅ Motor ${label} activo` : m.downloaded ? `🔄 Verificar preparación ${label}` : `⬇ Preparar ${label} (~${m.estimated_gb} GiB)`;
       return;
     }
@@ -1571,6 +1572,7 @@
                 <span>· ${escapeHtml(diskTxt)}</span>
               </div>
               ${comp.compatible === false && (comp.reasons || []).length ? `<div class="muted">${escapeHtml(comp.reasons.join(" "))}</div>` : ""}
+              <div class="muted">${escapeHtml(memoryEstimateText(m))}</div>
               ${comp.resources ? `<div class="muted">${escapeHtml(modelResourceComparison(comp))}</div>` : ""}
               <div class="vmc-modes-row">${modes}</div>
             </div>
@@ -1604,11 +1606,16 @@
     renderVideoCompatBanner();
   }
 
+  function memoryEstimateText(m) {
+    const estimate = m.memory_estimate || {};
+    const val = v => (typeof v === "number" && Number.isFinite(v) && v >= 0) ? `~${v} GiB` : "desconocida";
+    const scope = estimate.scope === "adapter_increment" ? "extra del adaptador (sin modelo base)" : "receta base";
+    return `Memoria estimada (${scope}): RAM ${val(estimate.ram_gb)} · VRAM ${val(estimate.vram_gb)}. No es un pico medido; duración, resolución y reservas pueden aumentar el uso.`;
+  }
+
   function renderCatalog() {
     const grid = $("catalog-grid");
     const filtered = state.catalog.filter((m) => {
-      // GGUF usa una preparación aislada disponible en Vídeo, no el gestor normal de modelos.
-      if (isGgufModel(m.id)) return false;
       if (state.catOnlyCompat && !(m.hardware_assessment || m.compatibility || {}).compatible) return false;
       if (state.catalogFilter === "all") return true;
       if (state.catalogFilter === "image") {
@@ -1633,7 +1640,7 @@
           ? "Integrado (0 GB)"
           : m.downloaded
           ? `En disco: ${m.actual_disk_gb || m.estimated_gb} GB`
-          : `Peso descarga: ~${m.estimated_gb} GB (Libre: ${m.free_disk_gb} GB)`;
+          : `Peso descarga: ${m.estimated_gb == null ? "desconocido" : `~${m.estimated_gb} GiB`}${m.free_disk_gb == null ? "" : ` (libre: ${m.free_disk_gb} GiB)`}`;
 
         const modeTags = formatVideoModes(m.video_modes)
           .map((mo) => `<span class="mc-tag">${escapeHtml(mo.label)}</span>`)
@@ -1651,7 +1658,9 @@
           : "";
 
         let btns = "";
-        if (m.validation_state === "candidate") {
+        if (isGgufModel(m.id)) {
+          btns = `<span class="mc-tag">Preparar y generar desde la pestaña Vídeo</span>`;
+        } else if (m.validation_state === "candidate") {
           btns = `<span class="mc-tag">Candidato sin receta · descarga/carga bloqueadas</span>`;
         } else if (m.category === "lora") {
           if (!m.downloaded) {
@@ -1676,7 +1685,7 @@
           btns += `<span class="mc-tag ok">Integrado · comprobar runtime/red y RAM</span>`;
         }
 
-        btns += `<button type="button" class="btn btn-secondary btn-sm" data-model-inspect="${escapeHtml(m.id)}">Ver diagnóstico</button>`;
+        if (!isGgufModel(m.id)) btns += `<button type="button" class="btn btn-secondary btn-sm" data-model-inspect="${escapeHtml(m.id)}">Ver diagnóstico</button>`;
         return `
           <div class="model-card ${m.is_default ? "is-default" : ""}">
             <div>
@@ -1689,6 +1698,7 @@
               </div>
               <h4 class="mc-title">${escapeHtml(m.name)}</h4>
               <p class="mc-desc">${escapeHtml(m.description || "")}</p>
+              <p class="muted">${escapeHtml(memoryEstimateText(m))}</p>
               <p class="muted">${escapeHtml(modelResourceSummary(comp))}</p>
               ${matrixHtml ? `<span class="muted">Matriz orientativa de VRAM (no rendimiento ni RAM/disco)</span>${matrixHtml}` : ""}
             </div>
@@ -3539,7 +3549,7 @@
     async function prepareLtxGguf() {
       const mid = $("select-video-model").value;
       const m = state.catalog.find(x => x.id === mid);
-      const notice = mid === FP8_COMFY_ID ? "FP8 ya cuantizado + Gemma 4 GGUF Q5: sin prueba real en GPU ni L4; requiere permiso elix3r y puede rechazarse por memoria. No es la receta BF16→FP8 de Diffusers." : mid === GGUF_MODEL_ID ? "LTX 2.3 I2V se probó en L4." : GGUF_GEMMA_Q5_IDS.has(mid) ? "Gemma 4 GGUF Q5: acepta las condiciones de elix3r y configura Hugging Face. UD-Q2 generó vídeo en una L4 según un usuario; Q4 no está probado. El encaje actual no está garantizado." : "LTX 2.5 no se ha probado en L4; usa Gemma 4 BF16 grande y puede ser rechazado por memoria.";
+      const notice = mid === NVFP4_COMFY_ID ? "NVFP4 DDB comunitario: sin prueba completa en Studio/L4; aceleración FP4 nativa requiere Blackwell, L4 usa una ruta alternativa sin garantía. Requiere acceso a Gemma Q5." : mid === FP8_COMFY_ID ? "FP8 ya cuantizado + Gemma 4 GGUF Q5: sin prueba real en GPU ni L4; requiere permiso elix3r y puede rechazarse por memoria. No es la receta BF16→FP8 de Diffusers." : mid === GGUF_MODEL_ID ? "LTX 2.3 I2V se probó en L4." : GGUF_GEMMA_Q5_IDS.has(mid) ? "Gemma 4 GGUF Q5: acepta las condiciones de elix3r y configura Hugging Face. UD-Q2 y UD-Q4 generaron vídeos en L4 según registros; Q4_K_M no está probado. El encaje actual no está garantizado." : "LTX 2.5 no se ha probado en L4; usa Gemma 4 BF16 grande y puede ser rechazado por memoria.";
       if (!confirm(`Receta experimental: se comprobarán los recursos y se instalarán hasta ${m?.estimated_gb || "varios"} GiB de pesos más entorno. Se requieren licencias LTX y Gemma. ${notice} ¿Continuar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
@@ -3567,7 +3577,7 @@
       if (voice_mode === "voice_reference" && mid !== GGUF_MODEL_ID && !image_rel) return showInputError("MSR LTX 2.5 necesita Imagen a Vídeo y una imagen de referencia.");
       if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
       const m = state.catalog.find(x => x.id === mid);
-      const warning = mid === FP8_COMFY_ID ? "FP8 preconvertido de Comfy + Gemma Q5; sin prueba GPU/L4. Pueden agotarse RAM/VRAM y se requiere acceso a elix3r. Prueba primero 2 segundos; no garantiza calidad ni voz." : mid === GGUF_MODEL_ID ? "Se probaron 20 s en L4 a 512×320 con caché." : GGUF_GEMMA_Q5_IDS.has(mid) ? "UD-Q2 + Gemma Q5 generó vídeo en una L4 según un usuario; las variantes Q4 no están probadas. Una pasada sin upscale; puede fallar por memoria. Requiere acceso a elix3r." : "LTX 2.5 no está probado en GPU ni en L4; usa una pasada sin upscale y Gemma 4 BF16, puede ser rechazado o fallar por memoria.";
+      const warning = mid === NVFP4_COMFY_ID ? "NVFP4 DDB comunitario + Gemma Q5: sin prueba de generación en Studio/L4; L4 no tiene aceleración FP4 nativa. Puede fallar o superar el presupuesto. Empieza por 2 segundos." : mid === FP8_COMFY_ID ? "FP8 preconvertido de Comfy + Gemma Q5; sin prueba GPU/L4. Pueden agotarse RAM/VRAM y se requiere acceso a elix3r. Prueba primero 2 segundos; no garantiza calidad ni voz." : mid === GGUF_MODEL_ID ? "Se probaron 20 s en L4 a 512×320 con caché." : GGUF_GEMMA_Q5_IDS.has(mid) ? "UD-Q2 y UD-Q4 + Gemma Q5 generaron vídeos en L4 según registros; Q4_K_M no está probado. Una pasada sin upscale; puede fallar por memoria. Requiere acceso a elix3r." : "LTX 2.5 no está probado en GPU ni en L4; usa una pasada sin upscale y Gemma 4 BF16, puede ser rechazado o fallar por memoria.";
       if (!confirm(`Receta experimental: 8 pasos y CFG 1 fijos. ${warning} ${voice_mode !== "none" ? "Modo de voz sin prueba GPU: puede fallar por memoria o compatibilidad; audio solo autorizado. " : ""}${voice_mode === "voice_reference" ? (mid === GGUF_MODEL_ID ? "Se descarga ID-LoRA TalkVid (~1,1 GiB). " : "Se descarga MSR V2 (~2,1 GiB), sin prueba GPU/GGUF. ") : ""}Se descargarán hasta ${m?.estimated_gb || "varios"} GiB si faltan. ¿Generar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;

@@ -68,6 +68,8 @@ def test_gguf_real_api_route_with_synthetic_av(temp_studio_env, monkeypatch):
     monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: None)
     capacity_calls = []
     monkeypatch.setattr(b.memory_manager, 'ensure_capacity', lambda **kwargs: capacity_calls.append(kwargs))
+    released = []
+    monkeypatch.setattr(b.memory_manager, 'unload_slot', lambda slot: released.append(slot))
     monkeypatch.setattr(b, '_install', lambda *_: None)
     monkeypatch.setattr(b, '_probe_runtime', lambda *_: None)
     monkeypatch.setattr(b, '_prepare_models', lambda *_: None)
@@ -92,6 +94,7 @@ def test_gguf_real_api_route_with_synthetic_av(temp_studio_env, monkeypatch):
                              duration_sec=20, fps=24, width=512, height=320, speech_language='es', image_strength=.7)
     info = probe_media_info(root / result['rel_path'])
     assert info['has_video'] and info['has_audio'] and result['audio_native'] is True and len(seen) == 1
+    assert released == ['video']
     assert seen[0]['8']['inputs']['length'] == 481 and seen[0]['9']['inputs']['frames_number'] == 481
     assert seen[0]['22']['inputs']['strength'] == .7
     assert 'spoken dialogue is in Spanish' in seen[0]['5']['inputs']['text']
@@ -1203,3 +1206,100 @@ def test_ltx25_fp8_cold_admission_and_runtime(temp_studio_env, monkeypatch, tmp_
     assert ('capacity',46,18.5) in calls
     assert any(c[0] == 'probe' and {'UNETLoader','CLIPLoaderGGUF'} <= c[1] and c[2] == b.Q5_RUNTIME for c in calls)
     assert any(c[0] == 'command' and 'studio.engines.ltx_gguf_download' in c[1] and b.FP8_Q5_ID in c[1] for c in calls)
+
+
+def test_nvfp4_manifest_graph_catalog_api(temp_studio_env, monkeypatch):
+    import time
+    from studio.engines import ltx25_gguf as b
+    client, _ = temp_studio_env
+    files = b.files_for(b.NVFP4_Q5_ID)
+    assert files[0] == ('dit', 'DmitryDB/LTX-2.5-ComfyUI-Quants', 'b62c28c40ab99ee9c9162cd8c12125836486ee84', 'diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors', 13572563959, 'a7362a59f295a73fd79cdf16bd9120a7f1d47e69fc3de4dcd9662a4f8413e91e')
+    assert files[1:] == b.files_for(b.Q5_ID)[1:]
+    names = {'dit':'nvfp4.safetensors','text_encoder':'gemma.gguf','video_vae':'v.safetensors','audio_vae':'a.safetensors'}
+    graph = b.make_graph25(prompt='hello', negative_prompt='', width=512, height=320, frames=49, fps=24, seed=1, image_name=None, names=names)
+    assert graph['1']['class_type'] == 'UNETLoader' and graph['1']['inputs']['weight_dtype'] == 'default'
+    assert graph['2']['class_type'] == 'CLIPLoaderGGUF'
+    entries = {m['id']:m for m in client.get('/api/catalog').json()['models']}
+    entry = entries[b.NVFP4_Q5_ID]
+    assert 'NVFP4 Comfy DDB' in entry['name'] and not entry['compatibility']['compatible']
+    assert entry['memory_estimate']['ram_gb'] == 40 and entry['memory_estimate']['vram_gb'] == 18
+    calls=[]
+    monkeypatch.setattr(b, 'prepare', lambda model_id, *, job: calls.append(('prepare', model_id)))
+    monkeypatch.setattr(b, 'generate', lambda **kw: calls.append(('generate', kw['model_id'])) or {})
+    assert client.post('/api/video/ltx-gguf/prepare', params={'model_id':b.NVFP4_Q5_ID}).status_code == 200
+    assert client.post('/api/video/ltx-gguf', json={'model_id':b.NVFP4_Q5_ID,'prompt':'Hola'}).status_code == 200
+    for _ in range(50):
+        if len(calls) == 2: break
+        time.sleep(.02)
+    assert ('prepare', b.NVFP4_Q5_ID) in calls and ('generate', b.NVFP4_Q5_ID) in calls
+    assert all('memory_estimate' in m for m in entries.values())
+    assert entries['ltx-2.3-distilled-gguf-q4-experimental']['memory_estimate']['ram_gb'] == 32
+    candidate = next(m for m in entries.values() if m.get('validation_state') == 'candidate' and m.get('min_ram_gb') is None)
+    assert candidate['memory_estimate']['ram_gb'] is None
+
+
+@pytest.mark.parametrize('variant', ['Q5_ID', 'UDQ4_Q5_ID', 'FP8_Q5_ID', 'NVFP4_Q5_ID'])
+def test_ltx25_two_generations_release_worker_and_keep_outputs(temp_studio_env, colab_memory, monkeypatch, tmp_path, variant):
+    from types import SimpleNamespace
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord
+    from studio.memory_manager import memory_manager
+    client, root = temp_studio_env
+    colab_memory()
+    monkeypatch.setattr(b, 'VIDEOS_OUT_DIR', tmp_path/'videos')
+    mid = getattr(b, variant)
+    names = {'dit':'x.safetensors' if variant in ('FP8_Q5_ID','NVFP4_Q5_ID') else 'x.gguf', 'text_encoder':'g.gguf','video_vae':'v.safetensors','audio_vae':'a.safetensors'}
+    original_disk = tmp_path/'weights'; original_disk.write_bytes(b'weights still on disk')
+    sessions = []
+    monkeypatch.setattr(b, '_prepare', lambda *args, **kwargs: names)
+    def open_worker(job, passed_names, model_id, *args):
+        assert memory_manager.get_slot('video') is None
+        n = len(sessions)
+        inp, out = tmp_path/f'in{n}', tmp_path/f'out{n}'
+        inp.mkdir(); out.mkdir()
+        worker = SimpleNamespace(input_dir=inp, output_dir=out, unload=lambda: sessions[n].update(stopped=True))
+        sessions.append({'worker':worker, 'stopped':False})
+        memory_manager.register_loaded('video', model_id, 'worker', worker)
+        return worker
+    monkeypatch.setattr(b.common, '_open_resident', open_worker)
+    def infer(graph, inp, out, job, model_id):
+        assert not sessions[-1]['stopped']
+        result = out/'result.mp4'; result.write_bytes(b'video')
+        return result
+    monkeypatch.setattr(b.common, '_infer', infer)
+    monkeypatch.setattr(b, 'probe_media_info', lambda path: {'has_video':True,'has_audio':True,'duration_seconds':49/24,'width':512,'height':320})
+    results=[]
+    for seed in [111, 112]:
+        results.append(b.generate(model_id=mid, image_path=None, prompt='test', negative_prompt='', seed=seed, job=JobRecord('video','test'), width=512,height=320,duration_sec=2,fps=24,speech_language='auto',image_strength=1))
+        assert memory_manager.get_slot('video') is None and sessions[-1]['stopped']
+    assert len(sessions) == 2 and sessions[0]['worker'] is not sessions[1]['worker']
+    assert original_disk.read_bytes() == b'weights still on disk'
+    assert all((b.VIDEOS_OUT_DIR / result['filename']).read_bytes() == b'video' for result in results)
+    assert all((b.VIDEOS_OUT_DIR / result['filename']).with_suffix('.json').is_file() for result in results)
+
+
+@pytest.mark.parametrize('variant', ['UDQ4_Q5_ID', 'NVFP4_Q5_ID'])
+def test_ltx25_cold_restart_reuses_verified_disk_without_download(temp_studio_env, monkeypatch, tmp_path, variant):
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord
+    from studio.engines import video_engine
+    mid = getattr(b, variant)
+    monkeypatch.setattr(b, 'Q5_RUNTIME', tmp_path/'runtime')
+    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True,'bf16_supported':True,'vram_total_gb':22})
+    monkeypatch.setattr(b.common, '_resident', lambda *_: None)
+    monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: None)
+    monkeypatch.setattr(b.memory_manager, 'ensure_capacity', lambda **kwargs: None)
+    monkeypatch.setattr(video_engine, '_check_video_total_capacity', lambda *args: None)
+    monkeypatch.setattr(b, '_check_q5_access', lambda *_: None)
+    monkeypatch.setattr(b.common, '_install', lambda *args: None)
+    monkeypatch.setattr(b.common, '_probe_runtime', lambda *args: None)
+    monkeypatch.setattr(b.shutil, 'disk_usage', lambda *_: type('Disk', (), {'free':100*1024**3})())
+    monkeypatch.setattr(b, '_fingerprint', lambda _: ('stable',))
+    monkeypatch.setitem(b._verified, mid, ('stable',))
+    monkeypatch.setattr(b, '_links', lambda _: {'dit':'existing'})
+    commands=[]
+    monkeypatch.setattr(b.common, '_command', lambda cmd, *a, **kw: commands.append(cmd))
+    for _ in range(2): assert b._prepare(mid, JobRecord('video','test')) == {'dit':'existing'}
+    assert not any('studio.engines.ltx_gguf_download' in cmd for cmd in commands)
+    if variant == 'NVFP4_Q5_ID':
+        assert sum(any('NVFP4_RUNTIME_UNAVAILABLE' in part for part in cmd) for cmd in commands) == 2

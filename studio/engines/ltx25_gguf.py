@@ -28,9 +28,12 @@ Q5_ID = 'ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental'
 Q4_Q5_ID = 'ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental'
 UDQ4_Q5_ID = 'ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental'
 FP8_Q5_ID = 'ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental'
+NVFP4_Q5_ID = 'ltx-2.5-distilled-comfy-nvfp4-gemma-q5-experimental'
+NVFP4_REPO = 'DmitryDB/LTX-2.5-ComfyUI-Quants'
+NVFP4_REV = 'b62c28c40ab99ee9c9162cd8c12125836486ee84'
 FP8_REPO = 'guillaume127/LTX-2.5-FP8'
 FP8_REV = 'd0a8ff418087caac5288901c72726ff2ac70e199'
-Q5_IDS = {Q5_ID, Q4_Q5_ID, UDQ4_Q5_ID, FP8_Q5_ID}
+Q5_IDS = {Q5_ID, Q4_Q5_ID, UDQ4_Q5_ID, FP8_Q5_ID, NVFP4_Q5_ID}
 Q5_RUNTIME = DATA_ROOT / 'runtimes' / 'ltx25-gemma4-gguf'
 Q5_COMFY_COMMIT = '2f35f4a08176d993cded35dac3332be4f7287f41'
 Q5_ENCODER = ('text_encoder', 'elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF',
@@ -43,6 +46,7 @@ MODELS = {
     UDQ4_Q5_ID: ('UD-Q4_K_XL + Gemma 4 GGUF Q5_K_M', 'distilled/ltx-2.5-22b-distilled-UD-Q4_K_XL.gguf', 14000234880, '55442750eb0013d94fffaa4dadb577c5f4dc07107ec04389d41444f6e517d980'),
     'ltx-2.5-distilled-gguf-ud-q4-experimental': ('UD-Q4_K_XL', 'distilled/ltx-2.5-22b-distilled-UD-Q4_K_XL.gguf', 14000234880, '55442750eb0013d94fffaa4dadb577c5f4dc07107ec04389d41444f6e517d980'),
     FP8_Q5_ID: ('FP8 Comfy + Gemma 4 GGUF Q5_K_M', 'ltx-2.5-22b-distilled-transformer-fp8_e4m3fn.safetensors', 23485111216, '140f02b01dbf7000f1aae7a5e2903a2ae184be2970c1d9dff675d39aebbd47f3'),
+    NVFP4_Q5_ID: ('NVFP4 Comfy DDB + Gemma 4 GGUF Q5_K_M', 'diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors', 13572563959, 'a7362a59f295a73fd79cdf16bd9120a7f1d47e69fc3de4dcd9662a4f8413e91e'),
 }
 COMMON = (
     ('text_encoder', REPO, REV, 'text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors', 26263858182, 'ef7243612fdae7a75cb4d5cee9433e81380675fb6c213bd98ae74a9cd16561d1'),
@@ -57,8 +61,23 @@ def files_for(model_id: str) -> tuple:
         raise ValueError('GGUF_MODEL_UNSUPPORTED: modelo LTX 2.5 desconocido')
     _, filename, size, sha = MODELS[model_id]
     components = (Q5_ENCODER, *COMMON[1:]) if model_id in Q5_IDS else COMMON
-    source, revision = (FP8_REPO, FP8_REV) if model_id == FP8_Q5_ID else (REPO, REV)
+    source, revision = ((FP8_REPO, FP8_REV) if model_id == FP8_Q5_ID else
+                        (NVFP4_REPO, NVFP4_REV) if model_id == NVFP4_Q5_ID else (REPO, REV))
     return (('dit', source, revision, filename, size, sha), *components)
+
+
+def base_memory_budget(model_id: str) -> tuple[float, float]:
+    """Preventive estimates for 512×320 / 49 frames, not measured peaks."""
+    files_for(model_id)  # validate the allowlist
+    if model_id == FP8_Q5_ID:
+        return 44, 18
+    if model_id == NVFP4_Q5_ID:
+        return 40, 18
+    if model_id in {Q4_Q5_ID, UDQ4_Q5_ID}:
+        return 35, 16
+    if model_id == Q5_ID:
+        return 32, 14
+    return 45, 16
 
 
 def path_for(item) -> Path:
@@ -141,12 +160,13 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         job.log('Reutilizando motor LTX 2.5 y caché; Comfy puede mover o liberar pesos bajo presión.')
         return session.names
     q5 = model_id in Q5_IDS
-    if model_id == FP8_Q5_ID:
+    base_ram, base_vram = base_memory_budget(model_id)
+    if model_id in {FP8_Q5_ID, NVFP4_Q5_ID}:
         # Reject impossible totals before evicting the working video cache.
         from studio.engines.video_engine import _check_video_total_capacity
-        _check_video_total_capacity({'id': model_id, 'name': 'LTX 2.5 FP8 Comfy',
-                                     'engine': 'ltx_gguf', 'min_ram_gb': 44 + extra_ram,
-                                     'min_vram_gb': 18 + extra_vram}, [])
+        _check_video_total_capacity({'id': model_id, 'name': 'LTX 2.5 cuantizado Comfy',
+                                     'engine': 'ltx_gguf', 'min_ram_gb': base_ram + extra_ram,
+                                     'min_vram_gb': base_vram + extra_vram}, [])
     # Do not evict the currently working model or install a runtime when the
     # gated encoder cannot be accessed. Offline reuse is still possible if the
     # encoder and previously stamped plugin are already on disk.
@@ -160,8 +180,8 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
     runtime = Q5_RUNTIME if q5 else common.ROOT
     # The 26.3 GB BF16 Gemma 4 encoder is not the quantized Gemma 3 of LTX 2.3.
     # This conservative budget is not a measured peak and can reject an L4.
-    memory_manager.ensure_capacity(ram_gb=(44 if model_id == FP8_Q5_ID else 35 if model_id in {Q4_Q5_ID, UDQ4_Q5_ID} else 32 if q5 else 45) + extra_ram,
-                                   vram_gb=(18 if model_id == FP8_Q5_ID else 16 if model_id in {Q4_Q5_ID, UDQ4_Q5_ID} else 14 if q5 else 16) + extra_vram,
+    memory_manager.ensure_capacity(ram_gb=base_ram + extra_ram,
+                                   vram_gb=base_vram + extra_vram,
                                    stage='LTX 2.5 (estimación preventiva, no medida)', job=job)
     runtime.mkdir(parents=True, exist_ok=True)
     missing = sum(x[4] for x in files if not path_for(x).is_file() or path_for(x).stat().st_size != x[4])
@@ -172,6 +192,8 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         job.log('Variante Gemma 4 GGUF Q5: runtime aislado y estimaciones de memoria no medidas; requiere acceso al repositorio elix3r.')
         if model_id == FP8_Q5_ID:
             job.log('Transformer FP8 Comfy preconvertido: estimación preventiva 44 GiB RAM y 18 GiB VRAM más reservas; compatibilidad y picos en L4 no probados. Comfy puede usar memoria de CPU.')
+        if model_id == NVFP4_Q5_ID:
+            job.log('NVFP4 DDB Comfy: estimación preventiva no medida 40 GiB RAM y 18 GiB VRAM más reservas. En L4 falta aceleración nativa FP4; ruta de respaldo y compatibilidad no probadas en Studio.')
         common._install(job, runtime, Q5_COMFY_COMMIT)
         from studio.catalog import catalog_manager
         env = os.environ.copy()
@@ -183,7 +205,14 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         common._command([sys.executable, '-m', 'studio.engines.ltx25_gguf_patch',
                          str(runtime / 'comfy' / 'custom_nodes' / 'ComfyUI-GGUF'), str(runtime / 'gemma4-patch.json')],
                         job, env=env, cwd=repo, stage='Verificando acceso y parche Gemma 4 GGUF', timeout=600)
-        common._probe_runtime(job, {'CLIPLoaderGGUF', 'LTXVDualCFGGuider', 'VAEDecodeTiled'} | ({'UNETLoader'} if model_id == FP8_Q5_ID else set()), runtime)
+        common._probe_runtime(job, {'CLIPLoaderGGUF', 'LTXVDualCFGGuider', 'VAEDecodeTiled'} | ({'UNETLoader'} if model_id in {FP8_Q5_ID, NVFP4_Q5_ID} else set()), runtime)
+        if model_id == NVFP4_Q5_ID:
+            # A loader node can exist even when Comfy's quantization package did
+            # not import. Check that before downloading this 12.6 GiB artifact.
+            check = "import comfy.quant_ops as q; assert q._CK_AVAILABLE and 'nvfp4' in q.QUANT_ALGOS, 'NVFP4_RUNTIME_UNAVAILABLE: falta soporte comfy-kitchen NVFP4'"
+            common._command([str(runtime / 'venv/bin/python'), '-c', check], job,
+                            env=common._runtime_env(), cwd=str(runtime / 'comfy'),
+                            stage='Comprobando soporte NVFP4 del runtime (sin probar inferencia)', timeout=90)
     else:
         common._install(job)
         common._probe_runtime(job, {'CLIPLoader', 'LTXVDualCFGGuider', 'VAEDecodeTiled'})
@@ -260,7 +289,7 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
     # Validate the graph before any download; the file names below are placeholders only.
     make_graph25(prompt=effective, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
                  seed=seed, image_name='input.png' if image_path else None, image_strength=image_strength,
-                 names={'dit':'x.safetensors' if model_id == FP8_Q5_ID else 'x.gguf','text_encoder':'x.gguf' if model_id in Q5_IDS else 'x.safetensors','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
+                 names={'dit':'x.safetensors' if model_id in {FP8_Q5_ID, NVFP4_Q5_ID} else 'x.gguf','text_encoder':'x.gguf' if model_id in Q5_IDS else 'x.safetensors','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
     scale = width * height * frames / (512 * 320 * 49)
     extra_ram, extra_vram = max(0, scale - 1) * 2, max(0, scale - 1) * .5
     if voice_mode == 'audio':
@@ -277,23 +306,19 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
         runtime = Q5_RUNTIME if model_id in Q5_IDS else common.ROOT
         if prepare_msr(job, runtime=runtime, weights=WEIGHTS, model_id=model_id):
             names = _prepare(model_id, job, extra_ram=extra_ram, extra_vram=extra_vram)
+    VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    seed = int(seed) if seed else int.from_bytes(os.urandom(4), 'big')
+    job.log(f'LTX 2.5: {width}×{height}, {frames} fotogramas a {fps} fps (~{frames/fps:.2f} s), una pasada, 8 pasos.')
+    suffix, generated, image_name, audio_name = uuid.uuid4().hex, None, None, None
     session = (common._open_resident(job, names, model_id, Q5_RUNTIME) if model_id in Q5_IDS
                else common._open_resident(job, names, model_id))
-    if voice_mode == 'voice_reference':
-        try:
+    try:
+        if voice_mode == 'voice_reference':
             response = common.requests.get(session.base + '/object_info', timeout=20)
             response.raise_for_status()
             missing = {'StudioStrictMSRLoader', 'ComfyUILTX25MSRMultiReferenceGuide', 'LTXVCropGuides'} - set(response.json())
             if missing:
                 raise RuntimeError('MSR_RUNTIME_MISSING_NODES: ' + ', '.join(sorted(missing)))
-        except Exception:
-            memory_manager.unload_slot('video')
-            raise
-    VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
-    seed = int(seed) if seed else int.from_bytes(os.urandom(4), 'big')
-    job.log(f'LTX 2.5: {width}×{height}, {frames} fotogramas a {fps} fps (~{frames/fps:.2f} s), una pasada, 8 pasos.')
-    suffix, generated, image_name, audio_name = uuid.uuid4().hex, None, None, None
-    try:
         if image_path:
             from PIL import Image
             image_name = f'frame_{suffix}.png'
@@ -329,16 +354,17 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
         if dest.exists():
             raise RuntimeError('GGUF_OUTPUT_COLLISION: no se sobrescribirá el vídeo')
         shutil.copyfile(generated, dest)
-    except BaseException:
-        memory_manager.unload_slot('video')
-        raise
     finally:
-        if image_name:
-            (session.input_dir / image_name).unlink(missing_ok=True)
-        if audio_name:
-            (session.input_dir / audio_name).unlink(missing_ok=True)
-        if generated:
-            generated.unlink(missing_ok=True)
+        try:
+            if image_name:
+                (session.input_dir / image_name).unlink(missing_ok=True)
+            if audio_name:
+                (session.input_dir / audio_name).unlink(missing_ok=True)
+            if generated:
+                generated.unlink(missing_ok=True)
+        finally:
+            memory_manager.unload_slot('video')
+            job.log('Motor Comfy liberado tras la generación; los archivos descargados permanecen en disco.')
     meta = {'id': dest.stem, 'filename': name, 'rel_path': f'outputs/videos/{name}', 'media_url': f'/media/outputs/videos/{name}',
             'type': 'video', 'model_id': model_id, 'model_name': f'LTX 2.5 destilado {MODELS[model_id][0]} experimental',
             'video_submode': 'i2v' if image_path else 't2v', 'audio_native': True, 'prompt': prompt, 'effective_prompt': effective,

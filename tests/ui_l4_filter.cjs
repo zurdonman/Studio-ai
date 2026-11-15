@@ -4,7 +4,7 @@ const {JSDOM, VirtualConsole} = require("jsdom");
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
 const model = (id, fit, extra = {}) => ({
   id, name: id, category: "video", engine: "wan_t2v", video_modes: ["t2v", "i2v"],
-  estimated_gb: 2, default_steps: 25, default_cfg: 3, default_fps: 24, default_duration_sec: 5,
+  estimated_gb: 2, memory_estimate: {ram_gb: 32, vram_gb: 16, scope: "base_recipe"}, default_steps: 25, default_cfg: 3, default_fps: 24, default_duration_sec: 5,
   official_spec: {landscape: [640, 384], portrait: [384, 640], default_steps: 25, default_cfg: 3, default_fps: 24, default_duration_sec: 5},
   compatibility: {compatible: fit, label: fit ? "estimado" : "no apto", tier: fit ? "normal" : "incompatible"}, ...extra
 });
@@ -35,7 +35,7 @@ const model = (id, fit, extra = {}) => ({
                        model("ltx-2.3-distilled-gguf-q4-experimental", false, {name:"LTX 2.3 GGUF Q4", engine:"ltx_gguf", ltx_distilled:true, execution_validation:{status:"observed",label:"✅ Generación I2V probada en L4",scope:"20 s con caché; no garantiza esta sesión"}}),
                        model("ltx-2.5-distilled-gguf-ud-q2-experimental", false, {name:"LTX 2.5 GGUF UD-Q2", engine:"ltx_gguf", ltx_distilled:true}),
                        model("ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", false, {name:"LTX 2.5 UD-Q2 + Gemma 4 GGUF Q5", engine:"ltx_gguf", ltx_distilled:true}),
-                       ...["ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental", "ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental"].map(id => model(id, false, {engine:"ltx_gguf", ltx_distilled:true}))],
+                       ...["ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental", "ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental", "ltx-2.5-distilled-comfy-nvfp4-gemma-q5-experimental"].map(id => model(id, false, {engine:"ltx_gguf", ltx_distilled:true}))],
               active_gpu_profile:{id:profile,short:profile}, loaded_slots:[]};
     } else if (u.pathname === "/api/catalog/hf-search") {
       const compatOnly = u.searchParams.get("only_compatible") === "true";
@@ -62,6 +62,8 @@ const model = (id, fit, extra = {}) => ({
   w.document.querySelector('[data-tab="tab-catalog"]').click();
   await wait(50);
   if (!$("hf-live-results").textContent.includes("heavy")) throw Error("Initial discovery results missing");
+  if (!$("catalog-grid").textContent.includes("RAM ~32 GiB · VRAM ~16 GiB")) throw Error("Catalog RAM/VRAM estimate missing");
+  if (!$("catalog-grid").textContent.includes("ltx-2.5-distilled-comfy-nvfp4-gemma-q5-experimental")) throw Error("NVFP4 missing from catalogue");
   $("select-video-model").value = "heavy";
   $("vid-steps").value = "8";
   pill("L4").click();
@@ -92,7 +94,7 @@ const model = (id, fit, extra = {}) => ({
   await wait(20);
   if (requests.some(r => r.method === "POST" && ["/api/memory/load", "/api/video/generate"].includes(r.path))) throw Error("Empty selection submitted a default model");
   $("chk-vid-only-compat").click();
-  if (ids().length !== 9) throw Error("Unchecking filter did not restore catalogue including GGUF");
+  if (ids().length !== 10) throw Error("Unchecking filter did not restore catalogue including GGUF");
   const ggufId = "ltx-2.3-distilled-gguf-q4-experimental";
   const card = w.document.querySelector(`[data-vmid="${ggufId}"]`);
   if (!card) throw Error("GGUF card missing");
@@ -177,7 +179,7 @@ const model = (id, fit, extra = {}) => ({
   await wait(20);
   const q5request = requests.filter(r => r.path === "/api/video/ltx-gguf" && r.method === "POST").at(-1);
   if (!q5request || JSON.parse(q5request.body).model_id !== q5) throw Error("Gemma Q5 did not use GGUF API");
-  for (const id of ["ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental", "ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental"]) {
+  for (const id of ["ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental", "ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental", "ltx-2.5-distilled-comfy-nvfp4-gemma-q5-experimental"]) {
     const card = w.document.querySelector(`[data-vmid="${id}"]`);
     if (!card) throw Error(`Missing Q4 variant ${id}`);
     card.click();

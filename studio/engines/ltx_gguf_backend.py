@@ -2,7 +2,7 @@
 
 I2V with real weights was observed on an L4 at 512×320, including 10 s and
 20 s with a resident cache. Guardrails do not measure peak memory or guarantee
-other configurations. The private child process can remain resident between jobs.
+other configurations. The private child process is stopped after each generation.
 """
 from __future__ import annotations
 
@@ -384,7 +384,7 @@ def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any, model_id: s
         if not reply.ok:
             raise RuntimeError(f"GGUF_GRAPH_REJECTED: {reply.text[:1200]}")
         ident = reply.json()["prompt_id"]
-        job.log("Grafo aceptado. Comfy conserva su caché mientras haya memoria suficiente.", progress=40, step="Cargando componentes GGUF")
+        job.log("Grafo aceptado. Comfy gestiona la carga y descarga durante esta generación; al terminar se liberará el motor.", progress=40, step="Cargando componentes LTX")
         deadline = time.monotonic() + 3600
         current_node = None
         names = {"1":"transformer", "2":"codificador de texto", "3":"VAE vídeo", "4":"VAE audio",
@@ -631,7 +631,6 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
         memory_manager.ensure_capacity(ram_gb=32 + extra_ram, vram_gb=14 + extra_vram, stage="Inicio GGUF: carga y parámetros solicitados (estimación no medida)", job=job)
     else:
         memory_manager.ensure_capacity(ram_gb=extra_ram, vram_gb=extra_vram, stage="GGUF residente: margen adicional por parámetros (estimación no medida)", job=job)
-    session = _open_resident(job, names)
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     seed = int(seed) if seed else int.from_bytes(os.urandom(4), "big")
     job.log(f"GGUF: {width}×{height}, {frames} fotogramas a {fps} fps (~{frames / fps:.2f} s), 8 pasos fijos. La duración se ajusta a 8n+1.")
@@ -639,6 +638,7 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
     image_name = None
     audio_name = None
     generated = None
+    session = _open_resident(job, names)
     try:
         if image_path is not None:
             image_name = f"frame_{suffix}.png"
@@ -673,17 +673,17 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
         if dest.exists():
             raise RuntimeError("GGUF_OUTPUT_COLLISION: no se sobrescribirá el vídeo existente")
         shutil.copyfile(generated, dest)
-    except BaseException:
-        # An interrupt or failed graph may leave Comfy executing or its cache inconsistent.
-        memory_manager.unload_slot("video")
-        raise
     finally:
-        if image_name:
-            (session.input_dir / image_name).unlink(missing_ok=True)
-        if audio_name:
-            (session.input_dir / audio_name).unlink(missing_ok=True)
-        if generated:
-            generated.unlink(missing_ok=True)
+        try:
+            if image_name:
+                (session.input_dir / image_name).unlink(missing_ok=True)
+            if audio_name:
+                (session.input_dir / audio_name).unlink(missing_ok=True)
+            if generated:
+                generated.unlink(missing_ok=True)
+        finally:
+            memory_manager.unload_slot("video")
+            job.log("Motor Comfy liberado tras la generación; los archivos descargados permanecen en disco.")
     meta = {"id": dest.stem, "filename": name, "rel_path": f"outputs/videos/{name}", "media_url": f"/media/outputs/videos/{name}",
             "type": "video", "model_id": MODEL_ID, "model_name": "LTX 2.3 destilado GGUF Q4 experimental",
             "video_submode": "i2v" if image_path else "t2v", "audio_native": True, "prompt": prompt, "seed": seed,
