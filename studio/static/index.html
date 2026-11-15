@@ -434,10 +434,12 @@
           <div class="ltx-gguf-callout" id="ltx-gguf-panel" aria-label="LTX 2.3 GGUF Q4 experimental">
             <div class="ltx-gguf-copy">
               <strong>✅ LTX 2.3 GGUF Q4 · generación I2V probada en L4</strong>
+              <div class="row-gap"><button type="button" class="btn btn-secondary btn-sm" id="btn-use-tested-ltx">Seleccionar LTX 2.3 GGUF Q4</button></div>
               <p>Elígelo en la lista de modelos de Vídeo. Si no aparece, desmarca «Mostrar solo modelos con encaje estimado»: la prueba en L4 no evalúa los recursos disponibles de esta sesión. Usa «Preparar» para instalar y descargar; luego «Generar Clip».</p>
               <p class="muted">Usa duración (1–20 s experimental), fps, ancho y alto (múltiplos de 32; área máxima 768×512), prompt, prompt negativo, semilla e imagen inicial opcional. Duración aproximada por fotogramas 8n+1. Fijos: 8 pasos y CFG 1. No admite fotograma final ni LoRA facial; LTX 2.3 ofrece modos experimentales de audio completo o referencia de voz más abajo. En L4 se probaron 10 y 20 s a 512×320 (20 s con caché). Otras condiciones pueden consumir más memoria, ser rechazadas o fallar.</p>
-              <p class="muted">LTX 2.5 GGUF UD-Q2 y UD-Q4 son recetas nuevas, aún sin prueba GPU/L4: una pasada, VAE conv, sin upscale, con Gemma 4 BF16 (~24,5 GiB solo el codificador); pueden superar la memoria. No ofrecen voz de referencia.</p>
-              <p class="muted">También disponible: LTX 2.5 UD-Q2 + Gemma 4 GGUF Q5 (~19,4 GiB de pesos). Experimental y sin prueba L4; requiere aceptar las condiciones del repositorio elix3r y acceso Hugging Face en Studio. No incluye voz de referencia.</p>
+              <p class="muted">LTX 2.5 GGUF con Gemma 4 BF16 utiliza un codificador grande (~24,5 GiB); puede superar la memoria. El modo de referencia MSR y audio completo son experimentales, sin prueba de inferencia GPU.</p>
+              <p class="muted">LTX 2.5 GGUF con Gemma 4 Q5 es una receta diferente al modelo FP8. Para descargarla: <a href="https://huggingface.co/elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF" target="_blank" rel="noopener noreferrer">acepta las condiciones de elix3r en Hugging Face</a> y activa en Studio un token de lectura de esa cuenta. Algunas generaciones UD-Q4 + Q5 se completaron en L4; eso no garantiza su calidad ni encaje en esta sesión.</p>
+              <p class="muted">LTX 2.5 FP8 en memoria es otro modelo: exige un presupuesto preventivo de 72 GiB de RAM más reserva. Si esta sesión solo tiene 53 GiB de RAM, no podrá cargarse con esta política. No se relajan las guardias.</p>
               <p class="muted">LTX 2.3 descarga ~24 GiB más dependencias; se requieren licencias LTX y Gemma. El motor reutiliza la caché mientras haya memoria, y «Sacar de RAM/VRAM» lo libera. Las voces constantes no están garantizadas.</p>
               <p id="ltx-gguf-error" role="alert" hidden></p>
             </div>
@@ -1690,11 +1692,11 @@
   <div class="modal-backdrop" id="hf-token-modal" hidden>
     <div class="modal-box">
       <div class="card-header">
-        <h3>🔑 Token de Hugging Face (100% Opcional)</h3>
+        <h3>🔑 Acceso a Hugging Face</h3>
         <button class="link-btn" id="btn-close-hf-token">✕ Cerrar</button>
       </div>
       <p class="muted">
-        El buscador y los modelos públicos funcionan <strong>sin token</strong>. Si añades un token gratuito de lectura (<code>hf_...</code>), eliminas límites de velocidad de descarga y desbloqueas modelos con licencia aceptada (como <em>LTX-2.5</em> o <em>FLUX.1-dev</em>).
+        Los modelos públicos pueden funcionar sin token. Para Gemma 4 GGUF Q5, inicia sesión y <a href="https://huggingface.co/elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF" target="_blank" rel="noopener noreferrer">acepta primero las condiciones del repositorio elix3r</a>. Después configura aquí un <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer">token de lectura de esa misma cuenta</a> con permisos para repositorios restringidos. No lo compartas en el chat. La aceptación o el permiso pueden requerir aprobación de Hugging Face.
       </p>
       <div class="form-stack">
         <div id="hf-token-status-box" class="provenance-box">

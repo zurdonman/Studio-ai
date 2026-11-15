@@ -3163,6 +3163,17 @@
       applyVideoModelDefaults(mid);
     });
 
+    $("btn-use-tested-ltx").addEventListener("click", () => {
+      if (state.catalogLoading) return toast("Espera a que termine la actualización del catálogo.", "error");
+      if (!state.catalog.some(m => m.id === GGUF_MODEL_ID && m.category === "video")) return toast("No se encuentra LTX 2.3 GGUF en el catálogo. Actualiza Studio y vuelve a intentarlo.", "error");
+      state.vidOnlyCompat = false;
+      syncGpuPillsUI();
+      populateVideoModelSelect();
+      $("select-video-model").value = GGUF_MODEL_ID;
+      $("select-video-model").dispatchEvent(new Event("change"));
+      toast("Seleccionado LTX 2.3 GGUF Q4. El filtro de encaje se ha desactivado; aún se comprobará la memoria al generar.", "success");
+    });
+
     $("btn-prepare-video").addEventListener("click", () => {
       const mid = $("select-video-model").value;
       if (!mid || state.catalogLoading) {

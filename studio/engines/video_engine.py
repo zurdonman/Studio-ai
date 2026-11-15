@@ -1865,6 +1865,29 @@ def _ltx_distilled_call_settings(pipe: Any, call_sig: Any) -> Dict[str, Any]:
     return settings
 
 
+def _check_video_total_capacity(definition: Dict[str, Any], adapters: List[Dict[str, Any]]) -> None:
+    """A total-capacity impossibility check; does not replace free-memory admission."""
+    from studio.memory_policy import MemoryAdmissionImpossible, model_budget, number
+    snapshot = memory_manager.sample()
+    gpu, ram = snapshot.get("gpu", {}), snapshot.get("ram", {})
+    reserve = snapshot.get("pressure", {}).get("reserve", {})
+    budget = model_budget(definition, has_gpu=bool(gpu.get("has_gpu")), adapters=adapters)
+    total_ram, total_vram = number(ram.get("total_gb")), number(gpu.get("vram_total_gb"))
+    ram_reserve, gpu_reserve = number(reserve.get("ram_gb")), number(reserve.get("vram_gb"))
+    need_ram, need_vram = budget["ram_gb"], budget["vram_gb"]
+    ram_impossible = all(x is not None for x in (total_ram, ram_reserve, need_ram)) and total_ram > 0 and total_ram < need_ram + ram_reserve
+    gpu_impossible = (bool(gpu.get("has_gpu")) and all(x is not None for x in (total_vram, gpu_reserve, need_vram))
+                      and total_vram > 0 and total_vram < need_vram + gpu_reserve)
+    if ram_impossible or gpu_impossible:
+        raise MemoryAdmissionImpossible(
+            f"MEMORY_BUDGET_EXCEEDS_TOTAL: {definition.get('name', definition.get('id'))}: "
+            f"RAM total {total_ram} GiB, presupuesto {need_ram} + reserva {ram_reserve}; "
+            f"VRAM total {total_vram} GiB, presupuesto {need_vram} + reserva {gpu_reserve}. "
+            "La receta supera la capacidad total estimada; no se ha descargado ni liberado el modelo activo. "
+            "Prueba una receta más ligera si está disponible."
+        )
+
+
 def _load_video_model_into_memory_locked(
     model_id: str = "wan22-ti2v-5b",
     auto_download: bool = False,
@@ -1943,6 +1966,15 @@ def _load_video_model_into_memory_locked(
     if not auto_download and not catalog_manager.is_downloaded(model_id):
         raise RuntimeError(f"«{defn['name']}» no está descargado. No se modifica la memoria ni el disco.")
 
+    # Reject impossible total-capacity requests before evicting a working
+    # video/image model. Free-memory admission still runs after eviction.
+    adapter_defs = []
+    for lid in dict.fromkeys(extra_lora_ids or []):
+        ld = catalog_manager.get_definition(lid)
+        if not ld or ld.get("category") != "lora" or ld.get("validation_state") == "candidate" or model_id not in ld.get("compatible_models", []):
+            raise ValueError(f"LoRA de vídeo sin base exacta compatible: {lid}")
+        adapter_defs.append(ld)
+    _check_video_total_capacity(defn, adapter_defs)
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     for prev_slot in ("video", "image", "vision"):
@@ -1959,12 +1991,6 @@ def _load_video_model_into_memory_locked(
 
     flush_ram_and_vram()
 
-    adapter_defs = []
-    for lid in dict.fromkeys(extra_lora_ids or []):
-        ld = catalog_manager.get_definition(lid)
-        if not ld or ld.get("category") != "lora" or ld.get("validation_state") == "candidate" or model_id not in ld.get("compatible_models", []):
-            raise ValueError(f"LoRA de vídeo sin base exacta compatible: {lid}")
-        adapter_defs.append(ld)
     memory_manager.prepare_for_load(defn, adapters=adapter_defs, job=job)
 
     if not catalog_manager.is_downloaded(model_id):

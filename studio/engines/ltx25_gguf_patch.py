@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, hf_hub_url, get_hf_file_metadata
 
 REPO = 'elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF'
 REV = '2a18e836d286eb0570ec9f013c3591eb8c614d57'
@@ -51,6 +51,19 @@ def _download_error(exc: Exception, token_supplied: bool) -> str:
             (f' HTTP: {status_text}.' if status_text else ''))
 
 
+def check_access() -> None:
+    """Check permission to the gated weights before touching another cache."""
+    token = os.environ.get('HF_TOKEN') or None
+    try:
+        url = hf_hub_url(repo_id=REPO, revision=REV,
+                         filename='gemma4-12b-with-proj-ltx-2.5-Q5_K_M.gguf')
+        get_hf_file_metadata(url, token=token, timeout=20)
+    except Exception as exc:
+        raise RuntimeError(_download_error(exc, bool(token)) +
+                           ' No se instalaron dependencias ni se descargaron los pesos.') from None
+    print('Acceso a Gemma 4 GGUF comprobado; aún no se han descargado los pesos.', flush=True)
+
+
 def run(plugin: Path, stamp: Path) -> None:
     try:
         patch = Path(hf_hub_download(repo_id=REPO, revision=REV,
@@ -89,7 +102,10 @@ def run(plugin: Path, stamp: Path) -> None:
 
 if __name__ == '__main__':
     try:
-        run(Path(sys.argv[1]), Path(sys.argv[2]))
+        if sys.argv[1:] == ["--check-access"]:
+            check_access()
+        else:
+            run(Path(sys.argv[1]), Path(sys.argv[2]))
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr, flush=True)
         sys.exit(1)

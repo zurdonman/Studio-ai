@@ -113,6 +113,18 @@ def _links(model_id: str) -> dict[str, str]:
     return names
 
 
+def _check_q5_access(job: Any) -> None:
+    from studio.catalog import catalog_manager
+    env = os.environ.copy()
+    token = catalog_manager.get_hf_token()
+    if token:
+        env['HF_TOKEN'] = token
+    repo = str(Path(__file__).resolve().parents[2])
+    env['PYTHONPATH'] = repo + os.pathsep + env.get('PYTHONPATH', '')
+    common._command([sys.executable, '-m', 'studio.engines.ltx25_gguf_patch', '--check-access'], job,
+                    env=env, cwd=repo, stage='Comprobando acceso a Gemma 4 antes de cambiar de modelo', timeout=90)
+
+
 def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float = 0) -> dict:
     files = files_for(model_id)  # allowlist before any side effect
     gpu = common.query_gpu_info()
@@ -123,11 +135,17 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         memory_manager.ensure_capacity(ram_gb=extra_ram, vram_gb=extra_vram, stage='LTX 2.5 residente: margen adicional estimado', job=job)
         job.log('Reutilizando motor LTX 2.5 y caché; Comfy puede mover o liberar pesos bajo presión.')
         return session.names
+    q5 = model_id in Q5_IDS
+    # Do not evict the currently working model or install a runtime when the
+    # gated encoder cannot be accessed. Offline reuse is still possible if the
+    # encoder and previously stamped plugin are already on disk.
+    if q5 and not (path_for(Q5_ENCODER).is_file() and path_for(Q5_ENCODER).stat().st_size == Q5_ENCODER[4]
+                   and (Q5_RUNTIME / 'gemma4-patch.json').is_file()):
+        _check_q5_access(job)
     if memory_manager.get_slot('video'):
         job.log('Liberando el modelo de vídeo anterior para cambiar de receta; archivos intactos.')
         memory_manager.unload_slot('video')
     # Budgets are preventive estimates, not measured peaks for either variant.
-    q5 = model_id in Q5_IDS
     runtime = Q5_RUNTIME if q5 else common.ROOT
     # The 26.3 GB BF16 Gemma 4 encoder is not the quantized Gemma 3 of LTX 2.3.
     # This conservative budget is not a measured peak and can reject an L4.

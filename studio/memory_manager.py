@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 import psutil
 
 from studio.hardware import colab_console_log, query_gpu_info
-from studio.memory_policy import MemoryPressureError, host_memory, model_budget, number, pressure
+from studio.memory_policy import MemoryAdmissionImpossible, MemoryPressureError, host_memory, model_budget, number, pressure
 
 # Candado reentrante global para serializar cargas/descargas de modelos en GPU y evitar colisiones concurrentes
 GPU_MODEL_OP_LOCK = threading.RLock()
@@ -79,7 +79,7 @@ def serialized_gpu_operation(fn: Optional[Callable[..., Any]] = None, *, slots: 
                 with manager.operation(slots=protected, job=job, label=fn.__name__):
                     return fn(*args, **kwargs)
             except Exception as exc:
-                if isinstance(exc, (MemoryPressureError, MemoryError)) or "out of memory" in str(exc).lower():
+                if not isinstance(exc, MemoryAdmissionImpossible) and (isinstance(exc, (MemoryPressureError, MemoryError)) or "out of memory" in str(exc).lower()):
                     # A traceback keeps failed loader frames (and their tensors)
                     # alive even after their registry handle has been removed.
                     import traceback
@@ -413,8 +413,9 @@ class RuntimeMemoryManager:
                                                   code=getattr(exc, "code", "MEMORY_ALLOCATION_FAILED"))
                 # The failing call has unwound. Drop potentially inconsistent
                 # caches, never active handles from a different thread/owner.
-                for slot in slots:
-                    self.unload_slot(slot)
+                if not isinstance(exc, MemoryAdmissionImpossible):
+                    for slot in slots:
+                        self.unload_slot(slot)
             raise
         finally:
             _OPERATION_LOCAL.stack = stack

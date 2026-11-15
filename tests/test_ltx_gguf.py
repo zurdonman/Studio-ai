@@ -640,6 +640,7 @@ def test_ltx25_q5_uses_separate_runtime_and_memory_guard(temp_studio_env, monkey
     monkeypatch.setattr(b, 'Q5_RUNTIME', tmp_path/'isolated')
     monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True,'bf16_supported':True,'vram_total_gb':22})
     monkeypatch.setattr(b.common, '_resident', lambda *_: None)
+    monkeypatch.setattr(b, '_check_q5_access', lambda job: calls.append(('access',)))
     monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: None)
     monkeypatch.setattr(b.memory_manager, 'ensure_capacity', lambda **kw: calls.append(('capacity', kw['ram_gb'], kw['vram_gb'])))
     monkeypatch.setattr(b.common, '_install', lambda job,root,rev: calls.append(('install',root,rev)))
@@ -789,6 +790,7 @@ def test_ltx25_q5_switch_unloads_previous_before_admission_and_does_not_download
     calls = []
     monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True,'bf16_supported':True,'vram_total_gb':22})
     monkeypatch.setattr(b.common, '_resident', lambda *_: None)
+    monkeypatch.setattr(b, '_check_q5_access', lambda job: None)
     monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: {'model_id':'old'})
     monkeypatch.setattr(b.memory_manager, 'unload_slot', lambda slot: calls.append(('unload',slot)))
     def reject(**kw):
@@ -1068,3 +1070,74 @@ def test_msr_installer_cache_and_conflicts(temp_studio_env, monkeypatch, tmp_pat
     wrapper=runtime/'comfy/custom_nodes/StudioStrictMSR/__init__.py'; wrapper.write_text('foreign')
     with pytest.raises(RuntimeError,match='MSR_NODE_CONFLICT'): msr.prepare_msr(job,runtime=runtime,weights=weights,model_id='test')
     assert wrapper.read_text()=='foreign'
+
+
+def test_gemma_preflight_rejects_gated_access_without_leaking_secrets(monkeypatch):
+    from studio.engines import ltx25_gguf_patch as p
+    class GatedRepoError(Exception): pass
+    seen=[]
+    monkeypatch.setattr(p,'hf_hub_url',lambda **kw: seen.append(kw) or 'https://test.invalid/file')
+    def denied(*args,**kw): raise GatedRepoError('sensitive')
+    monkeypatch.setattr(p,'get_hf_file_metadata',denied)
+    monkeypatch.delenv('HF_TOKEN',raising=False)
+    with pytest.raises(RuntimeError,match='GGUF_GEMMA4_ACCESS') as error: p.check_access()
+    assert 'sensitive' not in str(error.value) and 'no se instalaron' in str(error.value).lower()
+    assert seen[0]['revision']==p.REV and seen[0]['filename'].endswith('Q5_K_M.gguf')
+
+
+def test_gemma_preflight_failure_preserves_old_video_cache(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord
+    calls=[]
+    monkeypatch.setattr(b,'WEIGHTS',tmp_path/'weights')
+    monkeypatch.setattr(b,'Q5_RUNTIME',tmp_path/'runtime')
+    monkeypatch.setattr(b.common,'query_gpu_info',lambda:{'has_gpu':True,'bf16_supported':True,'vram_total_gb':22})
+    monkeypatch.setattr(b.common,'_resident',lambda *_:None)
+    monkeypatch.setattr(b.memory_manager,'get_slot',lambda *_:{'model_id':'ltx-2.3-distilled-gguf-q4-experimental'})
+    monkeypatch.setattr(b.memory_manager,'unload_slot',lambda slot:calls.append(('unload',slot)))
+    monkeypatch.setattr(b.memory_manager,'ensure_capacity',lambda **kwargs:calls.append(('capacity',)))
+    monkeypatch.setattr(b.common,'_install',lambda *args:pytest.fail('install before access check'))
+    def denied(job):
+        calls.append(('check',))
+        raise RuntimeError('GGUF_GEMMA4_ACCESS: gated')
+    monkeypatch.setattr(b,'_check_q5_access',denied)
+    with pytest.raises(RuntimeError,match='GGUF_GEMMA4_ACCESS'):
+        b._prepare(b.UDQ4_Q5_ID,JobRecord('video','test'))
+    assert calls==[('check',)]
+
+
+def test_video_total_capacity_preflight_rejects_impossible_fp8_without_eviction(temp_studio_env,monkeypatch):
+    from studio.engines import video_engine as v
+    from studio.catalog import catalog_manager
+    definition=catalog_manager.get_definition('ltx-2.5-distilled-fp8-av')
+    snapshot={'ram':{'total_gb':52.96},'gpu':{'has_gpu':True,'vram_total_gb':22.03},
+              'pressure':{'reserve':{'ram_gb':5.3,'vram_gb':1.76}}}
+    monkeypatch.setattr(v.memory_manager,'sample',lambda:snapshot)
+    monkeypatch.setattr(v.memory_manager,'unload_slot',lambda *_:pytest.fail('must not unload model'))
+    from studio.memory_policy import MemoryAdmissionImpossible
+    with pytest.raises(MemoryAdmissionImpossible,match='MEMORY_BUDGET_EXCEEDS_TOTAL') as error:
+        v._check_video_total_capacity(definition,[])
+    assert '72.0' in str(error.value) and '52.96' in str(error.value)
+    snapshot['ram']['total_gb']=100
+    v._check_video_total_capacity(definition,[])
+
+
+def test_impossible_total_admission_keeps_active_slot(temp_studio_env, monkeypatch, colab_memory):
+    from studio.engines import video_engine as v
+    from studio.memory_manager import RuntimeMemoryManager
+    from studio.memory_policy import MemoryAdmissionImpossible
+    from studio.catalog import catalog_manager
+    from studio.jobs import JobRecord
+    colab_memory(ram=53, available=48, vram=24, vram_free=23)
+    manager=RuntimeMemoryManager()
+    monkeypatch.setattr(v,'memory_manager',manager)
+    class Handle:
+        released=False
+        def unload(self): self.released=True
+    handle=Handle()
+    manager.register_loaded('video','old-video','Existing video',handle)
+    with pytest.raises(MemoryAdmissionImpossible):
+        with manager.operation(slots=('video',), job=JobRecord('video','test'), label='test'):
+            v._check_video_total_capacity(catalog_manager.get_definition('ltx-2.5-distilled-fp8-av'),[])
+    assert manager.get_slot('video')['handle'] is handle and not handle.released
+    manager.unload_slot('video')

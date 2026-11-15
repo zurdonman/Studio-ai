@@ -25,6 +25,10 @@ class MemoryPressureError(RuntimeError):
             self.code = prefix
 
 
+class MemoryAdmissionImpossible(MemoryPressureError):
+    """Static total-budget rejection made before model allocations or eviction."""
+
+
 def number(value: Any) -> float | None:
     try:
         result = float(value)

@@ -73,6 +73,11 @@ const model = (id, fit, extra = {}) => ({
   if (Number($("vid-steps").value) !== 25) throw Error("New selection did not reset official defaults");
   if (w.document.querySelectorAll(".vm-card").length !== 1 || $("catalog-grid").textContent.includes("heavy")) throw Error("Filtered cards still visible");
   if ($("hf-live-results").textContent.includes("heavy") || !$("hf-live-results").textContent.includes("fits")) throw Error("Discovery did not honor L4 filter");
+  const beforeShortcut = requests.length;
+  $("btn-use-tested-ltx").click();
+  if ($("select-video-model").value !== "ltx-2.3-distilled-gguf-q4-experimental" || $("chk-vid-only-compat").checked) throw Error("Tested LTX shortcut did not unfilter and select correct recipe");
+  if (requests.slice(beforeShortcut).some(r => r.method === "POST")) throw Error("Selecting tested model should not automatically start a download or inference");
+  if (!$("hf-token-modal").textContent.includes("repositorios restringidos") || !$("hf-token-modal").querySelector('a[href*="elix3r"]')) throw Error("Gated HF access instructions missing");
   pill("T4").click();
   await wait(30);
   if (ids().length || !$("video-model-cards").textContent.includes("No hay modelos")) throw Error("Empty filter silently returned models");
