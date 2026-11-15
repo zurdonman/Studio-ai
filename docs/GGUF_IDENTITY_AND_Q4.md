@@ -83,3 +83,25 @@ En ese registro terminaron dos trabajos **LTX 2.3 destilado GGUF Q4**, I2V con a
 Los dos intentos FP8 del nuevo registro fueron rechazados por el presupuesto de **72 GiB RAM más reserva**, con 52,96 GiB RAM totales. FP8 de Diffusers no es el modelo GGUF; no debe bajarse su presupuesto para ocultar el rechazo. La comprobación de capacidad total ahora avisa antes de liberar modelos activos cuando el presupuesto nunca puede caber; la comprobación de memoria libre permanece después. Este cálculo sigue siendo preventivo, no una medición real del pico.
 
 Los dos intentos 2.5 GGUF + Gemma Q5 fallaron por `GatedRepoError`; el proceso no recibió token de Studio. Antes de instalar el runtime o expulsar otro modelo, se comprueba el acceso a los pesos de Gemma Q5, salvo que el encoder y el parche gestionado ya estén en disco. En caso de rechazo, iniciar sesión en [el repositorio elix3r](https://huggingface.co/elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF), aceptar sus condiciones y configurar en Studio el acceso de esa misma cuenta, con permiso de lectura para repositorios restringidos. No escribir el token en el chat. La aprobación es responsabilidad de Hugging Face. Una precomprobación satisfactoria no garantiza que la descarga, la memoria o la inferencia tengan éxito.
+
+### LTX 2.5 FP8 Comfy + Gemma Q5 (experimental)
+
+Esta receta separada descarga el transformer destilado FP8 preconvertido de
+[guillaume127/LTX-2.5-FP8](https://huggingface.co/guillaume127/LTX-2.5-FP8)
+(revisión `d0a8ff418087caac5288901c72726ff2ac70e199`, SHA-256 fijado). Utiliza
+`UNETLoader` de Comfy con `weight_dtype=default` para conservar los tipos FP8/BF16
+incluidos, y comparte Gemma Q5 y VAE con las recetas GGUF 2.5. No es la receta
+Diffusers que carga BF16 y convierte a FP8. Acepta las condiciones LTX y las de
+[elix3r para Gemma Q5](https://huggingface.co/elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF),
+y configura Hugging Face en Studio con una cuenta autorizada; no pegues tokens en chat.
+
+El transformer ocupa 21,87 GiB en disco, más ~8,86 GiB de encoder y VAE. El autor
+informó una RTX 4090 de 24 GB y 64 GB de RAM, no una L4. El presupuesto de admisión
+(44 GiB RAM + 18 GiB VRAM, más reservas y aumentos según configuración) es una
+estimación preventiva **sin medición de picos**, no una garantía; Comfy puede hacer
+offload a CPU y fallar o ir lento. Clips largos y MSR aumentan el presupuesto.
+No se ha probado la carga de los pesos ni la inferencia GPU en Studio. En L4 prueba
+primero 512×320, ~2 s y sin referencia, y verifica la galería. El filtro de modelos
+compatibles oculta las recetas de encaje desconocido: desactívalo para seleccionarla.
+La caché residente y los archivos compartidos se reutilizan; la liberación bajo
+presión no borra pesos. El grafo de audio completo y MSR también sigue experimental.

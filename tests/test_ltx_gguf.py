@@ -765,7 +765,7 @@ def test_face_identity_candidates_are_informative_and_blocked(temp_studio_env):
         assert client.post('/api/memory/load', json={'model_id':mid}).status_code == 400
 
 
-@pytest.mark.parametrize('variant', ['Q5_ID', 'Q4_Q5_ID', 'UDQ4_Q5_ID'])
+@pytest.mark.parametrize('variant', ['Q5_ID', 'Q4_Q5_ID', 'UDQ4_Q5_ID', 'FP8_Q5_ID'])
 def test_ltx25_q5_resident_reuses_session_without_reinstall_or_download(temp_studio_env, monkeypatch, variant):
     from types import SimpleNamespace
     from studio.engines import ltx25_gguf as b
@@ -1141,3 +1141,65 @@ def test_impossible_total_admission_keeps_active_slot(temp_studio_env, monkeypat
             v._check_video_total_capacity(catalog_manager.get_definition('ltx-2.5-distilled-fp8-av'),[])
     assert manager.get_slot('video')['handle'] is handle and not handle.released
     manager.unload_slot('video')
+
+
+def test_ltx25_preconverted_fp8_manifest_graph_catalog_and_api(temp_studio_env, monkeypatch):
+    import time
+    from studio.engines import ltx25_gguf as b
+    client, _ = temp_studio_env
+    mid = b.FP8_Q5_ID
+    files = b.files_for(mid)
+    assert files[0] == ('dit', b.FP8_REPO, b.FP8_REV, 'ltx-2.5-22b-distilled-transformer-fp8_e4m3fn.safetensors', 23485111216, '140f02b01dbf7000f1aae7a5e2903a2ae184be2970c1d9dff675d39aebbd47f3')
+    assert files[1:] == b.files_for(b.Q5_ID)[1:]
+    names = {'dit':files[0][3], 'text_encoder':files[1][3], 'video_vae': 'video.safetensors', 'audio_vae': 'audio.safetensors'}
+    g = b.make_graph25(prompt='test', negative_prompt='', width=512, height=320, frames=49, fps=24, seed=1, image_name=None, names=names)
+    assert g['1'] == {'class_type':'UNETLoader', 'inputs':{'unet_name':files[0][3], 'weight_dtype':'default'}}
+    assert g['2']['class_type'] == 'CLIPLoaderGGUF'
+    entry = next(m for m in client.get('/api/catalog').json()['models'] if m['id'] == mid)
+    assert 'FP8 Comfy' in entry['name'] and not entry['compatibility']['compatible']
+    assert entry['estimated_gb'] == round(sum(x[4] for x in files)/1024**3, 1)
+    calls = []
+    monkeypatch.setattr(b, 'prepare', lambda model_id, *, job: calls.append(('prepare',model_id)))
+    monkeypatch.setattr(b, 'generate', lambda **kw: calls.append(('generate',kw['model_id'])) or {})
+    assert client.post('/api/video/ltx-gguf/prepare', params={'model_id':mid}).status_code == 200
+    assert client.post('/api/video/ltx-gguf', json={'model_id':mid,'prompt':'Un retrato'}).status_code == 200
+    for _ in range(50):
+        if len(calls) == 2: break
+        time.sleep(.02)
+    assert ('prepare',mid) in calls and ('generate',mid) in calls
+
+
+def test_ltx25_fp8_capacity_and_preserves_cache_on_impossible_total(temp_studio_env, monkeypatch):
+    from studio.engines import ltx25_gguf as b
+    from studio.memory_policy import MemoryAdmissionImpossible
+    from studio.jobs import JobRecord
+    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True, 'bf16_supported':True, 'vram_total_gb':22})
+    monkeypatch.setattr(b.common, '_resident', lambda *_: None)
+    monkeypatch.setattr(b.memory_manager, 'sample', lambda: {'gpu':{'has_gpu':True, 'vram_total_gb':22}, 'ram':{'total_gb':40}, 'pressure':{'reserve':{'ram_gb':4, 'vram_gb':1.76}}})
+    monkeypatch.setattr(b.memory_manager, '_reclaim', lambda **kwargs: None)
+    monkeypatch.setattr(b.memory_manager, 'unload_slot', lambda *a: pytest.fail('must not evict'))
+    monkeypatch.setattr(b, '_check_q5_access', lambda *a: pytest.fail('must not access or install'))
+    with pytest.raises(MemoryAdmissionImpossible):
+        b.prepare(b.FP8_Q5_ID, job=JobRecord('video','test'))
+
+
+def test_ltx25_fp8_cold_admission_and_runtime(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import ltx25_gguf as b
+    from studio.jobs import JobRecord
+    calls = []
+    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True,'bf16_supported':True,'vram_total_gb':22})
+    monkeypatch.setattr(b.common, '_resident', lambda *_: None)
+    monkeypatch.setattr(b.memory_manager, 'sample', lambda: {'gpu':{'has_gpu':True,'vram_total_gb':22}, 'ram':{'total_gb':53}, 'pressure':{'reserve':{'ram_gb':5.3,'vram_gb':1.76}}})
+    monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: None)
+    monkeypatch.setattr(b.memory_manager, 'ensure_capacity', lambda **kw: calls.append(('capacity',kw['ram_gb'],kw['vram_gb'])))
+    monkeypatch.setattr(b, '_check_q5_access', lambda *_: None)
+    monkeypatch.setattr(b, 'Q5_RUNTIME', tmp_path/'runtime')
+    monkeypatch.setattr(b.common, '_install', lambda job, runtime, commit: calls.append(('install',runtime,commit)))
+    monkeypatch.setattr(b.common, '_probe_runtime', lambda job, nodes, runtime: calls.append(('probe',nodes,runtime)))
+    monkeypatch.setattr(b.common, '_command', lambda cmd, *a, **kw: calls.append(('command',cmd)))
+    monkeypatch.setattr(b, '_links', lambda model_id: {'dit':'cached.safetensors'})
+    monkeypatch.setattr(b.shutil, 'disk_usage', lambda *_: type('Disk', (), {'free':100*1024**3})())
+    b._prepare(b.FP8_Q5_ID, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
+    assert ('capacity',46,18.5) in calls
+    assert any(c[0] == 'probe' and {'UNETLoader','CLIPLoaderGGUF'} <= c[1] and c[2] == b.Q5_RUNTIME for c in calls)
+    assert any(c[0] == 'command' and 'studio.engines.ltx_gguf_download' in c[1] and b.FP8_Q5_ID in c[1] for c in calls)

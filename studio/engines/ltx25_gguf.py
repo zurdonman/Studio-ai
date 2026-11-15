@@ -1,4 +1,4 @@
-"""LTX-2.5 single-pass GGUF A/V recipes, experimental and untested on GPU.
+"""LTX-2.5 single-pass GGUF and preconverted FP8 A/V recipes, experimental.
 
 BF16 uses the pinned Comfy runtime shared with LTX 2.3; Gemma 4 GGUF
 uses a separate patched runtime. No silent fallback to the 2.3 graph.
@@ -27,7 +27,10 @@ WEIGHTS = DATA_ROOT / 'models' / 'ltx25-gguf'
 Q5_ID = 'ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental'
 Q4_Q5_ID = 'ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental'
 UDQ4_Q5_ID = 'ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental'
-Q5_IDS = {Q5_ID, Q4_Q5_ID, UDQ4_Q5_ID}
+FP8_Q5_ID = 'ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental'
+FP8_REPO = 'guillaume127/LTX-2.5-FP8'
+FP8_REV = 'd0a8ff418087caac5288901c72726ff2ac70e199'
+Q5_IDS = {Q5_ID, Q4_Q5_ID, UDQ4_Q5_ID, FP8_Q5_ID}
 Q5_RUNTIME = DATA_ROOT / 'runtimes' / 'ltx25-gemma4-gguf'
 Q5_COMFY_COMMIT = '2f35f4a08176d993cded35dac3332be4f7287f41'
 Q5_ENCODER = ('text_encoder', 'elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF',
@@ -39,6 +42,7 @@ MODELS = {
     Q4_Q5_ID: ('Q4_K_M + Gemma 4 GGUF Q5_K_M', 'distilled/ltx-2.5-22b-distilled-Q4_K_M.gguf', 13584703872, 'ba40d53770314e69e88361661e55c6cc3b12a363646ba2ea53c8bcd459b66747'),
     UDQ4_Q5_ID: ('UD-Q4_K_XL + Gemma 4 GGUF Q5_K_M', 'distilled/ltx-2.5-22b-distilled-UD-Q4_K_XL.gguf', 14000234880, '55442750eb0013d94fffaa4dadb577c5f4dc07107ec04389d41444f6e517d980'),
     'ltx-2.5-distilled-gguf-ud-q4-experimental': ('UD-Q4_K_XL', 'distilled/ltx-2.5-22b-distilled-UD-Q4_K_XL.gguf', 14000234880, '55442750eb0013d94fffaa4dadb577c5f4dc07107ec04389d41444f6e517d980'),
+    FP8_Q5_ID: ('FP8 Comfy + Gemma 4 GGUF Q5_K_M', 'ltx-2.5-22b-distilled-transformer-fp8_e4m3fn.safetensors', 23485111216, '140f02b01dbf7000f1aae7a5e2903a2ae184be2970c1d9dff675d39aebbd47f3'),
 }
 COMMON = (
     ('text_encoder', REPO, REV, 'text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors', 26263858182, 'ef7243612fdae7a75cb4d5cee9433e81380675fb6c213bd98ae74a9cd16561d1'),
@@ -53,7 +57,8 @@ def files_for(model_id: str) -> tuple:
         raise ValueError('GGUF_MODEL_UNSUPPORTED: modelo LTX 2.5 desconocido')
     _, filename, size, sha = MODELS[model_id]
     components = (Q5_ENCODER, *COMMON[1:]) if model_id in Q5_IDS else COMMON
-    return (('dit', REPO, REV, filename, size, sha), *components)
+    source, revision = (FP8_REPO, FP8_REV) if model_id == FP8_Q5_ID else (REPO, REV)
+    return (('dit', source, revision, filename, size, sha), *components)
 
 
 def path_for(item) -> Path:
@@ -136,6 +141,12 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         job.log('Reutilizando motor LTX 2.5 y caché; Comfy puede mover o liberar pesos bajo presión.')
         return session.names
     q5 = model_id in Q5_IDS
+    if model_id == FP8_Q5_ID:
+        # Reject impossible totals before evicting the working video cache.
+        from studio.engines.video_engine import _check_video_total_capacity
+        _check_video_total_capacity({'id': model_id, 'name': 'LTX 2.5 FP8 Comfy',
+                                     'engine': 'ltx_gguf', 'min_ram_gb': 44 + extra_ram,
+                                     'min_vram_gb': 18 + extra_vram}, [])
     # Do not evict the currently working model or install a runtime when the
     # gated encoder cannot be accessed. Offline reuse is still possible if the
     # encoder and previously stamped plugin are already on disk.
@@ -149,9 +160,9 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
     runtime = Q5_RUNTIME if q5 else common.ROOT
     # The 26.3 GB BF16 Gemma 4 encoder is not the quantized Gemma 3 of LTX 2.3.
     # This conservative budget is not a measured peak and can reject an L4.
-    memory_manager.ensure_capacity(ram_gb=(35 if model_id in {Q4_Q5_ID, UDQ4_Q5_ID} else 32 if q5 else 45) + extra_ram,
-                                   vram_gb=(16 if model_id in {Q4_Q5_ID, UDQ4_Q5_ID} else 14 if q5 else 16) + extra_vram,
-                                   stage='LTX 2.5 GGUF (estimación preventiva, no medida)', job=job)
+    memory_manager.ensure_capacity(ram_gb=(44 if model_id == FP8_Q5_ID else 35 if model_id in {Q4_Q5_ID, UDQ4_Q5_ID} else 32 if q5 else 45) + extra_ram,
+                                   vram_gb=(18 if model_id == FP8_Q5_ID else 16 if model_id in {Q4_Q5_ID, UDQ4_Q5_ID} else 14 if q5 else 16) + extra_vram,
+                                   stage='LTX 2.5 (estimación preventiva, no medida)', job=job)
     runtime.mkdir(parents=True, exist_ok=True)
     missing = sum(x[4] for x in files if not path_for(x).is_file() or path_for(x).stat().st_size != x[4])
     required = missing + 10 * 1024**3
@@ -159,6 +170,8 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         raise RuntimeError(f'GGUF_DISK_LOW: se requieren {required / 1024**3:.1f} GiB libres para archivos y entorno')
     if q5:
         job.log('Variante Gemma 4 GGUF Q5: runtime aislado y estimaciones de memoria no medidas; requiere acceso al repositorio elix3r.')
+        if model_id == FP8_Q5_ID:
+            job.log('Transformer FP8 Comfy preconvertido: estimación preventiva 44 GiB RAM y 18 GiB VRAM más reservas; compatibilidad y picos en L4 no probados. Comfy puede usar memoria de CPU.')
         common._install(job, runtime, Q5_COMFY_COMMIT)
         from studio.catalog import catalog_manager
         env = os.environ.copy()
@@ -170,7 +183,7 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         common._command([sys.executable, '-m', 'studio.engines.ltx25_gguf_patch',
                          str(runtime / 'comfy' / 'custom_nodes' / 'ComfyUI-GGUF'), str(runtime / 'gemma4-patch.json')],
                         job, env=env, cwd=repo, stage='Verificando acceso y parche Gemma 4 GGUF', timeout=600)
-        common._probe_runtime(job, {'CLIPLoaderGGUF', 'LTXVDualCFGGuider', 'VAEDecodeTiled'}, runtime)
+        common._probe_runtime(job, {'CLIPLoaderGGUF', 'LTXVDualCFGGuider', 'VAEDecodeTiled'} | ({'UNETLoader'} if model_id == FP8_Q5_ID else set()), runtime)
     else:
         common._install(job)
         common._probe_runtime(job, {'CLIPLoader', 'LTXVDualCFGGuider', 'VAEDecodeTiled'})
@@ -184,7 +197,7 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         repo = str(Path(__file__).resolve().parents[2])
         env['PYTHONPATH'] = repo + os.pathsep + env.get('PYTHONPATH', '')
         common._command([sys.executable, '-m', 'studio.engines.ltx_gguf_download', str(WEIGHTS), model_id], job,
-                        env=env, cwd=repo, stage='Descargando y verificando LTX 2.5 GGUF', timeout=7200)
+                        env=env, cwd=repo, stage='Descargando y verificando LTX 2.5', timeout=7200)
         _verified[model_id] = _fingerprint(model_id)
     else:
         job.log('Componentes LTX 2.5 ya verificados en esta sesión y sin cambios.')
@@ -198,6 +211,9 @@ def make_graph25(*, prompt: str, negative_prompt: str, width: int, height: int, 
                        frames=frames, fps=fps, seed=seed, image_name=image_name, image_strength=image_strength,
                        model=names['dit'], text_encoder=names['text_encoder'], connectors='unused.safetensors',
                        video_vae=names['video_vae'], audio_vae=names['audio_vae'])
+    if names['dit'].endswith('.safetensors'):
+        # Preserve mixed BF16/FP8 tensors as supplied; do not re-cast all weights.
+        graph['1'] = {'class_type': 'UNETLoader', 'inputs': {'unet_name': names['dit'], 'weight_dtype': 'default'}}
     graph['2'] = ({'class_type': 'CLIPLoaderGGUF', 'inputs': {'clip_name': names['text_encoder'], 'type': 'ltxv'}}
                   if names['text_encoder'].endswith('.gguf') else
                   {'class_type': 'CLIPLoader', 'inputs': {'clip_name': names['text_encoder'], 'type': 'ltxv', 'device': 'default'}})
@@ -244,7 +260,7 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
     # Validate the graph before any download; the file names below are placeholders only.
     make_graph25(prompt=effective, negative_prompt=negative_prompt, width=width, height=height, frames=frames, fps=fps,
                  seed=seed, image_name='input.png' if image_path else None, image_strength=image_strength,
-                 names={'dit':'x.gguf','text_encoder':'x.gguf' if model_id in Q5_IDS else 'x.safetensors','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
+                 names={'dit':'x.safetensors' if model_id == FP8_Q5_ID else 'x.gguf','text_encoder':'x.gguf' if model_id in Q5_IDS else 'x.safetensors','video_vae':'v.safetensors','audio_vae':'a.safetensors'})
     scale = width * height * frames / (512 * 320 * 49)
     extra_ram, extra_vram = max(0, scale - 1) * 2, max(0, scale - 1) * .5
     if voice_mode == 'audio':
@@ -324,7 +340,7 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
         if generated:
             generated.unlink(missing_ok=True)
     meta = {'id': dest.stem, 'filename': name, 'rel_path': f'outputs/videos/{name}', 'media_url': f'/media/outputs/videos/{name}',
-            'type': 'video', 'model_id': model_id, 'model_name': f'LTX 2.5 destilado GGUF {MODELS[model_id][0]} experimental',
+            'type': 'video', 'model_id': model_id, 'model_name': f'LTX 2.5 destilado {MODELS[model_id][0]} experimental',
             'video_submode': 'i2v' if image_path else 't2v', 'audio_native': True, 'prompt': prompt, 'effective_prompt': effective,
             'seed': seed, 'width': info.get('width'), 'height': info.get('height'), 'duration_seconds': info.get('duration_seconds'),
             'fps': fps, 'steps': 8, 'guidance_scale': 1.0, 'requested_duration_sec': duration_sec, 'frames': frames,
