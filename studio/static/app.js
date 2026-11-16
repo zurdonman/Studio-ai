@@ -516,6 +516,11 @@
       toast("Imagen lista y verificada.", "success");
     } else if (job.kind === "video" && res.media_url) {
       showVideoResult(res);
+      if (res.model_id === "freefield-film" && $("community-film-result")) {
+        $("community-film-result").hidden = false;
+        $("community-film-result").src = res.media_url;
+        $("community-film-feedback").textContent = "Resultado guardado en la biblioteca de Vídeo.";
+      }
       toast(res.duration_warning || "Clip de vídeo MP4 listo.", res.duration_warning ? "error" : "success");
     } else if (job.kind === "tts" && res.media_url) {
       if (res.model_id === "qwen3-tts-0.6b-base") {
@@ -2116,9 +2121,18 @@
     renderMusicPicker();
     renderLipSyncSelects();
     renderIdLoraSelects();
+    renderCommunityVideoSelect();
     renderHiggsfieldAssetSelects();
     renderMontagePickers();
     renderMontageGallery();
+  }
+
+  function renderCommunityVideoSelect() {
+    const el = $("community-film-input"); if (!el) return;
+    const items = [...state.assets.videos, ...state.assets.montages, ...state.assets.uploads.filter(a => a.type === "video")];
+    const prev = el.value;
+    el.innerHTML = '<option value="">Selecciona un vídeo</option>' + items.map(a => `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
+    if (items.some(a => a.rel_path === prev)) el.value = prev;
   }
 
   function renderIdLoraSelects() {
@@ -2971,6 +2985,29 @@
   // ==================== EVENTOS DE UI ====================
   function bindEvents() {
     bindH3();
+    document.querySelectorAll(".community-lipsync").forEach(btn => btn.addEventListener("click", () => {
+      switchTab("tab-tts");
+      $("lipsync-media-select")?.scrollIntoView({behavior: "smooth", block: "center"});
+    }));
+    $("community-image")?.addEventListener("click", () => switchTab("tab-image"));
+    $("community-film-upload")?.addEventListener("change", async e => {
+      const file = e.target.files?.[0]; if (!file) return;
+      try {
+        const uploaded = await uploadFile(file);
+        await loadAssets();
+        $("community-film-input").value = uploaded.rel_path;
+      } catch (err) { toast(err.message, "error"); }
+      finally { e.target.value = ""; }
+    });
+    $("community-film-run")?.addEventListener("click", async () => {
+      const video_rel = $("community-film-input").value;
+      if (!video_rel) { toast("Selecciona un vídeo.", "error"); return; }
+      try {
+        const res = await api("/api/community/film", {method: "POST", body: JSON.stringify({video_rel})});
+        $("community-film-feedback").textContent = "Trabajo en cola: sigue el monitor para progreso, errores o cancelación.";
+        watchJob(res.job);
+      } catch (err) { toast(err.message, "error"); }
+    });
     // Pestañas
     document.querySelectorAll(".tab-btn").forEach((btn) => {
       btn.addEventListener("click", () => switchTab(btn.dataset.tab));

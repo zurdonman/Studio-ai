@@ -143,6 +143,7 @@
       <button class="tab-btn" data-tab="tab-video">
         <span class="step-num">2</span> Vídeo · Clips IA / FFmpeg
       </button>
+      <button class="tab-btn" data-tab="tab-community">🧩 Herramientas de vídeo</button>
       <button class="tab-btn" data-tab="tab-tts">
         <span class="step-num">3</span> Estudio de Voz
       </button>
@@ -819,6 +820,37 @@
       </section>
 
       <!-- ==================== PESTAÑA 3: VOCES Y AUDIO (TTS) ==================== -->
+      <section id="tab-community" class="view-panel">
+        <div class="card"><div class="card-header"><h2>Herramientas de vídeo</h2></div>
+          <p>Funciones por tarea. Las integraciones comunitarias no terminadas están señaladas: no se descargan ni ejecutan al abrir este menú.</p>
+          <details><summary><strong>👄 Doblaje de clips · Freefield Dub</strong> — pendiente</summary>
+            <p>Freefield Dub todavía no está integrado ni validado. No confundir la sustitución de audio con doblaje con labios generados.</p>
+            <p>Alternativa ya disponible: EDTalk anima la boca usando una pista de voz existente; no es Dub-It y sus resultados pueden variar.</p>
+            <button class="btn btn-secondary btn-sm community-lipsync" type="button">Abrir EDTalk en Estudio de Voz</button>
+          </details>
+          <details><summary><strong>🗣️ Retrato parlante · Creativefield InfiniteTalk</strong> — pendiente</summary>
+            <p>InfiniteTalk todavía no está integrado ni validado. Su código es GPL-3.0-only; sus modelos y workflows tienen condiciones propias.</p>
+            <p>Alternativa ya disponible: EDTalk acepta imagen y audio, pero no es InfiniteTalk.</p>
+            <button class="btn btn-secondary btn-sm community-lipsync" type="button">Abrir EDTalk en Estudio de Voz</button>
+          </details>
+          <details><summary><strong>🎨 Edición de plano · Paint a plate</strong> — pendiente</summary>
+            <p>La pintura y propagación sobre vídeo aún no están integradas. Requieren adaptar y auditar nodos, rutas, pesos y licencias; no se anuncia como disponible.</p>
+            <button class="btn btn-secondary btn-sm" type="button" id="community-image">Abrir edición de imagen existente</button>
+          </details>
+          <details><summary><strong>🎞️ Suavizado · FILM 2x</strong> — experimental</summary>
+            <div class="form-stack">
+              <p>Receta inspirada en Freefield Smooth: convierte a 24 fps e interpola a 48 fps a velocidad normal; no es cámara lenta. Conserva el audio si existe. Puede introducir artefactos. Sin prueba de inferencia GPU.</p>
+              <p>Máximo 10,5 s, 200 MiB y área 768×512 (ningún lado mayor de 768 px). Necesita GPU CUDA. La primera ejecución prepara Comfy y descarga FILM (~69 MB); el runtime requiere espacio y dependencias adicionales. Espera el turno de GPU y cierra cualquier Comfy residente anterior al comenzar.</p>
+              <label class="field-label" for="community-film-input">Vídeo de la biblioteca o subido</label>
+              <div class="row-gap"><select id="community-film-input" class="flex-1"></select><label class="btn btn-secondary btn-sm file-btn">Subir vídeo<input id="community-film-upload" type="file" accept="video/*" hidden /></label></div>
+              <button class="btn btn-primary" type="button" id="community-film-run">Interpolar 2x (experimental)</button>
+              <p class="muted" id="community-film-feedback" role="status">El resultado aparecerá en Vídeo y en la biblioteca. Consulta progreso y cancelación en el monitor.</p>
+              <video id="community-film-result" class="result-media" controls playsinline hidden></video>
+            </div>
+          </details>
+        </div>
+      </section>
+
       <section id="tab-tts" class="view-panel">
         <div class="two-col-studio">
           <div class="card">

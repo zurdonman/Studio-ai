@@ -1577,6 +1577,24 @@ def api_mix_master(req: AudioMixMasterReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict()}
 
 
+class FilmInterpolationReq(BaseModel):
+    video_rel: str = Field(min_length=1, max_length=1024)
+
+
+@app.post("/api/community/film")
+def api_community_film(req: FilmInterpolationReq) -> Dict[str, Any]:
+    from studio.engines.freefield_film import interpolate
+    path = _resolve_media_rel(req.video_rel)
+    allowed = (UPLOADS_DIR.resolve(), VIDEOS_OUT_DIR.resolve(), MONTAGES_OUT_DIR.resolve())
+    if not path or not path.is_file() or path.parent not in allowed:
+        raise HTTPException(status_code=400, detail="Selecciona un vídeo de la biblioteca o subido.")
+    if path.suffix.lower() not in (".mp4", ".mov", ".webm", ".mkv"):
+        raise HTTPException(status_code=400, detail="Selecciona un vídeo compatible.")
+    job = job_manager.submit(kind="video", title=f"FILM · interpolación 2x experimental ({path.name})",
+                             fn=lambda j: interpolate(path, job=j))
+    return {"job": job.to_dict(include_logs=True)}
+
+
 @app.post("/api/video/lipsync")
 def api_lipsync_video(req: LipSyncReq) -> Dict[str, Any]:
     med_p = _resolve_media_rel(req.media_rel)

@@ -1,10 +1,10 @@
-# Herramientas comunitarias de vídeo: evaluación, no instalación
+# Herramientas comunitarias de vídeo: evaluación e integración parcial
 
-Revisión de código fuente realizada sin instalar dependencias ni descargar modelos:
+Revisión de código fuente sin instalar dependencias ni descargar modelos en el entorno de desarrollo:
 
 | Proyecto | Revisión revisada | Licencia del código | Estado en Studio |
 |---|---|---|---|
-| [Freefield](https://github.com/neuregex/freefield) | `f0c2358a46c7008ff8503d4324b6cc8bc7657e75` | MIT | Referencia de flujos y diseño; no instalado ni integrado como motor. |
+| [Freefield](https://github.com/neuregex/freefield) | `f0c2358a46c7008ff8503d4324b6cc8bc7657e75` | MIT | Receta FILM 2x experimental inspirada en Smooth; Dub pendiente. Aplicación completa no instalada. |
 | [Creativefield](https://github.com/rhymeas/Creativefield) | `e65c3464eab0a8ee19466db51e2b92eb7d8fc1ff` | GPL-3.0-only | Aplicación y flujos revisados como referencia; no instalada ni integrada. |
 | [AInVFX Paint a plate](https://github.com/AInVFX/ainvfx-paintaplate) | `d95292c1a96073a34bfec82d7462dbd2887d0000` | Apache 2.0 | Candidato para un futuro adaptador de edición de plano; no instalado ni validado en L4. |
 
@@ -30,7 +30,13 @@ Referencias: [MIT de Freefield](https://github.com/neuregex/freefield/blob/f0c23
 
 Es una aplicación independiente con frontend, servidor Node, gateway y 120 manifiestos de apps/workflows, no un único nodo Comfy. Incluye tareas de imagen, vídeo y utilidades que utilizan familias y componentes diferentes. Sus indicadores de pruebas GPU no equivalen a que todas funcionen en nuestra L4 ni autorizan los modelos. Hacer funcionar la aplicación completa añadiría otro servidor, gestión de archivos y ejecución de flujos no adaptada al gestor de trabajos y memoria de Studio.
 
-Vía gradual propuesta: elegir una herramienta concreta por necesidad; revisar su licencia de código, manifiesto, workflow, componentes, licencias, requisitos de memoria y entradas/salidas; adaptarla a la cola y al catálogo agnósticos, sin importar 120 flujos ciegamente. Probar primero en CPU el esquema y aislamiento, y después inferencia real en hardware compatible. No se ha hecho todavía.
+Vía gradual propuesta: elegir una herramienta concreta por necesidad; revisar su licencia de código, manifiesto, workflow, componentes, licencias, requisitos de memoria y entradas/salidas; adaptarla a la cola y al catálogo agnósticos, sin importar 120 flujos ciegamente. Probar primero en CPU el esquema y aislamiento, y después inferencia real en hardware compatible. FILM tiene validación sintética parcial; las demás recetas siguen pendientes.
+
+## Integración parcial: FILM 2x
+
+En **Modo Normal → Herramientas de vídeo → Suavizado · FILM 2x** hay una receta propia inspirada en Freefield Smooth y construida con nodos nativos de ComfyUI; no se ha importado el servidor de Freefield ni su workflow. La normalización a 24 fps y posterior interpolación a 48 fps mantiene aproximadamente la duración original, no produce cámara lenta y puede causar artefactos. Se recomprime el audio original si existe y puede haber una diferencia de duración de un fotograma interpolado. Clips limitados preventivamente a 10,5 s, 200 MiB y área 768×512; no son límites de hardware universales. La primera ejecución prepara el runtime GGUF existente y descarga el checkpoint FILM (68.882.302 bytes) de [Comfy-Org/Frame-Interpolation](https://huggingface.co/Comfy-Org/Frame-Interpolation), revisión `aa7009be4d1471ea0bac91d6fe4d7e4b637cbbfc`, SHA-256 `f226e51375dc839d4b40e5c3d63da560dd1ea1c962364ec78f5adf2d05db05c0`. El manifiesto Freefield atribuye FILM a Google Research bajo Apache-2.0; comprobar los términos del repositorio y dependencias antes de redistribuir pesos. No se incluyen pesos en Studio.
+
+La operación espera el turno de GPU; cuando empieza, cierra un Comfy LTX residente previo, usa un proceso privado con watchdog y lo cierra al terminar o fallar, limpiando temporales sin borrar la fuente. No mantiene FILM residente. La vigilancia no garantiza evitar picos instantáneos. No se ha hecho inferencia real con FILM ni descargado el modelo en desarrollo. La validación del grafo contra Comfy fijado se probó en CPU con entrada y pesos ficticios, sin ejecución exitosa; pruebas sintéticas cubren API, audio opcional y cierre en error. No confundir esta función con Freefield Dub, InfiniteTalk ni Paint a plate: siguen pendientes; los enlaces de EDTalk en el menú son alternativas existentes, no esas integraciones.
 
 ## Creativefield
 
