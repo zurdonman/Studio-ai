@@ -1577,6 +1577,60 @@ def api_mix_master(req: AudioMixMasterReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict()}
 
 
+class MotionTransferReq(BaseModel):
+    engine: Literal["wan", "scail", "ltx"]
+    quant: str = Field(default="q4", max_length=12)
+    image_rel: str = Field(min_length=1, max_length=1024)
+    video_rel: str = Field(min_length=1, max_length=1024)
+    prompt: str = Field(min_length=1, max_length=2000)
+    negative: str = Field(default="", max_length=2000)
+    width: int = Field(default=512, ge=256, le=768)
+    height: int = Field(default=320, ge=256, le=768)
+    frames: Literal[25, 49, 81] = 49
+    seed: int = Field(default=42, ge=0, le=4294967295)
+    steps: int = Field(default=10, ge=1, le=50)
+    cfg: float = Field(default=1.0, ge=0, le=10, allow_inf_nan=False)
+    strength: float = Field(default=1.0, ge=0, le=2, allow_inf_nan=False)
+    person: str = Field(default="human", min_length=1, max_length=120)
+    sam_license_accepted: bool = False
+    comfy_vram_mode: Literal["auto", "lowvram", "novram", "highvram"] = "auto"
+    comfy_evict_models: bool = False
+
+
+@app.post("/api/community/motion")
+def api_community_motion(req: MotionTransferReq) -> Dict[str, Any]:
+    from studio.comfy_options import options
+    from studio.engines.motion_manifest import files_for
+    from studio.engines.motion_transfer import generate as generate_motion
+    from studio.engines.ltx_motion import generate as generate_ltx_motion
+    if not req.prompt.strip() or not req.person.strip():
+        raise HTTPException(status_code=400, detail="Describe la escena y el sujeto de la máscara.")
+    if req.engine == "ltx":
+        if req.quant != "q4": raise HTTPException(status_code=400, detail="Union Control solo usa LTX 2.3 GGUF Q4 en esta receta.")
+    else:
+        try: files_for(req.engine, req.quant)
+        except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if req.engine == "scail" and not req.sam_license_accepted:
+        raise HTTPException(status_code=400, detail="Confirma que aceptas la licencia de SAM 3.1 para el seguimiento de personas.")
+    align = 64 if req.engine == "ltx" else 32
+    if req.width % align or req.height % align or req.width * req.height > 768 * 512:
+        raise HTTPException(status_code=400, detail=f"Usa dimensiones múltiplos de {align}, área máxima 768×512.")
+    image, video = _resolve_media_rel(req.image_rel), _resolve_media_rel(req.video_rel)
+    if not image or not image.is_file() or image.parent not in (UPLOADS_DIR.resolve(), IMAGES_OUT_DIR.resolve()) or image.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        raise HTTPException(status_code=400, detail="Selecciona una imagen de la biblioteca o subida.")
+    if not video or not video.is_file() or video.parent not in (UPLOADS_DIR.resolve(), VIDEOS_OUT_DIR.resolve(), MONTAGES_OUT_DIR.resolve()) or video.suffix.lower() not in (".mp4", ".mov", ".webm", ".mkv"):
+        raise HTTPException(status_code=400, detail="Selecciona un vídeo de la biblioteca o subido.")
+    common = dict(image_path=image, video_path=video, prompt=req.prompt, negative=req.negative,
+                  width=req.width, height=req.height, frames=req.frames, seed=req.seed, strength=req.strength)
+    if req.engine == "ltx":
+        fn = lambda j: generate_ltx_motion(job=j, **common)
+    else:
+        fn = lambda j: generate_motion(engine=req.engine, quant=req.quant, steps=req.steps, cfg=req.cfg, person=req.person, job=j, **common)
+    config = options(req.comfy_vram_mode, req.comfy_evict_models)
+    job = job_manager.submit(kind="video", title=f"Movimiento experimental · {req.engine.upper()} {req.quant}", fn=_comfy_job_function(fn, config))
+    return {"ok": True, "job": job.to_dict(include_logs=True)}
+
+
 class FilmInterpolationReq(BaseModel):
     video_rel: str = Field(min_length=1, max_length=1024)
 

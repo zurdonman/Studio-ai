@@ -516,6 +516,10 @@
       toast("Imagen lista y verificada.", "success");
     } else if (job.kind === "video" && res.media_url) {
       showVideoResult(res);
+      if (/^(wan-motion-|scail-motion-|ltx23-union-control)/.test(res.model_id || "") && $("motion-result")) {
+        $("motion-result").hidden = false; $("motion-result").src = res.media_url;
+        $("motion-feedback").textContent = "Resultado guardado en la biblioteca de Vídeo.";
+      }
       if (res.model_id === "freefield-film" && $("community-film-result")) {
         $("community-film-result").hidden = false;
         $("community-film-result").src = res.media_url;
@@ -2122,9 +2126,36 @@
     renderLipSyncSelects();
     renderIdLoraSelects();
     renderCommunityVideoSelect();
+    renderMotionAssets();
     renderHiggsfieldAssetSelects();
     renderMontagePickers();
     renderMontageGallery();
+  }
+
+  function renderMotionAssets() {
+    const image = [...state.assets.images, ...state.assets.uploads.filter(a => a.type === "image")];
+    const video = [...state.assets.videos, ...state.assets.montages, ...state.assets.uploads.filter(a => a.type === "video")];
+    for (const [id, items, title] of [["motion-image",image,"Selecciona una imagen"],["motion-video",video,"Selecciona un vídeo"]]) {
+      const el=$(id); if (!el) continue; const prev=el.value;
+      el.innerHTML = `<option value="">${title}</option>` + items.map(a=>`<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
+      if(items.some(a=>a.rel_path===prev)) el.value=prev;
+    }
+  }
+  function configureMotion() {
+    const engine=$("motion-engine")?.value; if (!engine) return;
+    const sizes = engine === "wan" ? [6.50,8.58,11.34,12.74,18.14] : [6.02,8.11,10.86,12.27,17.67];
+    const common = ["q2","q3","q4","q5","q8"].map((q,i) => [q, `GGUF ${q.toUpperCase()} · ${sizes[i]} GB principales`]);
+    const items=engine === "ltx" ? [["q4","LTX 2.3 GGUF Q4 (base) + Union Control"]] : [...common, ...(engine === "wan" ? [["int8","INT8 safetensors · distilled · 16,65 GB"],["bf16","BF16 safetensors · distilled · 32,79 GB"]] : [["fp8","FP8 safetensors · 17,69 GB"],["fp16","FP16 safetensors · 32,79 GB"]])];
+    $("motion-quant").innerHTML=items.map(([v,t])=>`<option value="${v}">${t}</option>`).join("");
+    $("motion-quant").value="q4";
+    $("motion-sam-options").hidden=engine!=="scail";
+    $("motion-steps").value=engine === "scail" ? "30" : engine === "ltx" ? "8" : "10";
+    $("motion-cfg").value=engine === "scail" ? "5" : "1";
+    $("motion-steps").disabled=engine === "ltx"; $("motion-cfg").disabled=engine === "ltx";
+    $("motion-engine-note").textContent= engine === "wan"
+      ? "Wan Animate 2 distilled: 10 pasos y CFG 1. Añade ~8,25 GB de archivos comunes al modelo principal. Solo primer segmento; salida muda. GGUF usa un adaptador privado de arquitectura."
+      : engine === "scail" ? "SCAIL-2 y SAM 3.1 añaden ~10 GB de archivos comunes al modelo principal. SAM ordena personajes de izquierda a derecha y puede confundirlos al cruzarse. Salida muda; primer segmento."
+      : "LTX 2.3 Q4 usa Union Control con bordes extraídos del vídeo; no es pose ni garantiza copiar el baile. Genera audio propio y NO usa el audio guía. Requiere ancho y alto múltiplos de 64.";
   }
 
   function renderCommunityVideoSelect() {
@@ -2985,6 +3016,28 @@
   // ==================== EVENTOS DE UI ====================
   function bindEvents() {
     bindH3();
+    configureMotion();
+    $("motion-engine")?.addEventListener("change", configureMotion);
+    for (const [upload,select] of [["motion-image-upload","motion-image"],["motion-video-upload","motion-video"]]) {
+      $(upload)?.addEventListener("change", async e => {
+        const file=e.target.files?.[0]; if (!file) return;
+        try { const asset=await uploadFile(file); $(select).value=asset.rel_path; }
+        catch(err) { toast(err.message,"error"); } finally { e.target.value=""; }
+      });
+    }
+    $("motion-run")?.addEventListener("click", async () => {
+      const engine=$("motion-engine").value;
+      if (!$("motion-image").value || !$("motion-video").value || !$("motion-prompt").value.trim()) { toast("Selecciona imagen, vídeo y describe la escena.","error"); return; }
+      if (engine === "scail" && !$("motion-sam-license").checked) { toast("Revisa y acepta la licencia SAM 3.1.","error"); return; }
+      const body={engine,quant:$("motion-quant").value,image_rel:$("motion-image").value,video_rel:$("motion-video").value,
+        prompt:$("motion-prompt").value,negative:$("motion-negative").value,width:Number($("motion-width").value),height:Number($("motion-height").value),
+        frames:Number($("motion-frames").value),seed:Number($("motion-seed").value),steps:Number($("motion-steps").value),cfg:Number($("motion-cfg").value),
+        strength:Number($("motion-strength").value),person:$("motion-person").value,sam_license_accepted:$("motion-sam-license").checked,
+        comfy_vram_mode:$("motion-offload").value,comfy_evict_models:$("motion-evict").checked};
+      try { const res=await api("/api/community/motion",{method:"POST",body:JSON.stringify(body)});
+        $("motion-feedback").textContent="Trabajo en cola. Consulta el monitor para progreso, errores y cancelación."; watchJob(res.job);
+      } catch(err) { toast(err.message,"error"); }
+    });
     document.querySelectorAll(".community-lipsync").forEach(btn => btn.addEventListener("click", () => {
       switchTab("tab-tts");
       $("lipsync-media-select")?.scrollIntoView({behavior: "smooth", block: "center"});

@@ -454,6 +454,10 @@ class _ResidentComfy:
                 _install_resident_plugin(runtime_root)
             command = (_server_command(self.port, self.input_dir, self.output_dir, runtime_root, self.options, True)
                        if self.keep_loaded else _server_command(self.port, self.input_dir, self.output_dir, runtime_root, self.options))
+            if getattr(job, "studio_motion_plugin", False):
+                # The whitelist is private and limited to the motion metadata adapter.
+                at = command.index("--whitelist-custom-nodes") + 1
+                command.insert(at, "StudioMotion")
             self.proc = subprocess.Popen(command, cwd=runtime_root / "comfy",
                                          env=_runtime_env(), stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
             self.guard = _ComfyMemoryGuard(self.proc, job)
