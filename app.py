@@ -1097,11 +1097,13 @@ class LTXGGUFReq(BaseModel):
     image_strength: float = Field(default=1.0, ge=0.5, le=1.0, allow_inf_nan=False)
     comfy_vram_mode: Literal["auto", "lowvram", "novram", "highvram"] = "auto"
     comfy_evict_models: bool = False
+    comfy_keep_loaded: bool = False
 
 
-def _comfy_job_function(fn, config):
+def _comfy_job_function(fn, config, keep_loaded=False):
     def run(job):
         job.comfy_options = config
+        job.comfy_keep_loaded = keep_loaded
         return fn(job)
     return run
 
@@ -1177,7 +1179,7 @@ def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
         if req.voice_mode != 'none':
             kwargs.update(voice_mode=req.voice_mode, voice_path=voice)
         fn = lambda j: generate_gguf(job=j, **kwargs)
-    job = job_manager.submit(kind="video", title=title, fn=_comfy_job_function(fn, config))
+    job = job_manager.submit(kind="video", title=title, fn=_comfy_job_function(fn, config, req.comfy_keep_loaded))
     return {"ok": True, "job": job.to_dict()}
 
 

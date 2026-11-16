@@ -253,7 +253,7 @@ def _runtime_env() -> dict:
 
 
 def _server_command(port: int, input_dir: Path, output_dir: Path, root: Path | None = None,
-                    config: tuple[str, bool] = ("auto", False)) -> list[str]:
+                    config: tuple[str, bool] = ("auto", False), keep_loaded: bool = False) -> list[str]:
     root = root or ROOT
     source = root / "comfy"
     ram_reserve = max(2.0, host_memory()["total_gb"] * 0.1)
@@ -261,8 +261,8 @@ def _server_command(port: int, input_dir: Path, output_dir: Path, root: Path | N
             # Supported by both pinned Comfy versions: in newer versions this is
             # an alias of --offline; in 0.33 it disables API nodes and frontend internet.
             "--disable-auto-launch", "--disable-api-nodes", "--disable-metadata", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "ComfyUI-GGUF", "StudioVoice", "StudioStrictMSR",
-            "--cache-ram", f"{ram_reserve:.2f}", f"{ram_reserve:.2f}",
-            "--input-directory", str(input_dir), "--output-directory", str(output_dir), "--reserve-vram", "1.8"] + comfy_flags(config)
+            *(["StudioResident"] if keep_loaded else []), "--cache-ram", f"{ram_reserve:.2f}", f"{ram_reserve:.2f}",
+            "--input-directory", str(input_dir), "--output-directory", str(output_dir), "--temp-directory", str(input_dir.parent / "temp"), "--reserve-vram", "1.8"] + comfy_flags(config)
 
 
 def _wait_server(proc: subprocess.Popen, base: str, logfile: Any, job: Any) -> None:
@@ -410,6 +410,26 @@ def _comfy_start_admission(job: Any, *, stage: str, planned_ram: float, planned_
                                    stage='Inicio Comfy: espacio mínimo real y reservas', job=job)
 
 
+def _install_resident_plugin(root: Path) -> None:
+    source = Path(__file__).with_name('comfy_resident_node')
+    destination = root / 'comfy' / 'custom_nodes' / 'StudioResident'
+    if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+        raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: directorio ajeno, no se modifica')
+    for name in ('__init__.py', 'core.py'):
+        target = destination / name
+        if target.is_symlink() or (target.exists() and target.read_bytes() != (source / name).read_bytes()):
+            raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: nodo diferente, no se sobrescribe')
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ('__init__.py', 'core.py'):
+        target = destination / name
+        if not target.exists():
+            shutil.copyfile(source / name, target)
+
+
+def _keep_loaded(job: Any) -> bool:
+    return getattr(job, 'comfy_keep_loaded', False) is True
+
+
 class _ResidentComfy:
     """Comfy cache owned by the video slot. Unload stops the process and frees its GPU."""
     def __init__(self, job: Any, names: dict[str, str], runtime_root: Path | None = None):
@@ -421,6 +441,8 @@ class _ResidentComfy:
         self.input_dir.mkdir(); self.output_dir.mkdir()
         self.names = names
         self.options = job_options(job)
+        self.keep_loaded = _keep_loaded(job)
+        self.cleanup_ok = False
         job.log(f"Comfy: política VRAM {self.options[0]}, descarga agresiva entre modelos: {'sí' if self.options[1] else 'no'}; memoria real vigilada.")
         self.port = _free_port()
         self.base = f"http://127.0.0.1:{self.port}"
@@ -428,10 +450,19 @@ class _ResidentComfy:
         self.proc = None
         self.guard = None
         try:
-            self.proc = subprocess.Popen(_server_command(self.port, self.input_dir, self.output_dir, runtime_root, self.options), cwd=runtime_root / "comfy",
+            if self.keep_loaded:
+                _install_resident_plugin(runtime_root)
+            command = (_server_command(self.port, self.input_dir, self.output_dir, runtime_root, self.options, True)
+                       if self.keep_loaded else _server_command(self.port, self.input_dir, self.output_dir, runtime_root, self.options))
+            self.proc = subprocess.Popen(command, cwd=runtime_root / "comfy",
                                          env=_runtime_env(), stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
             self.guard = _ComfyMemoryGuard(self.proc, job)
             _wait_server(self.proc, self.base, self.log, job)
+            if self.keep_loaded:
+                info = requests.get(self.base + '/object_info/StudioResidentCleanup', timeout=10)
+                info.raise_for_status()
+                if 'StudioResidentCleanup' not in info.json():
+                    raise RuntimeError('GGUF_RESIDENT_UNAVAILABLE: no se cargó el limpiador selectivo; no se conservan pesos')
         except BaseException:
             guard = self.guard
             self.unload()
@@ -471,10 +502,14 @@ def _resident(model_id: str = MODEL_ID) -> _ResidentComfy | None:
 
 def _open_resident(job: Any, names: dict[str, str], model_id: str = MODEL_ID, runtime_root: Path | None = None) -> _ResidentComfy:
     session = _resident(model_id)
-    if session is not None and getattr(session, "options", ("auto", False)) != job_options(job):
+    if session is not None and (getattr(session, "options", ("auto", False)) != job_options(job)
+                                or getattr(session, "keep_loaded", False) != _keep_loaded(job)):
         memory_manager.unload_slot("video")
         session = None
     if session is not None:
+        if getattr(session, 'guard', None):
+            session.guard.job = job
+        session.cleanup_ok = False
         return session
     session = _ResidentComfy(job, names, runtime_root) if runtime_root else _ResidentComfy(job, names)
     try:
@@ -521,7 +556,9 @@ def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any, model_id: s
         if not reply.ok:
             raise RuntimeError(f"GGUF_GRAPH_REJECTED: {reply.text[:1200]}")
         ident = reply.json()["prompt_id"]
-        job.log("Grafo aceptado. Comfy gestiona la carga y descarga durante esta generación; al terminar se liberará el motor.", progress=40, step="Cargando componentes LTX")
+        job.log("Grafo aceptado. Comfy gestiona la carga y el offload durante la generación; " +
+                ("se intentará conservar los pesos al terminar." if getattr(session, 'keep_loaded', False) else "el motor se liberará al terminar."),
+                progress=40, step="Cargando componentes LTX")
         deadline = time.monotonic() + 3600
         current_node = None
         names = {"1":"transformer", "2":"codificador de texto", "3":"VAE vídeo", "4":"VAE audio",
@@ -565,6 +602,21 @@ def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any, model_id: s
                     paths = list(output_dir.glob(prefix + "_*.mp4"))
                     if len(paths) != 1:
                         raise RuntimeError("GGUF_OUTPUT_MISSING: no se produjo un MP4 único")
+                    if getattr(session, 'keep_loaded', False):
+                        try:
+                            response = requests.get(session.base + '/studio-resident/status', timeout=10)
+                            response.raise_for_status()
+                            cleaned = response.json()
+                            if cleaned.get('version') != 1 or cleaned.get('prompt_id') != ident or cleaned.get('ok') is not True:
+                                raise RuntimeError('limpieza selectiva no confirmada')
+                            response = requests.post(session.base + '/history', json={'delete': [ident]}, timeout=10)
+                            response.raise_for_status()
+                            session.cleanup_ok = True
+                            kept = cleaned.get('retained_loaders', 0)
+                            job.log(f'Temporales de ejecución retirados; {kept}/4 cargadores conservados. Comfy puede mover o descargar pesos bajo presión.')
+                        except Exception as exc:
+                            session.cleanup_ok = False
+                            job.log(f'No se confirmó la limpieza selectiva ({exc}); se cerrará Comfy tras guardar el vídeo.', level='warning')
                     job.heartbeat(progress=96, step="Verificando audio y vídeo")
                     return paths[0]
             job.heartbeat()
@@ -578,6 +630,33 @@ def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any, model_id: s
     finally:
         stop.set()
         thread.join(timeout=3)
+
+
+def _finish_session(session: Any, job: Any, success: bool) -> None:
+    keep = (success and _keep_loaded(job) and getattr(session, 'keep_loaded', False)
+            and getattr(session, 'cleanup_ok', False) and not getattr(job, 'cancel_requested', False)
+            and session.alive())
+    if keep:
+        try:
+            # All paths are private to this process, never the user's result directory.
+            for folder in (session.input_dir, session.output_dir, session.root / 'temp'):
+                if folder.is_symlink():
+                    raise RuntimeError('directorio temporal inesperado')
+                if folder.exists():
+                    shutil.rmtree(folder)
+                folder.mkdir(parents=True, exist_ok=True)
+            # Comfy appends its own 'temp' subdirectory to --temp-directory.
+            (session.root / 'temp' / 'temp').mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            job.log(f'No se pudieron retirar todos los temporales ({exc}); se cerrará el motor.', level='warning')
+            keep = False
+    if keep:
+        if getattr(session, 'guard', None):
+            session.guard.job = None  # idle watchdog remains active, without an old job cancellation
+        job.log('Comfy permanece activo con los cargadores disponibles; se liberará al vaciar memoria o bajo presión. Los pesos no se garantizan en VRAM.')
+    else:
+        memory_manager.unload_slot('video')
+        job.log('Motor Comfy liberado; los archivos descargados permanecen en disco.')
 
 
 def _fingerprint():
@@ -594,12 +673,13 @@ def _prepare_gguf(job: Any, *, extra_ram: float = 0, extra_vram: float = 0) -> d
     if not gpu.get("has_gpu") or not gpu.get("bf16_supported") or float(gpu.get("vram_total_gb") or 0) < 16:
         raise RuntimeError("GGUF_GPU_UNSUPPORTED: se necesita una GPU BF16 con al menos 16 GiB; no se descargó nada")
     session = _resident()
-    if session is not None and getattr(session, "options", ("auto", False)) != job_options(job):
+    if session is not None and (getattr(session, "options", ("auto", False)) != job_options(job)
+                                or getattr(session, "keep_loaded", False) != _keep_loaded(job)):
         memory_manager.unload_slot("video")
         session = None
     if session is not None:
         job.log("Comfy activo: estimaciones orientativas; continúa la vigilancia de memoria real.", level="warning")
-        job.log("Reutilizando motor GGUF y su caché; Comfy puede mover o liberar pesos según la presión de memoria.")
+        job.log("Reutilizando motor GGUF y cargadores; Comfy puede mover o liberar pesos según la presión de memoria.")
         return session.names
     slot = memory_manager.get_slot("video")
     if slot:
@@ -787,6 +867,7 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
     audio_name = None
     generated = None
     session = _open_resident(job, names)
+    completed = False
     try:
         if image_path is not None:
             image_name = f"frame_{suffix}.png"
@@ -821,6 +902,7 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
         if dest.exists():
             raise RuntimeError("GGUF_OUTPUT_COLLISION: no se sobrescribirá el vídeo existente")
         shutil.copyfile(generated, dest)
+        completed = True
     except Exception:
         guard = getattr(session, "guard", None)
         if guard:
@@ -834,9 +916,11 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
                 (session.input_dir / audio_name).unlink(missing_ok=True)
             if generated:
                 generated.unlink(missing_ok=True)
+        except Exception:
+            completed = False
+            raise
         finally:
-            memory_manager.unload_slot("video")
-            job.log("Motor Comfy liberado tras la generación; los archivos descargados permanecen en disco.")
+            _finish_session(session, job, completed)
     meta = {"id": dest.stem, "filename": name, "rel_path": f"outputs/videos/{name}", "media_url": f"/media/outputs/videos/{name}",
             "type": "video", "model_id": MODEL_ID, "model_name": "LTX 2.3 destilado GGUF Q4 experimental",
             "video_submode": "i2v" if image_path else "t2v", "audio_native": True, "prompt": prompt, "seed": seed,
@@ -847,5 +931,9 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
             "comfy_vram_mode": job_options(job)[0], "comfy_evict_models": job_options(job)[1],
             "effective_prompt": effective_prompt, "guidance_scale": 1.0, "elapsed_seconds": round(time.monotonic() - started, 2),
             "created_at": datetime.now().isoformat(timespec="seconds")}
-    (VIDEOS_OUT_DIR / (dest.stem + ".json")).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf8")
+    try:
+        (VIDEOS_OUT_DIR / (dest.stem + ".json")).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf8")
+    except BaseException:
+        memory_manager.unload_slot("video")
+        raise
     return meta

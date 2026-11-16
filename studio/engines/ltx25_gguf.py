@@ -155,12 +155,13 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
     if not gpu.get('has_gpu') or not gpu.get('bf16_supported') or float(gpu.get('vram_total_gb') or 0) < 16:
         raise RuntimeError('GGUF_GPU_UNSUPPORTED: LTX 2.5 requiere GPU BF16 con al menos 16 GiB; no se descargó nada')
     session = common._resident(model_id)
-    if session and getattr(session, "options", ("auto", False)) != common.job_options(job):
+    if session and (getattr(session, "options", ("auto", False)) != common.job_options(job)
+                    or getattr(session, "keep_loaded", False) != common._keep_loaded(job)):
         memory_manager.unload_slot("video")
         session = None
     if session:
         job.log('Comfy activo: las estimaciones adicionales son orientativas; sigue la vigilancia de memoria real.', level='warning')
-        job.log('Reutilizando motor LTX 2.5 y caché; Comfy puede mover o liberar pesos bajo presión.')
+        job.log('Reutilizando motor LTX 2.5 y cargadores; Comfy puede mover o liberar pesos bajo presión.')
         return session.names
     q5 = model_id in Q5_IDS
     base_ram, base_vram = base_memory_budget(model_id)
@@ -308,6 +309,7 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
     suffix, generated, image_name, audio_name = uuid.uuid4().hex, None, None, None
     session = (common._open_resident(job, names, model_id, Q5_RUNTIME) if model_id in Q5_IDS
                else common._open_resident(job, names, model_id))
+    completed = False
     try:
         if voice_mode == 'voice_reference':
             response = common.requests.get(session.base + '/object_info', timeout=20)
@@ -350,6 +352,7 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
         if dest.exists():
             raise RuntimeError('GGUF_OUTPUT_COLLISION: no se sobrescribirá el vídeo')
         shutil.copyfile(generated, dest)
+        completed = True
     except Exception:
         guard = getattr(session, 'guard', None)
         if guard:
@@ -363,9 +366,11 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
                 (session.input_dir / audio_name).unlink(missing_ok=True)
             if generated:
                 generated.unlink(missing_ok=True)
+        except Exception:
+            completed = False
+            raise
         finally:
-            memory_manager.unload_slot('video')
-            job.log('Motor Comfy liberado tras la generación; los archivos descargados permanecen en disco.')
+            common._finish_session(session, job, completed)
     meta = {'id': dest.stem, 'filename': name, 'rel_path': f'outputs/videos/{name}', 'media_url': f'/media/outputs/videos/{name}',
             'type': 'video', 'model_id': model_id, 'model_name': f'LTX 2.5 destilado {MODELS[model_id][0]} experimental',
             'video_submode': 'i2v' if image_path else 't2v', 'audio_native': True, 'prompt': prompt, 'effective_prompt': effective,
@@ -375,5 +380,9 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
             'comfy_vram_mode': common.job_options(job)[0], 'comfy_evict_models': common.job_options(job)[1],
             'voice_mode': voice_mode, 'source_audio_duration_seconds': voice_info.get('duration_seconds') if voice_info else None,
             'elapsed_seconds': round(time.monotonic()-started, 2), 'created_at': datetime.now().isoformat(timespec='seconds')}
-    (VIDEOS_OUT_DIR / (dest.stem + '.json')).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf8')
+    try:
+        (VIDEOS_OUT_DIR / (dest.stem + '.json')).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf8')
+    except BaseException:
+        memory_manager.unload_slot("video")
+        raise
     return meta

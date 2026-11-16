@@ -3526,21 +3526,24 @@
 
     const comfyMode = $("comfy-vram-mode");
     const comfyEvict = $("comfy-evict-models");
+    const comfyKeep = $("comfy-keep-loaded");
     try {
       const saved = JSON.parse(localStorage.getItem("studio-comfy-offload-v1") || "{}");
       if (["auto", "lowvram", "novram", "highvram"].includes(saved.mode)) comfyMode.value = saved.mode;
       comfyEvict.checked = saved.evict === true;
+      comfyKeep.checked = saved.keep === true;
     } catch (_e) { /* defaults */ }
     function syncComfyOptions() {
       comfyEvict.disabled = comfyMode.value === "highvram";
       if (comfyEvict.disabled) comfyEvict.checked = false;
-      try { localStorage.setItem("studio-comfy-offload-v1", JSON.stringify({mode: comfyMode.value, evict: comfyEvict.checked})); } catch (_e) {}
+      try { localStorage.setItem("studio-comfy-offload-v1", JSON.stringify({mode: comfyMode.value, evict: comfyEvict.checked, keep: comfyKeep.checked})); } catch (_e) {}
     }
     comfyMode.addEventListener("change", syncComfyOptions);
     comfyEvict.addEventListener("change", syncComfyOptions);
+    comfyKeep.addEventListener("change", syncComfyOptions);
     syncComfyOptions();
     function comfyOptions() {
-      return {comfy_vram_mode: comfyMode.value, comfy_evict_models: comfyEvict.checked};
+      return {comfy_vram_mode: comfyMode.value, comfy_evict_models: comfyEvict.checked, comfy_keep_loaded: comfyKeep.checked};
     }
 
     async function prepareLtxGguf() {
