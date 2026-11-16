@@ -33,6 +33,7 @@ from studio.engines.ltx_gguf_workflow import make_graph
 from studio.hardware import hardware_tracker, query_gpu_info
 from studio.memory_manager import memory_manager, serialized_gpu_operation
 from studio.memory_policy import host_memory, pressure, reserves, number, MemoryPressureError
+from studio.comfy_options import flags as comfy_flags, job_options
 
 COMFY_COMMIT = "7ad7adb38f6cbb6c2b0713d3bd44c3fb2b9c8ebe"
 GGUF_COMMIT = "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
@@ -242,7 +243,8 @@ def _runtime_env() -> dict:
     return env
 
 
-def _server_command(port: int, input_dir: Path, output_dir: Path, root: Path | None = None) -> list[str]:
+def _server_command(port: int, input_dir: Path, output_dir: Path, root: Path | None = None,
+                    config: tuple[str, bool] = ("auto", False)) -> list[str]:
     root = root or ROOT
     source = root / "comfy"
     ram_reserve = max(2.0, host_memory()["total_gb"] * 0.1)
@@ -251,7 +253,7 @@ def _server_command(port: int, input_dir: Path, output_dir: Path, root: Path | N
             # an alias of --offline; in 0.33 it disables API nodes and frontend internet.
             "--disable-auto-launch", "--disable-api-nodes", "--disable-metadata", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "ComfyUI-GGUF", "StudioVoice", "StudioStrictMSR",
             "--cache-ram", f"{ram_reserve:.2f}", f"{ram_reserve:.2f}",
-            "--input-directory", str(input_dir), "--output-directory", str(output_dir), "--reserve-vram", "1.8"]
+            "--input-directory", str(input_dir), "--output-directory", str(output_dir), "--reserve-vram", "1.8"] + comfy_flags(config)
 
 
 def _wait_server(proc: subprocess.Popen, base: str, logfile: Any, job: Any) -> None:
@@ -278,7 +280,7 @@ def _probe_runtime(job: Any, extra_required: set[str] | None = None, root: Path 
         inp, out = Path(tmp) / "in", Path(tmp) / "out"
         inp.mkdir(); out.mkdir()
         port = _free_port(); base = f"http://127.0.0.1:{port}"
-        proc = subprocess.Popen(_server_command(port, inp, out, root), cwd=root / "comfy", env=_runtime_env(), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        proc = subprocess.Popen(_server_command(port, inp, out, root, job_options(job)), cwd=root / "comfy", env=_runtime_env(), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         guard = _ComfyMemoryGuard(proc, job)
         try:
             _wait_server(proc, base, log, job)
@@ -409,13 +411,15 @@ class _ResidentComfy:
         self.input_dir, self.output_dir = self.root / "input", self.root / "output"
         self.input_dir.mkdir(); self.output_dir.mkdir()
         self.names = names
+        self.options = job_options(job)
+        job.log(f"Comfy: política VRAM {self.options[0]}, descarga agresiva entre modelos: {'sí' if self.options[1] else 'no'}; memoria real vigilada.")
         self.port = _free_port()
         self.base = f"http://127.0.0.1:{self.port}"
         self.log = tempfile.TemporaryFile()
         self.proc = None
         self.guard = None
         try:
-            self.proc = subprocess.Popen(_server_command(self.port, self.input_dir, self.output_dir, runtime_root), cwd=runtime_root / "comfy",
+            self.proc = subprocess.Popen(_server_command(self.port, self.input_dir, self.output_dir, runtime_root, self.options), cwd=runtime_root / "comfy",
                                          env=_runtime_env(), stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
             self.guard = _ComfyMemoryGuard(self.proc, job)
             _wait_server(self.proc, self.base, self.log, job)
@@ -458,6 +462,9 @@ def _resident(model_id: str = MODEL_ID) -> _ResidentComfy | None:
 
 def _open_resident(job: Any, names: dict[str, str], model_id: str = MODEL_ID, runtime_root: Path | None = None) -> _ResidentComfy:
     session = _resident(model_id)
+    if session is not None and getattr(session, "options", ("auto", False)) != job_options(job):
+        memory_manager.unload_slot("video")
+        session = None
     if session is not None:
         return session
     session = _ResidentComfy(job, names, runtime_root) if runtime_root else _ResidentComfy(job, names)
@@ -578,6 +585,9 @@ def _prepare_gguf(job: Any, *, extra_ram: float = 0, extra_vram: float = 0) -> d
     if not gpu.get("has_gpu") or not gpu.get("bf16_supported") or float(gpu.get("vram_total_gb") or 0) < 16:
         raise RuntimeError("GGUF_GPU_UNSUPPORTED: se necesita una GPU BF16 con al menos 16 GiB; no se descargó nada")
     session = _resident()
+    if session is not None and getattr(session, "options", ("auto", False)) != job_options(job):
+        memory_manager.unload_slot("video")
+        session = None
     if session is not None:
         job.log("Comfy activo: estimaciones orientativas; continúa la vigilancia de memoria real.", level="warning")
         job.log("Reutilizando motor GGUF y su caché; Comfy puede mover o liberar pesos según la presión de memoria.")
@@ -825,6 +835,7 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
             "requested_duration_sec": duration_sec, "frames": frames, "duration_warning": duration_warning,
             "voice_mode": voice_mode, "source_audio_duration_seconds": voice_info.get('duration_seconds') if voice_info else None,
             "speech_language_hint": speech_language, "image_strength": image_strength if image_path else None,
+            "comfy_vram_mode": job_options(job)[0], "comfy_evict_models": job_options(job)[1],
             "effective_prompt": effective_prompt, "guidance_scale": 1.0, "elapsed_seconds": round(time.monotonic() - started, 2),
             "created_at": datetime.now().isoformat(timespec="seconds")}
     (VIDEOS_OUT_DIR / (dest.stem + ".json")).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf8")

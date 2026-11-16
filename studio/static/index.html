@@ -440,10 +440,26 @@
               <p class="muted">LTX 2.5 GGUF con Gemma 4 BF16 utiliza un codificador grande (~24,5 GiB); puede superar la memoria. El modo de referencia MSR y audio completo son experimentales, sin prueba de inferencia GPU.</p>
               <p class="muted">LTX 2.5 GGUF con Gemma 4 Q5 es una receta diferente al modelo FP8. Para descargarla: <a href="https://huggingface.co/elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF" target="_blank" rel="noopener noreferrer">acepta las condiciones de elix3r en Hugging Face</a> y activa en Studio un token de lectura de esa cuenta. Algunas generaciones UD-Q4 + Q5 se completaron en L4; eso no garantiza su calidad ni encaje en esta sesión.</p>
               <p class="muted">También disponible: <strong>LTX 2.5 22B destilado NVFP4 Comfy DDB + Gemma Q5</strong>, conversión comunitaria experimental. No se ha probado el flujo completo en Studio/L4; la L4 no dispone de FP4 nativo. Requiere acceso a Gemma Q5 y puede fallar por memoria o compatibilidad.</p>
-              <p class="muted">Nueva opción experimental: <strong>LTX 2.5 FP8 Comfy + Gemma 4 GGUF Q5</strong>. El transformer se descarga ya convertido a FP8; no es la conversión desde BF16 de la receta FP8 en memoria. Requiere acceso elix3r, puede usar CPU offload y no se ha validado en GPU/L4. Comienza con un clip de unos 2 s; el presupuesto puede impedir la carga.</p>
+              <p class="muted">Nueva opción experimental: <strong>LTX 2.5 FP8 Comfy + Gemma 4 GGUF Q5</strong>. El transformer se descarga ya convertido a FP8; no es la conversión desde BF16 de la receta FP8 en memoria. Requiere acceso elix3r, puede usar CPU offload y no se ha validado en GPU/L4. Comienza con un clip de unos 2 s; la presión real puede detener la carga.</p>
               <p class="muted">LTX 2.5 FP8 en memoria es otro modelo: exige un presupuesto preventivo de 72 GiB de RAM más reserva. Si esta sesión solo tiene 53 GiB de RAM, no podrá cargarse con esta política. No se relajan las guardias.</p>
               <p class="muted">LTX 2.3 descarga ~24 GiB más dependencias; se requieren licencias LTX y Gemma. Al terminar cada vídeo se libera el motor y la RAM/VRAM que ocupa; los pesos permanecen en disco y se vuelven a cargar al generar. Las voces constantes no están garantizadas.</p>
               <p id="ltx-gguf-error" role="alert" hidden></p>
+            </div>
+          </div>
+
+          <div id="comfy-offload-settings" class="ltx-gguf-callout" hidden>
+            <div class="ltx-gguf-copy">
+              <strong>⚙️ Memoria y offload de Comfy (solo LTX GGUF/Comfy)</strong>
+              <p class="muted">Comfy ya intercambia componentes y puede repartir pesos entre RAM y GPU automáticamente. No dispone de dos interruptores totalmente independientes. Estas opciones seleccionan políticas reales de Comfy; el resultado depende del modelo y del runtime.</p>
+              <label for="comfy-vram-mode">Política de capas y VRAM</label>
+              <select id="comfy-vram-mode">
+                <option value="auto">Automático (recomendado para empezar)</option>
+                <option value="lowvram">Capas: lowvram (experimental, VRAM dinámica desactivada)</option>
+                <option value="novram">Capas: novram extremo (muy lento)</option>
+                <option value="highvram">Priorizar GPU: highvram (menos offload, mayor riesgo de OOM)</option>
+              </select>
+              <label class="gpu-compat-toggle"><input type="checkbox" id="comfy-evict-models"> <span>Descarga más agresiva entre modelos hacia RAM</span></label>
+              <p class="muted">Desmarcado no desactiva el offload automático. Lowvram también puede llevar el codificador a CPU; highvram no garantiza que todo permanezca en GPU. Offload suele reducir VRAM a costa de RAM y velocidad. Se aplica al próximo proceso; el vigilante sigue activo y los pesos se conservan en disco.</p>
             </div>
           </div>
 

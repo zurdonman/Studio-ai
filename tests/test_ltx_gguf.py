@@ -1396,3 +1396,98 @@ def test_comfy_guard_monitors_ram_even_if_gpu_measurement_hangs(monkeypatch):
         release.set()
         guard.close()
         b._stop(proc)
+
+
+@pytest.mark.parametrize('mode,evict,expected', [
+    ('auto', False, []), ('auto', True, ['--disable-smart-memory']),
+    ('lowvram', False, ['--disable-dynamic-vram', '--lowvram']),
+    ('lowvram', True, ['--disable-dynamic-vram', '--lowvram', '--disable-smart-memory']),
+    ('novram', False, ['--novram']), ('novram', True, ['--novram', '--disable-smart-memory']),
+    ('highvram', False, ['--highvram']),
+])
+def test_comfy_offload_command_policy_is_allowlisted(monkeypatch, tmp_path, mode, evict, expected):
+    from studio.engines import ltx_gguf_backend as b
+    monkeypatch.setattr(b, 'host_memory', lambda: {'total_gb': 53})
+    for root in (tmp_path/'base', tmp_path/'q5'):
+        base = b._server_command(8188, tmp_path/'in', tmp_path/'out', root)
+        assert b._server_command(8188, tmp_path/'in', tmp_path/'out', root, (mode, evict)) == base + expected
+        assert '--reserve-vram' in base
+    with pytest.raises(ValueError):
+        b._server_command(8188, tmp_path/'in', tmp_path/'out', tmp_path, ('--gpu-only', False))
+    with pytest.raises(ValueError):
+        b._server_command(8188, tmp_path/'in', tmp_path/'out', tmp_path, ('highvram', True))
+
+
+def test_comfy_options_api_snapshots_job_and_rejects_conflicts(temp_studio_env, monkeypatch):
+    import time
+    from studio.engines import ltx_gguf_backend as b, ltx25_gguf as b25
+    client, _ = temp_studio_env
+    seen = []
+    monkeypatch.setattr(b, 'generate_gguf', lambda **kw: seen.append(('23', kw['job'].comfy_options)) or {})
+    monkeypatch.setattr(b25, 'generate', lambda **kw: seen.append(('25', kw['job'].comfy_options)) or {})
+    monkeypatch.setattr(b25, 'prepare', lambda mid, *, job: seen.append(('prep', job.comfy_options)) or {})
+    assert client.post('/api/video/ltx-gguf', json={'prompt':'x', 'comfy_vram_mode':'invalid'}).status_code == 422
+    assert client.post('/api/video/ltx-gguf', json={'prompt':'x', 'comfy_vram_mode':'highvram', 'comfy_evict_models':True}).status_code == 400
+    assert client.post('/api/video/ltx-gguf/prepare?comfy_vram_mode=highvram&comfy_evict_models=true').status_code == 400
+    assert client.post('/api/video/ltx-gguf', json={'prompt':'x', 'comfy_vram_mode':'lowvram', 'comfy_evict_models':True}).status_code == 200
+    assert client.post('/api/video/ltx-gguf', json={'prompt':'x', 'model_id':b25.NVFP4_Q5_ID, 'comfy_vram_mode':'novram'}).status_code == 200
+    assert client.post('/api/video/ltx-gguf/prepare', params={'model_id': b25.NVFP4_Q5_ID, 'comfy_vram_mode':'highvram'}).status_code == 200
+    for _ in range(100):
+        if len(seen) == 3: break
+        time.sleep(.02)
+    assert sorted(seen) == sorted([('23', ('lowvram', True)), ('25', ('novram', False)), ('prep', ('highvram', False))])
+
+
+def test_catalog_never_invents_offload_numbers(temp_studio_env):
+    client, _ = temp_studio_env
+    models = client.get('/api/catalog').json()['models']
+    assert models
+    for model in models:
+        data = model['offload_estimates']
+        assert data['supported'] == (model.get('engine') == 'ltx_gguf')
+        assert data['model_offload'] == {'ram_gb': None, 'vram_gb': None}
+        assert data['layer_offload'] == {'ram_gb': None, 'vram_gb': None}
+        assert data['confidence'] == 'unknown_not_measured'
+
+
+def test_comfy_runtime_receives_job_options_and_cleans_up(monkeypatch, tmp_path):
+    import sys
+    from studio.engines import ltx_gguf_backend as b
+    from studio.jobs import JobRecord
+    root = tmp_path / 'runtime'
+    (root / 'comfy').mkdir(parents=True)
+    monkeypatch.setattr(b, 'TEMP_DIR', tmp_path)
+    monkeypatch.setattr(b, 'host_memory', lambda: {'total_gb': 53, 'available_gb': 30})
+    monkeypatch.setattr(b, 'query_gpu_info', lambda: {'has_gpu': True, 'vram_free_gb': 10, 'vram_total_gb': 22})
+    monkeypatch.setattr(b, '_wait_server', lambda *args: None)
+    commands = []
+    def command(port, inp, out, runtime, config):
+        commands.append((runtime, config))
+        return [sys.executable, '-c', 'import time; time.sleep(60)']
+    monkeypatch.setattr(b, '_server_command', command)
+    job = JobRecord('video', 'test')
+    job.comfy_options = ('lowvram', True)
+    session = b._ResidentComfy(job, {}, root)
+    proc, temp = session.proc, session.root
+    try:
+        assert session.options == ('lowvram', True) and commands == [(root, ('lowvram', True))]
+    finally:
+        session.unload()
+    assert proc.poll() is not None and not temp.exists()
+
+
+def test_comfy_changed_policy_restarts_resident(monkeypatch):
+    from types import SimpleNamespace
+    from studio.engines import ltx_gguf_backend as b
+    from studio.jobs import JobRecord
+    calls = []
+    old = SimpleNamespace(options=('auto', False))
+    new = SimpleNamespace(options=('novram', False))
+    job = JobRecord('video', 'test')
+    job.comfy_options = ('novram', False)
+    monkeypatch.setattr(b, '_resident', lambda *args: old)
+    monkeypatch.setattr(b.memory_manager, 'unload_slot', lambda slot: calls.append(('unload', slot)))
+    monkeypatch.setattr(b.memory_manager, 'register_loaded', lambda *args: calls.append(('register', args[1])))
+    monkeypatch.setattr(b, '_ResidentComfy', lambda job, names: new)
+    assert b._open_resident(job, {}) is new
+    assert calls == [('unload', 'video'), ('register', b.MODEL_ID)]

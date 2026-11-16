@@ -155,6 +155,9 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
     if not gpu.get('has_gpu') or not gpu.get('bf16_supported') or float(gpu.get('vram_total_gb') or 0) < 16:
         raise RuntimeError('GGUF_GPU_UNSUPPORTED: LTX 2.5 requiere GPU BF16 con al menos 16 GiB; no se descargó nada')
     session = common._resident(model_id)
+    if session and getattr(session, "options", ("auto", False)) != common.job_options(job):
+        memory_manager.unload_slot("video")
+        session = None
     if session:
         job.log('Comfy activo: las estimaciones adicionales son orientativas; sigue la vigilancia de memoria real.', level='warning')
         job.log('Reutilizando motor LTX 2.5 y caché; Comfy puede mover o liberar pesos bajo presión.')
@@ -369,6 +372,7 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
             'seed': seed, 'width': info.get('width'), 'height': info.get('height'), 'duration_seconds': info.get('duration_seconds'),
             'fps': fps, 'steps': 8, 'guidance_scale': 1.0, 'requested_duration_sec': duration_sec, 'frames': frames,
             'duration_warning': warning, 'speech_language_hint': speech_language, 'image_strength': image_strength if image_path else None,
+            'comfy_vram_mode': common.job_options(job)[0], 'comfy_evict_models': common.job_options(job)[1],
             'voice_mode': voice_mode, 'source_audio_duration_seconds': voice_info.get('duration_seconds') if voice_info else None,
             'elapsed_seconds': round(time.monotonic()-started, 2), 'created_at': datetime.now().isoformat(timespec='seconds')}
     (VIDEOS_OUT_DIR / (dest.stem + '.json')).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf8')

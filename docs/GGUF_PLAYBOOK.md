@@ -54,3 +54,39 @@ Fuentes generales: [Unsloth LTX 2.3 y workflow](https://huggingface.co/unsloth/L
 La investigación de coherencia de voz y sus limitaciones prácticas está en [VOICE_GGUF_RESEARCH.md](VOICE_GGUF_RESEARCH.md).
 
 Sobre codificadores de texto GGUF, situación de Gemma 3 en LTX 2.3 y candidato Gemma 4 para LTX 2.5, véase [investigación de text encoders GGUF](GGUF_TEXT_ENCODERS_RESEARCH.md). La variante Gemma 4 GGUF Q5 ya es seleccionable, pero aún no está probada con pesos reales ni en L4.
+
+## Políticas de memoria Comfy seleccionables
+
+En Vídeo, para todas las recetas LTX con este backend aislado, la interfaz guarda
+la opción en el navegador y la envía con cada preparación o generación; cada
+trabajo conserva su propia selección. El proceso se reinicia si cambia la política
+(no se borran pesos). Los otros motores, incluidos Diffusers, usan sus propios
+mecanismos y **no** reciben estos ajustes.
+
+- **Automático**: sin banderas de modo. Comfy administra componentes, modelos y
+  carga parcial según dispositivos y memoria; no es una garantía de secuencia fija.
+- **Descarga agresiva entre modelos**: `--disable-smart-memory`. Hace más agresiva
+  la liberación en las llamadas internas de Comfy; no asegura descargar cada
+  componente inmediatamente tras su nodo. Desmarcarla restaura la gestión automática,
+  no desactiva todo offload. Combinable con automático, lowvram y novram.
+- **Lowvram**: `--disable-dynamic-vram --lowvram`. Los dos commits fijados indican
+  que `--lowvram` no tiene efecto con VRAM dinámica; por eso se desactiva para
+  esta política heredada. También puede colocar el encoder en CPU. La carga parcial
+  depende del modelo y de Comfy: no equivale a un interruptor universal que
+  garantice mover todas las capas secuencialmente.
+- **Novram**: `--novram` fuerza un presupuesto de pesos en GPU mínimo, con coste
+  potencialmente muy elevado de tiempo. Activaciones, VAE y otras reservas siguen
+  ocupando VRAM; no implica consumo cero ni evita un OOM.
+- **Highvram**: `--highvram` prioriza mantener modelos en GPU y no activa la vía
+  normal de carga parcial; aumenta el riesgo en L4 y no garantiza que nada pueda
+  descargarse si Comfy necesita liberar memoria. Es incompatible con la descarga
+  agresiva en esta interfaz y API.
+
+Las estimaciones base del catálogo siguen siendo orientativas y pueden ya incluir
+CPU offload; no son comparables como «sin offload» frente a «con offload». No hay
+mediciones de RAM/VRAM por política para estos modelos, por lo que se muestran
+como desconocidas en lugar de aplicar reducciones inventadas. La VRAM ahorrada,
+el aumento de RAM y la velocidad dependen del grafo y de cada generación. El
+vigilante y las reservas siguen activos en todas las opciones; el sondeo no
+puede garantizar prevenir todos los OOM o reinicios. No se ha validado una
+inferencia real con estas opciones en GPU/L4.

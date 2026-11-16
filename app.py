@@ -534,6 +534,14 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
             "scope": "adapter_increment" if model.get("category") == "lora" else "base_recipe",
             "confidence": "planning_estimate_not_measured_peak",
         }
+        # No per-policy benchmarks exist. Do not invent a percentage reduction;
+        # base estimates may already include an engine's existing CPU offload.
+        model["offload_estimates"] = {
+            "supported": model.get("engine") == "ltx_gguf",
+            "model_offload": {"ram_gb": None, "vram_gb": None},
+            "layer_offload": {"ram_gb": None, "vram_gb": None},
+            "confidence": "unknown_not_measured",
+        }
         model["hardware_assessment"] = model["compatibility"]
         if model["category"] == "image":
             model["image_defaults"] = image_defaults(model)
@@ -1028,10 +1036,26 @@ class LTXGGUFReq(BaseModel):
     fps: int = Field(default=24, ge=8, le=30)
     speech_language: Literal["auto", "es"] = "auto"
     image_strength: float = Field(default=1.0, ge=0.5, le=1.0, allow_inf_nan=False)
+    comfy_vram_mode: Literal["auto", "lowvram", "novram", "highvram"] = "auto"
+    comfy_evict_models: bool = False
+
+
+def _comfy_job_function(fn, config):
+    def run(job):
+        job.comfy_options = config
+        return fn(job)
+    return run
 
 
 @app.post("/api/video/ltx-gguf/prepare")
-def api_prepare_ltx_gguf(model_id: str = "ltx-2.3-distilled-gguf-q4-experimental") -> Dict[str, Any]:
+def api_prepare_ltx_gguf(model_id: str = "ltx-2.3-distilled-gguf-q4-experimental",
+                         comfy_vram_mode: Literal["auto", "lowvram", "novram", "highvram"] = "auto",
+                         comfy_evict_models: bool = False) -> Dict[str, Any]:
+    from studio.comfy_options import options
+    try:
+        config = options(comfy_vram_mode, comfy_evict_models)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     from studio.engines.ltx_gguf_backend import prepare_gguf
     from studio.engines.ltx25_gguf import MODELS, FP8_Q5_ID, NVFP4_Q5_ID, prepare as prepare25
     if model_id == "ltx-2.3-distilled-gguf-q4-experimental":
@@ -1042,12 +1066,17 @@ def api_prepare_ltx_gguf(model_id: str = "ltx-2.3-distilled-gguf-q4-experimental
         fn = lambda j: prepare25(model_id, job=j)
     else:
         raise HTTPException(status_code=400, detail="Modelo GGUF desconocido")
-    job = job_manager.submit(kind="download", title=title, fn=fn, dedup_key=f"ltx-gguf-prepare:{model_id}")
+    job = job_manager.submit(kind="download", title=title, fn=_comfy_job_function(fn, config), dedup_key=f"ltx-gguf-prepare:{model_id}:{config}")
     return {"ok": True, "job": job.to_dict()}
 
 
 @app.post("/api/video/ltx-gguf")
 def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
+    from studio.comfy_options import options
+    try:
+        config = options(req.comfy_vram_mode, req.comfy_evict_models)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     from studio.engines.ltx_gguf_backend import generate_gguf
     from studio.engines.ltx25_gguf import MODELS, FP8_Q5_ID, NVFP4_Q5_ID, generate as generate25
     if not req.prompt.strip():
@@ -1089,7 +1118,7 @@ def api_ltx_gguf(req: LTXGGUFReq) -> Dict[str, Any]:
         if req.voice_mode != 'none':
             kwargs.update(voice_mode=req.voice_mode, voice_path=voice)
         fn = lambda j: generate_gguf(job=j, **kwargs)
-    job = job_manager.submit(kind="video", title=title, fn=fn)
+    job = job_manager.submit(kind="video", title=title, fn=_comfy_job_function(fn, config))
     return {"ok": True, "job": job.to_dict()}
 
 

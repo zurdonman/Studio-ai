@@ -102,9 +102,14 @@ const model = (id, fit, extra = {}) => ({
   card.click();
   if ($("select-video-model").value !== ggufId || !$("btn-prepare-video").textContent.includes("GGUF")) throw Error("GGUF selection or prepare label missing");
   if ($("vid-gguf-reference-info").hidden || !$("vid-gguf-reference-info").textContent.includes("muestra de voz") || !$("vid-gguf-reference-info").textContent.includes("no una foto")) throw Error("LTX 2.3 voice and face reference distinction missing");
+  if ($("comfy-offload-settings").hidden) throw Error("Comfy options not visible for GGUF");
+  $("comfy-vram-mode").value = "lowvram"; $("comfy-vram-mode").dispatchEvent(new w.Event("change"));
+  $("comfy-evict-models").checked = true; $("comfy-evict-models").dispatchEvent(new w.Event("change"));
+  if (JSON.parse(w.localStorage.getItem("studio-comfy-offload-v1")).mode !== "lowvram") throw Error("Comfy settings not saved");
   $("btn-prepare-video").click();
   await wait(20);
-  if (!requests.some(r => r.method === "POST" && r.path === "/api/video/ltx-gguf/prepare")) throw Error("GGUF prepare used wrong endpoint");
+  const prep = requests.find(r => r.method === "POST" && r.path === "/api/video/ltx-gguf/prepare");
+  if (!prep || new URLSearchParams(prep.search).get("comfy_vram_mode") !== "lowvram" || new URLSearchParams(prep.search).get("comfy_evict_models") !== "true") throw Error("GGUF prepare missing options");
   $("vid-prompt").value = "";
   $("btn-run-video").click();
   if ($("vid-gguf-feedback").hidden || !$("vid-gguf-feedback").textContent.includes("prompt")) throw Error("Missing prompt should remain visible beside generate");
@@ -121,6 +126,10 @@ const model = (id, fit, extra = {}) => ({
   await wait(20);
   const ggufRequest = requests.find(r => r.path === "/api/video/ltx-gguf" && r.method === "POST");
   if (!ggufRequest || JSON.parse(ggufRequest.body).prompt !== "A person waves" || JSON.parse(ggufRequest.body).duration_sec !== 20 || JSON.parse(ggufRequest.body).width !== 512 || JSON.parse(ggufRequest.body).speech_language !== "es" || JSON.parse(ggufRequest.body).image_strength !== .7) throw Error("GGUF generation used wrong endpoint or parameters");
+  if (JSON.parse(ggufRequest.body).comfy_vram_mode !== "lowvram" || !JSON.parse(ggufRequest.body).comfy_evict_models) throw Error("Generation missing Comfy options");
+  $("comfy-vram-mode").value = "highvram"; $("comfy-vram-mode").dispatchEvent(new w.Event("change"));
+  if (!$("comfy-evict-models").disabled || $("comfy-evict-models").checked) throw Error("High VRAM conflict not prevented");
+  if (!card.textContent.includes("desconocidas")) throw Error("Unmeasured offload estimate not disclosed");
   if ($("vid-gguf-feedback").hidden || !$("vid-gguf-feedback").textContent.includes("enviada")) throw Error("GGUF submission confirmation missing");
   if ($("vid-gguf-live-progress").hidden || $("vid-gguf-live-step").textContent !== "Difusión: paso 4/8" || $("vid-gguf-live-bar").style.width !== "50%") throw Error("GGUF concurrent progress not displayed");
   if ($("img-inline-progress").hidden || !$("img-iep-step").textContent.includes("Render imagen")) throw Error("Concurrent image progress hidden");

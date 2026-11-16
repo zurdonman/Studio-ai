@@ -1443,6 +1443,7 @@
     const gguf = isGgufModel(modelId);
     if ($("vid-duration")) $("vid-duration").max = gguf ? "20" : "10";
     if ($("vid-gguf-guidance")) $("vid-gguf-guidance").hidden = !gguf;
+    if ($("comfy-offload-settings")) $("comfy-offload-settings").hidden = !gguf;
     const referenceInfo = $("vid-gguf-reference-info");
     if (referenceInfo) {
       referenceInfo.hidden = !gguf;
@@ -1610,7 +1611,11 @@
     const estimate = m.memory_estimate || {};
     const val = v => (typeof v === "number" && Number.isFinite(v) && v >= 0) ? `~${v} GiB` : "desconocida";
     const scope = estimate.scope === "adapter_increment" ? "extra del adaptador (sin modelo base)" : "receta base";
-    return `Memoria estimada (${scope}): RAM ${val(estimate.ram_gb)} · VRAM ${val(estimate.vram_gb)}. No es un pico medido; duración, resolución y reservas pueden aumentar el uso.`;
+    const offload = m.offload_estimates || {};
+    const note = offload.supported || m.engine === "ltx_gguf"
+      ? "Con offload por modelos o por capas: RAM y VRAM desconocidas, sin mediciones por modo; más offload suele ahorrar VRAM usando más RAM y tiempo."
+      : "Estimación separada con offload por modelos/capas: desconocida; controles Comfy no aplicables a este motor.";
+    return `Memoria estimada (${scope}): RAM ${val(estimate.ram_gb)} · VRAM ${val(estimate.vram_gb)}. ${note} La cifra base puede incluir offload; no es un pico medido. Duración, resolución y reservas pueden aumentar el uso.`;
   }
 
   function renderCatalog() {
@@ -3546,6 +3551,25 @@
       }
     });
 
+    const comfyMode = $("comfy-vram-mode");
+    const comfyEvict = $("comfy-evict-models");
+    try {
+      const saved = JSON.parse(localStorage.getItem("studio-comfy-offload-v1") || "{}");
+      if (["auto", "lowvram", "novram", "highvram"].includes(saved.mode)) comfyMode.value = saved.mode;
+      comfyEvict.checked = saved.evict === true;
+    } catch (_e) { /* defaults */ }
+    function syncComfyOptions() {
+      comfyEvict.disabled = comfyMode.value === "highvram";
+      if (comfyEvict.disabled) comfyEvict.checked = false;
+      try { localStorage.setItem("studio-comfy-offload-v1", JSON.stringify({mode: comfyMode.value, evict: comfyEvict.checked})); } catch (_e) {}
+    }
+    comfyMode.addEventListener("change", syncComfyOptions);
+    comfyEvict.addEventListener("change", syncComfyOptions);
+    syncComfyOptions();
+    function comfyOptions() {
+      return {comfy_vram_mode: comfyMode.value, comfy_evict_models: comfyEvict.checked};
+    }
+
     async function prepareLtxGguf() {
       const mid = $("select-video-model").value;
       const m = state.catalog.find(x => x.id === mid);
@@ -3553,7 +3577,8 @@
       if (!confirm(`Receta experimental: se comprobarán los recursos y se instalarán hasta ${m?.estimated_gb || "varios"} GiB de pesos más entorno. Se requieren licencias LTX y Gemma. ${notice} ¿Continuar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
-        const res = await api(`/api/video/ltx-gguf/prepare?model_id=${encodeURIComponent(mid)}`, {method:"POST"});
+        const params = new URLSearchParams({model_id: mid, ...comfyOptions()});
+        const res = await api(`/api/video/ltx-gguf/prepare?${params}`, {method:"POST"});
         watchJob(res.job);
       } catch (error) {
         $("ltx-gguf-error").hidden = false;
@@ -3582,7 +3607,7 @@
       try {
         $("ltx-gguf-error").hidden = true;
         ggufFeedback("Enviando solicitud de generación LTX…");
-        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({model_id:mid, prompt, image_rel, voice_mode, audio_rel:voice_mode === "audio" ? audio : null, reference_voice_rel:voice_mode === "voice_reference" ? audio : null, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value), speech_language:$("vid-gguf-spanish").checked ? "es" : "auto", image_strength:Number($("vid-gguf-strength").value)})});
+        const res = await api("/api/video/ltx-gguf", {method:"POST", body:JSON.stringify({model_id:mid, ...comfyOptions(), prompt, image_rel, voice_mode, audio_rel:voice_mode === "audio" ? audio : null, reference_voice_rel:voice_mode === "voice_reference" ? audio : null, negative_prompt:$("vid-neg-prompt").value, seed:Number($("vid-seed").value || 0), width:Number($("vid-width").value), height:Number($("vid-height").value), duration_sec:Number($("vid-duration").value), fps:Number($("vid-fps").value), speech_language:$("vid-gguf-spanish").checked ? "es" : "auto", image_strength:Number($("vid-gguf-strength").value)})});
         if (!res || !res.job || !res.job.id) throw new Error("El servidor no devolvió una tarea de generación.");
         ggufFeedback("Generación enviada. Puedes seguir el progreso o cancelarla en el panel de tareas.");
         watchJob(res.job);
