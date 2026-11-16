@@ -1228,6 +1228,8 @@ def test_nvfp4_manifest_graph_catalog_api(temp_studio_env, monkeypatch):
     entries = {m['id']:m for m in client.get('/api/catalog').json()['models']}
     entry = entries[b.NVFP4_Q5_ID]
     assert 'NVFP4 Comfy DDB' in entry['name'] and not entry['compatibility']['compatible']
+    assert entry['execution_validation']['status'] == 'observed'
+    assert 'Cuatro clips' in entry['execution_validation']['scope'] and 'no valida calidad' in entry['execution_validation']['scope'].lower()
     assert entry['memory_estimate']['ram_gb'] == 40 and entry['memory_estimate']['vram_gb'] == 18
     calls=[]
     monkeypatch.setattr(b, 'prepare', lambda model_id, *, job: calls.append(('prepare', model_id)))

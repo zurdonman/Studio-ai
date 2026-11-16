@@ -189,7 +189,7 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         if model_id == FP8_Q5_ID:
             job.log('Transformer FP8 Comfy preconvertido: estimación base no medida 44 GiB RAM y 18 GiB VRAM; compatibilidad y picos en L4 no probados. Comfy puede usar memoria de CPU.')
         if model_id == NVFP4_Q5_ID:
-            job.log('NVFP4 DDB Comfy: estimación base no medida 40 GiB RAM y 18 GiB VRAM. En L4 falta aceleración nativa FP4; ruta de respaldo y compatibilidad no probadas en Studio.')
+            job.log('NVFP4 DDB Comfy: estimación base no medida 40 GiB RAM y 18 GiB VRAM. En L4 falta aceleración nativa FP4; cuatro clips I2V completados según un registro, sin garantizar otros modos o sesiones.')
         common._install(job, runtime, Q5_COMFY_COMMIT)
         from studio.catalog import catalog_manager
         env = os.environ.copy()

@@ -510,13 +510,16 @@ def api_get_catalog(gpu_profile: str = "auto", only_compatible: bool = False) ->
                            "min_ram_gb": ram_gb, "min_vram_gb": vram_gb,
                            "downloaded": ltx25_present(mid), "loaded_in_memory": mid in loaded_ids,
                            "compatibility": {"compatible": False, "tier": "candidate", "label": "Encaje actual desconocido", "sticker": "🧪",
-                                             "reasons": [("Generó vídeo en L4 según el usuario; condiciones y calidad no verificadas. " if mid in {Q5_ID, UDQ4_Q5_ID} else "No probado en L4. ") + ("Gemma 4 GGUF Q5 requiere aceptar condiciones de elix3r; la admisión puede rechazar la tarea." if mid in Q5_IDS else "Gemma 4 BF16 ocupa ~24,5 GiB; la admisión puede rechazar la tarea.")]},
+                                             "reasons": [("Cuatro clips I2V en L4 según registro; calidad y otros modos sin verificar. " if mid == NVFP4_Q5_ID else "Generó vídeo en L4 según el usuario; condiciones y calidad no verificadas. " if mid in {Q5_ID, UDQ4_Q5_ID} else "No probado en L4. ") + ("Gemma 4 GGUF Q5 requiere aceptar condiciones de elix3r; la admisión puede rechazar la tarea." if mid in Q5_IDS else "Gemma 4 BF16 ocupa ~24,5 GiB; la admisión puede rechazar la tarea.")]},
                            "ltx_distilled": True,
                            "official_spec": {"landscape": [512, 320], "portrait": [320, 512], "square": [512, 512],
                                              "default_steps": 8, "default_cfg": 1, "default_fps": 24, "default_duration_sec": 49 / 24,
-                                             "official_note": ("LTX 2.5 experimental, una pasada y VAE conv; sin upscale. Audio completo y referencia MSR son experimentales sin prueba GPU. " + ("UD-Q2 + Gemma Q5 generó vídeo en L4 según el usuario; parámetros no verificados." if mid == Q5_ID else "UD-Q4 + Gemma Q5 generó tres vídeos en L4, con dos fallos posteriores al reutilizar caché." if mid == UDQ4_Q5_ID else "Esta variante no tiene prueba L4."))}})
+                                             "official_note": ("LTX 2.5 experimental, una pasada y VAE conv; sin upscale. Audio completo y referencia MSR son experimentales sin prueba GPU. " + ("NVFP4 completó cuatro clips I2V de ~10 s en L4 a 512×320 y 768×512; no valida calidad, MSR ni otras condiciones." if mid == NVFP4_Q5_ID else "UD-Q2 + Gemma Q5 generó vídeo en L4 según el usuario; parámetros no verificados." if mid == Q5_ID else "UD-Q4 + Gemma Q5 generó tres vídeos en L4, con dos fallos posteriores al reutilizar caché." if mid == UDQ4_Q5_ID else "Esta variante no tiene prueba L4."))}})
         for model in models:
-            if model["id"] == UDQ4_Q5_ID:
+            if model["id"] == NVFP4_Q5_ID:
+                model["execution_validation"] = {"status": "observed", "label": "✅ I2V observado en L4",
+                    "scope": "Cuatro clips de ~10 s a 24 fps: dos a 512×320 y dos a 768×512; audio/vídeo verificados según registro. No valida calidad ni otros modos."}
+            elif model["id"] == UDQ4_Q5_ID:
                 model["execution_validation"] = {"status": "observed", "label": "✅ Generación I2V observada en L4",
                     "scope": "Tres clips de ~10 s a 320×512 y 24 fps según registro; dos intentos con caché fallaron. No valida calidad ni otros ajustes."}
     from studio.memory_policy import model_budget, number

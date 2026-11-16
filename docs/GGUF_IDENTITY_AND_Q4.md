@@ -112,9 +112,10 @@ con transformer NVFP4 (12,64 GiB), Gemma Q5 y VAE compartidos. Es distinta del
 checkpoint NVFP4 oficial. Se fija revisión y SHA-256; se aplican las licencias
 LTX y el acceso a elix3r. El autor reporta carga y prueba de proyección en una
 RTX 4090, **no un vídeo completo**. La L4 es Ada: no tiene aceleración nativa
-NVFP4; el autor describe un fallback para Ada, pero no se ha verificado este
-workflow en Studio/L4. No se garantiza encaje, velocidad, resultado ni compatibilidad
-con MSR. El presupuesto inicial estimado es 40 GiB RAM y 18 GiB VRAM, más
+NVFP4; el autor describe un fallback para Ada. En el registro del 16 de noviembre
+se completaron cuatro clips I2V con audio en Studio/L4: dos de ~10 s a 512×320
+y dos a 768×512. No se midió la calidad ni se garantiza encaje, velocidad,
+resultado o compatibilidad con MSR y otras configuraciones. El presupuesto inicial estimado es 40 GiB RAM y 18 GiB VRAM, más
 reservas, activaciones y aumentos por duración y audio; no es un pico medido.
 Prueba primero 512×320, ~2 s, sin referencia, y revisa la galería.
 

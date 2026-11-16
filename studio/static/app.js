@@ -31,7 +31,6 @@
     lastMontageResult: null,
     videoMode: "ai", // "ai" | "ffmpeg_motion"
     videoSubmode: "i2v", // "i2v" | "flf2v" | "t2v" | "ffmpeg"
-    lastVidUploadStartRel: null,
     musicTracks: [],
     timeline: [], // [{ media_rel, media_url, filename, type, duration, motion, audio_rel, fit_to_audio }]
     mask: {
@@ -724,29 +723,6 @@
     if (prev && ttsModels.some((m) => m.id === prev)) {
       sel.value = prev;
     }
-  }
-
-  function computeClientModelDimensions(modelObj, natW, natH) {
-    const spec = (modelObj && modelObj.official_spec) || {};
-    if (Array.isArray(spec.fixed_resolution) && spec.fixed_resolution.length === 2) {
-      return { w: spec.fixed_resolution[0], h: spec.fixed_resolution[1] };
-    }
-    let ar = Number(natH || 704) / Math.max(1, Number(natW || 1280));
-    if (ar >= 1.62 && Array.isArray(spec.portrait)) {
-      return { w: spec.portrait[0], h: spec.portrait[1] };
-    }
-    if (ar <= 1 / 1.62 && Array.isArray(spec.landscape)) {
-      return { w: spec.landscape[0], h: spec.landscape[1] };
-    }
-    if (ar >= 0.9 && ar <= 1.11 && Array.isArray(spec.square)) {
-      return { w: spec.square[0], h: spec.square[1] };
-    }
-    const mod = Number(spec.mod_value || 32);
-    const maxArea = Number(spec.max_area || 704 * 1280);
-    ar = Math.max(9 / 16, Math.min(16 / 9, ar));
-    const h = Math.max(mod * 8, Math.floor(Math.round(Math.sqrt(maxArea * ar)) / mod) * mod);
-    const w = Math.max(mod * 8, Math.floor(Math.round(Math.sqrt(maxArea / ar)) / mod) * mod);
-    return { w, h };
   }
 
   function setVideoSubmode(submode) {
@@ -1583,10 +1559,11 @@
 
       cardsBox.querySelectorAll(".vm-card").forEach((card) => {
         card.addEventListener("click", () => {
+          const changed = sel.value !== card.dataset.vmid;
           sel.value = card.dataset.vmid;
           cardsBox.querySelectorAll(".vm-card").forEach((c) => c.classList.remove("selected"));
           card.classList.add("selected");
-          applyVideoModelDefaults(sel.value);
+          if (changed) applyVideoModelDefaults(sel.value);
         });
       });
     }
@@ -2523,9 +2500,6 @@
           .join("");
       if (prevEnd && allImgs.some((i) => i.rel_path === prevEnd)) {
         endSel.value = prevEnd;
-      } else if (allImgs.length >= 2 && !endSel.value) {
-        const diffImg = allImgs.find((i) => i.rel_path !== imgSel.value) || allImgs[0];
-        endSel.value = diffImg.rel_path;
       }
       updateVideoEndThumb();
     }
@@ -2587,18 +2561,7 @@
       return;
     }
     box.innerHTML = `<img id="vid-src-thumb-img" src="/media/${escapeHtml(rel)}" alt="Origen vídeo" />`;
-    const thumbImg = $("vid-src-thumb-img");
-    if (thumbImg && state.videoMode === "ai") {
-      thumbImg.onload = () => {
-        const nw = thumbImg.naturalWidth || 1280;
-        const nh = thumbImg.naturalHeight || 704;
-        const vidSel = $("select-video-model");
-        const curModel = vidSel ? state.catalog.find((m) => m.id === vidSel.value) : null;
-        const dims = computeClientModelDimensions(curModel, nw, nh);
-        $("vid-width").value = dims.w;
-        $("vid-height").value = dims.h;
-      };
-    }
+
   }
 
   function updateVideoEndThumb() {
@@ -3230,9 +3193,6 @@
           $("vid-width").value = 1280;
           $("vid-height").value = 720;
           $("vid-fps").value = 24;
-        } else {
-          const mid = $("select-video-model") ? $("select-video-model").value : null;
-          if (mid) applyVideoModelDefaults(mid);
         }
       });
     });
@@ -3382,48 +3342,13 @@
     }
 
     $("input-vid-upload-img").addEventListener("change", async (ev) => {
-      const files = Array.from(ev.target.files || []);
-      if (files.length === 0) return;
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
       try {
-        if (files.length >= 2) {
-          const assetStart = await uploadFile(files[0]);
-          const assetEnd = await uploadFile(files[1]);
-          $("vid-source-image").value = assetStart.rel_path;
-          if ($("vid-end-image")) $("vid-end-image").value = assetEnd.rel_path;
-          state.lastVidUploadStartRel = null;
-          setVideoSubmode("flf2v");
-          updateVideoSourceThumb();
-          updateVideoEndThumb();
-          toast(
-            `🎞️ ¡2 fotos listas! Inicio: ${assetStart.filename} → Final: ${assetEnd.filename} (modo Frame a Frame activado).`,
-            "success"
-          );
-        } else {
-          const prevStart = $("vid-source-image").value;
-          const hadRecentSingleStart =
-            state.videoSubmode === "i2v" &&
-            Boolean(state.lastVidUploadStartRel) &&
-            prevStart === state.lastVidUploadStartRel;
-
-          const asset = await uploadFile(files[0]);
-          if (hadRecentSingleStart && asset.rel_path !== prevStart) {
-            $("vid-source-image").value = prevStart;
-            if ($("vid-end-image")) $("vid-end-image").value = asset.rel_path;
-            state.lastVidUploadStartRel = null;
-            setVideoSubmode("flf2v");
-            updateVideoSourceThumb();
-            updateVideoEndThumb();
-            toast(
-              `🎞️ 2ª foto detectada (${asset.filename}): activado Frame a Frame (Inicio → Fin). Usa «⇄ Invertir» si quieres cambiar el orden.`,
-              "success"
-            );
-          } else {
-            $("vid-source-image").value = asset.rel_path;
-            state.lastVidUploadStartRel = state.videoSubmode === "i2v" ? asset.rel_path : null;
-            updateVideoSourceThumb();
-            toast(`Imagen inicial lista: ${asset.filename}`, "success");
-          }
-        }
+        const asset = await uploadFile(file);
+        $("vid-source-image").value = asset.rel_path;
+        updateVideoSourceThumb();
+        toast(`Imagen inicial lista: ${asset.filename}`, "success");
       } catch (e) {
         toast(e.message, "error");
       }
@@ -3439,7 +3364,6 @@
           const asset = await uploadFile(f);
           if (prevStart) $("vid-source-image").value = prevStart;
           if ($("vid-end-image")) $("vid-end-image").value = asset.rel_path;
-          state.lastVidUploadStartRel = null;
           setVideoSubmode("flf2v");
           updateVideoSourceThumb();
           updateVideoEndThumb();
@@ -3458,7 +3382,6 @@
         try {
           const asset = await uploadFile(f);
           if ($("vid-end-image")) $("vid-end-image").value = asset.rel_path;
-          state.lastVidUploadStartRel = null;
           updateVideoEndThumb();
           toast(`Fotograma final listo: ${asset.filename}`, "success");
         } catch (e) {
@@ -3573,7 +3496,7 @@
     async function prepareLtxGguf() {
       const mid = $("select-video-model").value;
       const m = state.catalog.find(x => x.id === mid);
-      const notice = mid === NVFP4_COMFY_ID ? "NVFP4 DDB comunitario: sin prueba completa en Studio/L4; aceleración FP4 nativa requiere Blackwell, L4 usa una ruta alternativa sin garantía. Requiere acceso a Gemma Q5." : mid === FP8_COMFY_ID ? "FP8 ya cuantizado + Gemma 4 GGUF Q5: sin prueba real en GPU ni L4; requiere permiso elix3r y puede rechazarse por memoria. No es la receta BF16→FP8 de Diffusers." : mid === GGUF_MODEL_ID ? "LTX 2.3 I2V se probó en L4." : GGUF_GEMMA_Q5_IDS.has(mid) ? "Gemma 4 GGUF Q5: acepta las condiciones de elix3r y configura Hugging Face. UD-Q2 y UD-Q4 generaron vídeos en L4 según registros; Q4_K_M no está probado. El encaje actual no está garantizado." : "LTX 2.5 no se ha probado en L4; usa Gemma 4 BF16 grande y puede ser rechazado por memoria.";
+      const notice = mid === NVFP4_COMFY_ID ? "NVFP4 DDB comunitario: cuatro clips I2V completados en L4 según registro; calidad y otras condiciones sin validar. La L4 no tiene aceleración FP4 nativa. Requiere acceso a Gemma Q5." : mid === FP8_COMFY_ID ? "FP8 ya cuantizado + Gemma 4 GGUF Q5: sin prueba real en GPU ni L4; requiere permiso elix3r y puede rechazarse por memoria. No es la receta BF16→FP8 de Diffusers." : mid === GGUF_MODEL_ID ? "LTX 2.3 I2V se probó en L4." : GGUF_GEMMA_Q5_IDS.has(mid) ? "Gemma 4 GGUF Q5: acepta las condiciones de elix3r y configura Hugging Face. UD-Q2 y UD-Q4 generaron vídeos en L4 según registros; Q4_K_M no está probado. El encaje actual no está garantizado." : "LTX 2.5 no se ha probado en L4; usa Gemma 4 BF16 grande y puede ser rechazado por memoria.";
       if (!confirm(`Receta experimental: se comprobarán los recursos y se instalarán hasta ${m?.estimated_gb || "varios"} GiB de pesos más entorno. Se requieren licencias LTX y Gemma. ${notice} ¿Continuar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
@@ -3602,7 +3525,7 @@
       if (voice_mode === "voice_reference" && mid !== GGUF_MODEL_ID && !image_rel) return showInputError("MSR LTX 2.5 necesita Imagen a Vídeo y una imagen de referencia.");
       if (sub === "i2v" && !image_rel) return showInputError("Selecciona un primer fotograma para Imagen a Vídeo.");
       const m = state.catalog.find(x => x.id === mid);
-      const warning = mid === NVFP4_COMFY_ID ? "NVFP4 DDB comunitario + Gemma Q5: sin prueba de generación en Studio/L4; L4 no tiene aceleración FP4 nativa. Puede fallar o superar el presupuesto. Empieza por 2 segundos." : mid === FP8_COMFY_ID ? "FP8 preconvertido de Comfy + Gemma Q5; sin prueba GPU/L4. Pueden agotarse RAM/VRAM y se requiere acceso a elix3r. Prueba primero 2 segundos; no garantiza calidad ni voz." : mid === GGUF_MODEL_ID ? "Se probaron 20 s en L4 a 512×320 con caché." : GGUF_GEMMA_Q5_IDS.has(mid) ? "UD-Q2 y UD-Q4 + Gemma Q5 generaron vídeos en L4 según registros; Q4_K_M no está probado. Una pasada sin upscale; puede fallar por memoria. Requiere acceso a elix3r." : "LTX 2.5 no está probado en GPU ni en L4; usa una pasada sin upscale y Gemma 4 BF16, puede ser rechazado o fallar por memoria.";
+      const warning = mid === NVFP4_COMFY_ID ? "NVFP4 DDB comunitario + Gemma Q5: cuatro clips I2V de unos 10 s completados en L4 según registro. No garantiza calidad ni otros modos; puede agotar memoria." : mid === FP8_COMFY_ID ? "FP8 preconvertido de Comfy + Gemma Q5; sin prueba GPU/L4. Pueden agotarse RAM/VRAM y se requiere acceso a elix3r. Prueba primero 2 segundos; no garantiza calidad ni voz." : mid === GGUF_MODEL_ID ? "Se probaron 20 s en L4 a 512×320 con caché." : GGUF_GEMMA_Q5_IDS.has(mid) ? "UD-Q2 y UD-Q4 + Gemma Q5 generaron vídeos en L4 según registros; Q4_K_M no está probado. Una pasada sin upscale; puede fallar por memoria. Requiere acceso a elix3r." : "LTX 2.5 no está probado en GPU ni en L4; usa una pasada sin upscale y Gemma 4 BF16, puede ser rechazado o fallar por memoria.";
       if (!confirm(`Receta experimental: 8 pasos y CFG 1 fijos. ${warning} ${voice_mode !== "none" ? "Modo de voz sin prueba GPU: puede fallar por memoria o compatibilidad; audio solo autorizado. " : ""}${voice_mode === "voice_reference" ? (mid === GGUF_MODEL_ID ? "Se descarga ID-LoRA TalkVid (~1,1 GiB). " : "Se descarga MSR V2 (~2,1 GiB), sin prueba GPU/GGUF. ") : ""}Se descargarán hasta ${m?.estimated_gb || "varios"} GiB si faltan. ¿Generar?`)) return;
       try {
         $("ltx-gguf-error").hidden = true;
