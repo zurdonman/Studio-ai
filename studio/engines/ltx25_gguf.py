@@ -156,17 +156,11 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         raise RuntimeError('GGUF_GPU_UNSUPPORTED: LTX 2.5 requiere GPU BF16 con al menos 16 GiB; no se descargó nada')
     session = common._resident(model_id)
     if session:
-        memory_manager.ensure_capacity(ram_gb=extra_ram, vram_gb=extra_vram, stage='LTX 2.5 residente: margen adicional estimado', job=job)
+        job.log('Comfy activo: las estimaciones adicionales son orientativas; sigue la vigilancia de memoria real.', level='warning')
         job.log('Reutilizando motor LTX 2.5 y caché; Comfy puede mover o liberar pesos bajo presión.')
         return session.names
     q5 = model_id in Q5_IDS
     base_ram, base_vram = base_memory_budget(model_id)
-    if model_id in {FP8_Q5_ID, NVFP4_Q5_ID}:
-        # Reject impossible totals before evicting the working video cache.
-        from studio.engines.video_engine import _check_video_total_capacity
-        _check_video_total_capacity({'id': model_id, 'name': 'LTX 2.5 cuantizado Comfy',
-                                     'engine': 'ltx_gguf', 'min_ram_gb': base_ram + extra_ram,
-                                     'min_vram_gb': base_vram + extra_vram}, [])
     # Do not evict the currently working model or install a runtime when the
     # gated encoder cannot be accessed. Offline reuse is still possible if the
     # encoder and previously stamped plugin are already on disk.
@@ -176,13 +170,12 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
     if memory_manager.get_slot('video'):
         job.log('Liberando el modelo de vídeo anterior para cambiar de receta; archivos intactos.')
         memory_manager.unload_slot('video')
-    # Budgets are preventive estimates, not measured peaks for either variant.
+    # Estimates are advisory; admission uses real free memory and a start floor.
     runtime = Q5_RUNTIME if q5 else common.ROOT
     # The 26.3 GB BF16 Gemma 4 encoder is not the quantized Gemma 3 of LTX 2.3.
-    # This conservative budget is not a measured peak and can reject an L4.
-    memory_manager.ensure_capacity(ram_gb=base_ram + extra_ram,
-                                   vram_gb=base_vram + extra_vram,
-                                   stage='LTX 2.5 (estimación preventiva, no medida)', job=job)
+    # This estimate is not a measured peak or a guarantee of fit.
+    common._comfy_start_admission(job, stage='LTX 2.5', planned_ram=base_ram + extra_ram,
+                                  planned_vram=base_vram + extra_vram)
     runtime.mkdir(parents=True, exist_ok=True)
     missing = sum(x[4] for x in files if not path_for(x).is_file() or path_for(x).stat().st_size != x[4])
     required = missing + 10 * 1024**3
@@ -191,9 +184,9 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
     if q5:
         job.log('Variante Gemma 4 GGUF Q5: runtime aislado y estimaciones de memoria no medidas; requiere acceso al repositorio elix3r.')
         if model_id == FP8_Q5_ID:
-            job.log('Transformer FP8 Comfy preconvertido: estimación preventiva 44 GiB RAM y 18 GiB VRAM más reservas; compatibilidad y picos en L4 no probados. Comfy puede usar memoria de CPU.')
+            job.log('Transformer FP8 Comfy preconvertido: estimación base no medida 44 GiB RAM y 18 GiB VRAM; compatibilidad y picos en L4 no probados. Comfy puede usar memoria de CPU.')
         if model_id == NVFP4_Q5_ID:
-            job.log('NVFP4 DDB Comfy: estimación preventiva no medida 40 GiB RAM y 18 GiB VRAM más reservas. En L4 falta aceleración nativa FP4; ruta de respaldo y compatibilidad no probadas en Studio.')
+            job.log('NVFP4 DDB Comfy: estimación base no medida 40 GiB RAM y 18 GiB VRAM. En L4 falta aceleración nativa FP4; ruta de respaldo y compatibilidad no probadas en Studio.')
         common._install(job, runtime, Q5_COMFY_COMMIT)
         from studio.catalog import catalog_manager
         env = os.environ.copy()
@@ -354,6 +347,11 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
         if dest.exists():
             raise RuntimeError('GGUF_OUTPUT_COLLISION: no se sobrescribirá el vídeo')
         shutil.copyfile(generated, dest)
+    except Exception:
+        guard = getattr(session, 'guard', None)
+        if guard:
+            guard.raise_if_stopped()
+        raise
     finally:
         try:
             if image_name:

@@ -32,7 +32,7 @@ from studio.engines.ltx_gguf_manifest import FILES
 from studio.engines.ltx_gguf_workflow import make_graph
 from studio.hardware import hardware_tracker, query_gpu_info
 from studio.memory_manager import memory_manager, serialized_gpu_operation
-from studio.memory_policy import host_memory, pressure
+from studio.memory_policy import host_memory, pressure, reserves, number, MemoryPressureError
 
 COMFY_COMMIT = "7ad7adb38f6cbb6c2b0713d3bd44c3fb2b9c8ebe"
 GGUF_COMMIT = "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
@@ -279,6 +279,7 @@ def _probe_runtime(job: Any, extra_required: set[str] | None = None, root: Path 
         inp.mkdir(); out.mkdir()
         port = _free_port(); base = f"http://127.0.0.1:{port}"
         proc = subprocess.Popen(_server_command(port, inp, out, root), cwd=root / "comfy", env=_runtime_env(), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        guard = _ComfyMemoryGuard(proc, job)
         try:
             _wait_server(proc, base, log, job)
             info = requests.get(base + "/object_info", timeout=20).json()
@@ -287,8 +288,115 @@ def _probe_runtime(job: Any, extra_required: set[str] | None = None, root: Path 
             missing = sorted(required - set(info))
             if missing:
                 raise RuntimeError("GGUF_RUNTIME_MISSING_NODES: " + ", ".join(missing))
+        except Exception:
+            guard.raise_if_stopped()
+            raise
         finally:
+            guard.done.set()
             _stop(proc)
+            guard.close()
+
+
+class _ComfyMemoryGuard:
+    """Monitor the isolated worker independently of the inference HTTP loop.
+
+    On measured pressure, kill only this child process group. Sampling cannot
+    prevent an allocation that outruns the monitor or an external process OOM.
+    """
+    def __init__(self, proc: subprocess.Popen, job: Any, interval: float = .25):
+        self.proc, self.job, self.interval = proc, job, interval
+        self.reason: str | None = None
+        self.cancelled = False
+        self.done = threading.Event()
+        self.last_gpu_sample = time.monotonic()
+        self.threads = [threading.Thread(target=target, name=name, daemon=True) for target, name in
+                        ((self._watch_ram, 'comfy-ram-guard'), (self._watch_gpu, 'comfy-vram-guard'))]
+        for thread in self.threads:
+            thread.start()
+
+    def _watch_ram(self) -> None:
+        failures = 0
+        while not self.done.is_set() and self.proc.poll() is None:
+            if getattr(self.job, 'cancel_requested', False):
+                self.cancelled = True
+                self._kill()
+                return
+            if time.monotonic() - self.last_gpu_sample > 5:
+                self.reason = 'GGUF_LIVE_MEMORY_STOP: medición de VRAM bloqueada; se detuvo Comfy.'
+                self._kill()
+                return
+            try:
+                ram = host_memory()
+                total, free = number(ram.get('total_gb')), number(ram.get('available_gb'))
+                if total is None or total <= 0 or free is None:
+                    raise ValueError('RAM no disponible')
+                reserve = reserves(total)['ram_gb']
+                if free < reserve:
+                    self._pressure(f'RAM disponible {free:.2f} GiB por debajo de la reserva {reserve:.2f} GiB')
+                    return
+                failures = 0
+            except Exception:
+                failures += 1
+                if failures >= 3:
+                    self._pressure('no se puede medir RAM de forma fiable')
+                    return
+            self.done.wait(self.interval)
+
+    def _watch_gpu(self) -> None:
+        failures = 0
+        while not self.done.is_set() and self.proc.poll() is None:
+            try:
+                gpu = query_gpu_info()
+                free, total = number(gpu.get('vram_free_gb')), number(gpu.get('vram_total_gb'))
+                if not gpu.get('has_gpu') or free is None or total is None or total <= 0:
+                    raise ValueError('VRAM no disponible')
+                critical = reserves(0, total)['critical_vram_gb']
+                if free < critical:
+                    self._pressure(f'VRAM disponible {free:.2f} GiB por debajo del margen crítico {critical:.2f} GiB')
+                    return
+                failures = 0
+            except Exception:
+                failures += 1
+                if failures >= 3:
+                    self._pressure('no se puede medir VRAM de forma fiable')
+                    return
+            self.last_gpu_sample = time.monotonic()
+            self.done.wait(self.interval)
+
+    def _pressure(self, detail: str) -> None:
+        self.reason = ('GGUF_LIVE_MEMORY_STOP: ' + detail +
+                       '. Se detuvo el proceso Comfy para proteger el entorno; pesos en disco intactos.')
+        self._kill()
+
+    def _kill(self) -> None:
+        if self.done.is_set() or self.proc.poll() is not None:
+            return
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def raise_if_stopped(self) -> None:
+        if self.cancelled:
+            from studio.jobs import JobCancelledError
+            raise JobCancelledError('Cancelado manualmente por el usuario.')
+        if self.reason:
+            raise MemoryPressureError(self.reason)
+
+    def close(self) -> None:
+        self.done.set()
+        for thread in self.threads:
+            thread.join(timeout=1)
+
+
+def _comfy_start_admission(job: Any, *, stage: str, planned_ram: float, planned_vram: float) -> None:
+    # Start floor is not a predicted peak: a separate monitor stops the isolated
+    # process at measured RAM/VRAM thresholds while Comfy manages its offload.
+    job.log(f'{stage}: estimación orientativa no medida {planned_ram:.2f} GiB RAM y '
+            f'{planned_vram:.2f} GiB VRAM; no bloquea por sí sola. Se comprueba memoria real '
+            'y se vigila el proceso Comfy durante la ejecución.', level='warning')
+    memory_manager.ensure_capacity(ram_gb=4, vram_gb=2,
+                                   stage='Inicio Comfy: espacio mínimo real y reservas', job=job)
 
 
 class _ResidentComfy:
@@ -305,21 +413,31 @@ class _ResidentComfy:
         self.base = f"http://127.0.0.1:{self.port}"
         self.log = tempfile.TemporaryFile()
         self.proc = None
+        self.guard = None
         try:
             self.proc = subprocess.Popen(_server_command(self.port, self.input_dir, self.output_dir, runtime_root), cwd=runtime_root / "comfy",
                                          env=_runtime_env(), stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
+            self.guard = _ComfyMemoryGuard(self.proc, job)
             _wait_server(self.proc, self.base, self.log, job)
         except BaseException:
+            guard = self.guard
             self.unload()
+            if guard:
+                guard.raise_if_stopped()
             raise
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
     def unload(self) -> None:
+        if self.guard is not None:
+            self.guard.done.set()
         if self.proc is not None:
             _stop(self.proc)
             self.proc = None
+        if self.guard is not None:
+            self.guard.close()
+            self.guard = None
         self.log.close()
         self.temp.cleanup()
 
@@ -330,7 +448,10 @@ def _resident(model_id: str = MODEL_ID) -> _ResidentComfy | None:
         return None
     session = slot.get("handle")
     if not isinstance(session, _ResidentComfy) or not session.alive():
+        guard = getattr(session, "guard", None)
         memory_manager.unload_slot("video")
+        if guard:
+            guard.raise_if_stopped()
         return None
     return session
 
@@ -392,6 +513,9 @@ def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any, model_id: s
         while time.monotonic() < deadline:
             job.check_cancelled(); _check_pressure()
             if not session.alive():
+                guard = getattr(session, "guard", None)
+                if guard:
+                    guard.raise_if_stopped()
                 raise RuntimeError("GGUF_ENGINE_EXITED: ComfyUI finalizó durante la generación")
             while not events.empty():
                 event = events.get_nowait()
@@ -430,6 +554,11 @@ def _infer(graph: dict, input_dir: Path, output_dir: Path, job: Any, model_id: s
             job.heartbeat()
             time.sleep(1)
         raise TimeoutError("GGUF_INFERENCE_TIMEOUT: límite de 60 minutos")
+    except Exception:
+        guard = getattr(session, "guard", None)
+        if guard:
+            guard.raise_if_stopped()
+        raise
     finally:
         stop.set()
         thread.join(timeout=3)
@@ -450,14 +579,14 @@ def _prepare_gguf(job: Any, *, extra_ram: float = 0, extra_vram: float = 0) -> d
         raise RuntimeError("GGUF_GPU_UNSUPPORTED: se necesita una GPU BF16 con al menos 16 GiB; no se descargó nada")
     session = _resident()
     if session is not None:
-        memory_manager.ensure_capacity(ram_gb=extra_ram, vram_gb=extra_vram, stage="GGUF residente: margen adicional estimado", job=job)
+        job.log("Comfy activo: estimaciones orientativas; continúa la vigilancia de memoria real.", level="warning")
         job.log("Reutilizando motor GGUF y su caché; Comfy puede mover o liberar pesos según la presión de memoria.")
         return session.names
     slot = memory_manager.get_slot("video")
     if slot:
         job.log("Liberando el modelo de vídeo anterior; los archivos en disco se conservan")
         memory_manager.unload_slot("video")
-    memory_manager.ensure_capacity(ram_gb=32 + extra_ram, vram_gb=14 + extra_vram, stage="Preparación GGUF (márgenes preventivos, no medición)", job=job)
+    _comfy_start_admission(job, stage="LTX 2.3 GGUF", planned_ram=32 + extra_ram, planned_vram=14 + extra_vram)
     ROOT.mkdir(parents=True, exist_ok=True)
     remaining = sum(size for role, _, _, _, size, _ in FILES if not _artifact_path(role).is_file() or _artifact_path(role).stat().st_size != size)
     required = remaining + 10 * 1024**3
@@ -628,9 +757,9 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
         _prepare_voice_lora(job)
     resident = _resident()
     if resident is None:
-        memory_manager.ensure_capacity(ram_gb=32 + extra_ram, vram_gb=14 + extra_vram, stage="Inicio GGUF: carga y parámetros solicitados (estimación no medida)", job=job)
+        _comfy_start_admission(job, stage="LTX 2.3 GGUF", planned_ram=32 + extra_ram, planned_vram=14 + extra_vram)
     else:
-        memory_manager.ensure_capacity(ram_gb=extra_ram, vram_gb=extra_vram, stage="GGUF residente: margen adicional por parámetros (estimación no medida)", job=job)
+        job.log("Comfy activo: estimaciones orientativas; continúa la vigilancia de memoria real.", level="warning")
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     seed = int(seed) if seed else int.from_bytes(os.urandom(4), "big")
     job.log(f"GGUF: {width}×{height}, {frames} fotogramas a {fps} fps (~{frames / fps:.2f} s), 8 pasos fijos. La duración se ajusta a 8n+1.")
@@ -673,6 +802,11 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
         if dest.exists():
             raise RuntimeError("GGUF_OUTPUT_COLLISION: no se sobrescribirá el vídeo existente")
         shutil.copyfile(generated, dest)
+    except Exception:
+        guard = getattr(session, "guard", None)
+        if guard:
+            guard.raise_if_stopped()
+        raise
     finally:
         try:
             if image_name:

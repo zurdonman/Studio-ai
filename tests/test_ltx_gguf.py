@@ -100,7 +100,7 @@ def test_gguf_real_api_route_with_synthetic_av(temp_studio_env, monkeypatch):
     assert 'spoken dialogue is in Spanish' in seen[0]['5']['inputs']['text']
     assert result['frames'] == 481 and result['requested_duration_sec'] == 20
     assert result['speech_language_hint'] == 'es' and result['image_strength'] == .7
-    assert any(c['ram_gb'] > 32 and c['vram_gb'] > 14 for c in capacity_calls)
+    assert capacity_calls and all(c['ram_gb'] == 4 and c['vram_gb'] == 2 for c in capacity_calls)
 
 
 def test_gguf_api_input_validation_and_panel(temp_studio_env):
@@ -334,6 +334,8 @@ web.run_app(app, host='127.0.0.1', port=port, print=None)
     monkeypatch.setattr(b, 'ROOT', root)
     monkeypatch.setattr(b, 'TEMP_DIR', tmp_path)
     monkeypatch.setattr(b, '_check_pressure', lambda: None)
+    monkeypatch.setattr(b, 'host_memory', lambda: {'total_gb': 53, 'available_gb': 20})
+    monkeypatch.setattr(b, 'query_gpu_info', lambda: {'has_gpu': True, 'vram_total_gb': 22, 'vram_free_gb': 10})
     monkeypatch.setattr(b, '_server_command', lambda port, inp, out, *args: [sys.executable, str(script), str(port), str(out)])
     manager = RuntimeMemoryManager()
     monkeypatch.setattr(b, 'memory_manager', manager)
@@ -584,7 +586,7 @@ def test_ltx25_memory_rejection_precedes_install_and_download(temp_studio_env, m
     monkeypatch.setattr(b.common, '_install', lambda *_: pytest.fail('must not install'))
     with pytest.raises(RuntimeError, match='insufficient memory'):
         b._prepare(mid, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
-    assert calls == [(47,16.5)]
+    assert calls == [(4,2)]
 
 
 @pytest.mark.parametrize('variant', ['Q5_ID', 'Q4_Q5_ID', 'UDQ4_Q5_ID'])
@@ -653,7 +655,7 @@ def test_ltx25_q5_uses_separate_runtime_and_memory_guard(temp_studio_env, monkey
     monkeypatch.setattr(b.shutil, 'disk_usage', lambda p: type('Disk',(),{'free':100*1024**3})())
     mid = getattr(b, variant)
     b._prepare(mid, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
-    assert ('capacity',ram + 2,vram + .5) in calls
+    assert ('capacity',4,2) in calls
     assert ('install', b.Q5_RUNTIME, b.Q5_COMFY_COMMIT) in calls
     assert any(c[0]=='probe' and c[1] == b.Q5_RUNTIME and 'CLIPLoaderGGUF' in c[2] for c in calls)
     assert any(c[0]=='command' and 'studio.engines.ltx25_gguf_patch' in c[1] for c in calls)
@@ -782,7 +784,7 @@ def test_ltx25_q5_resident_reuses_session_without_reinstall_or_download(temp_stu
     monkeypatch.setattr(b.common, '_install', lambda *a, **kw: pytest.fail('resident must not reinstall'))
     monkeypatch.setattr(b.common, '_command', lambda *a, **kw: pytest.fail('resident must not redownload or rehash'))
     result = b._prepare(mid, JobRecord('video','reuse'), extra_ram=2, extra_vram=.5)
-    assert result is session.names and calls == [(2,.5)]
+    assert result is session.names and calls == []
 
 
 @pytest.mark.parametrize('variant', ['Q5_ID', 'Q4_Q5_ID', 'UDQ4_Q5_ID'])
@@ -1172,18 +1174,22 @@ def test_ltx25_preconverted_fp8_manifest_graph_catalog_and_api(temp_studio_env, 
     assert ('prepare',mid) in calls and ('generate',mid) in calls
 
 
-def test_ltx25_fp8_capacity_and_preserves_cache_on_impossible_total(temp_studio_env, monkeypatch):
+def test_ltx25_large_estimate_does_not_reject_when_start_floor_fits(temp_studio_env, monkeypatch):
     from studio.engines import ltx25_gguf as b
-    from studio.memory_policy import MemoryAdmissionImpossible
     from studio.jobs import JobRecord
-    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu':True, 'bf16_supported':True, 'vram_total_gb':22})
+    monkeypatch.setattr(b.common, 'query_gpu_info', lambda: {'has_gpu': True, 'bf16_supported': True, 'vram_total_gb': 22})
     monkeypatch.setattr(b.common, '_resident', lambda *_: None)
-    monkeypatch.setattr(b.memory_manager, 'sample', lambda: {'gpu':{'has_gpu':True, 'vram_total_gb':22}, 'ram':{'total_gb':40}, 'pressure':{'reserve':{'ram_gb':4, 'vram_gb':1.76}}})
-    monkeypatch.setattr(b.memory_manager, '_reclaim', lambda **kwargs: None)
-    monkeypatch.setattr(b.memory_manager, 'unload_slot', lambda *a: pytest.fail('must not evict'))
-    monkeypatch.setattr(b, '_check_q5_access', lambda *a: pytest.fail('must not access or install'))
-    with pytest.raises(MemoryAdmissionImpossible):
-        b.prepare(b.FP8_Q5_ID, job=JobRecord('video','test'))
+    monkeypatch.setattr(b.memory_manager, 'get_slot', lambda *_: None)
+    calls = []
+    monkeypatch.setattr(b.memory_manager, 'ensure_capacity', lambda **kw: calls.append((kw['ram_gb'], kw['vram_gb'])))
+    monkeypatch.setattr(b, '_check_q5_access', lambda *a: None)
+    monkeypatch.setattr(b.common, '_install', lambda *a: None)
+    monkeypatch.setattr(b.common, '_probe_runtime', lambda *a: None)
+    monkeypatch.setattr(b.common, '_command', lambda *a, **kw: None)
+    monkeypatch.setattr(b.shutil, 'disk_usage', lambda *_: type('Disk', (), {'free': 100*1024**3})())
+    monkeypatch.setattr(b, '_links', lambda mid: {'dit':'existing'})
+    b._prepare(b.NVFP4_Q5_ID, JobRecord('video', 'test'), extra_ram=7.84, extra_vram=2)
+    assert calls == [(4, 2)]
 
 
 def test_ltx25_fp8_cold_admission_and_runtime(temp_studio_env, monkeypatch, tmp_path):
@@ -1203,7 +1209,7 @@ def test_ltx25_fp8_cold_admission_and_runtime(temp_studio_env, monkeypatch, tmp_
     monkeypatch.setattr(b, '_links', lambda model_id: {'dit':'cached.safetensors'})
     monkeypatch.setattr(b.shutil, 'disk_usage', lambda *_: type('Disk', (), {'free':100*1024**3})())
     b._prepare(b.FP8_Q5_ID, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
-    assert ('capacity',46,18.5) in calls
+    assert ('capacity',4,2) in calls
     assert any(c[0] == 'probe' and {'UNETLoader','CLIPLoaderGGUF'} <= c[1] and c[2] == b.Q5_RUNTIME for c in calls)
     assert any(c[0] == 'command' and 'studio.engines.ltx_gguf_download' in c[1] and b.FP8_Q5_ID in c[1] for c in calls)
 
@@ -1303,3 +1309,90 @@ def test_ltx25_cold_restart_reuses_verified_disk_without_download(temp_studio_en
     assert not any('studio.engines.ltx_gguf_download' in cmd for cmd in commands)
     if variant == 'NVFP4_Q5_ID':
         assert sum(any('NVFP4_RUNTIME_UNAVAILABLE' in part for part in cmd) for cmd in commands) == 2
+
+@pytest.mark.parametrize('kind', ['ram', 'vram', 'unknown', 'cancel'])
+def test_comfy_guard_kills_blocked_http_and_preserves_weights(monkeypatch, tmp_path, kind):
+    import sys, time
+    from studio.engines import ltx_gguf_backend as b
+    from studio.jobs import JobRecord, JobCancelledError
+    from studio.memory_policy import MemoryPressureError
+    runtime = tmp_path / 'runtime'
+    (runtime / 'comfy').mkdir(parents=True)
+    marker = tmp_path / 'request_started'
+    weights = tmp_path / 'weights.safetensors'
+    weights.write_bytes(b'keep')
+    script = tmp_path / 'server.py'
+    script.write_text('''
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
+import sys, time
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+    def do_POST(self):
+        Path(sys.argv[2]).touch()
+        time.sleep(60)
+HTTPServer(('127.0.0.1', int(sys.argv[1])), Handler).serve_forever()
+''')
+    monkeypatch.setattr(b, 'TEMP_DIR', tmp_path)
+    monkeypatch.setattr(b, '_server_command', lambda port, *args: [sys.executable, str(script), str(port), str(marker)])
+    monkeypatch.setattr(b, '_check_pressure', lambda: None)
+    monkeypatch.setattr(b, '_events_listener', lambda base, cid, events, stop, ready: ready.set())
+    job = JobRecord('video', 'watchdog')
+    def sample_ram():
+        if marker.exists() and kind == 'cancel':
+            job.cancel_requested = True
+        return {'total_gb': 53, 'available_gb': 2 if marker.exists() and kind == 'ram' else 20}
+    monkeypatch.setattr(b, 'host_memory', sample_ram)
+    monkeypatch.setattr(b, 'query_gpu_info', lambda: {'has_gpu': True, 'vram_total_gb': 22,
+                       'vram_free_gb': (None if kind == 'unknown' else .1) if marker.exists() and kind in ('vram', 'unknown') else 10})
+    session = b._ResidentComfy(job, {'dit': 'fake'}, runtime)
+    monkeypatch.setattr(b, '_resident', lambda *_: session)
+    proc, root = session.proc, session.root
+    try:
+        before = time.monotonic()
+        expected = JobCancelledError if kind == 'cancel' else MemoryPressureError
+        with pytest.raises(expected, match={'ram': 'RAM disponible', 'vram': 'VRAM disponible', 'unknown': 'no se puede medir', 'cancel': 'Cancelado'}[kind]):
+            b._infer({}, session.input_dir, session.output_dir, job)
+        assert time.monotonic() - before < 6
+        assert proc.wait(timeout=3) != 0
+        assert weights.read_bytes() == b'keep'
+    finally:
+        session.unload()
+    assert not root.exists()
+    assert not session.guard
+
+
+def test_comfy_admission_rejects_unknown_device_memory(monkeypatch):
+    from studio.engines import ltx_gguf_backend as b
+    from studio.memory_manager import RuntimeMemoryManager
+    from studio.memory_policy import MemoryPressureError
+    from studio.jobs import JobRecord
+    manager = RuntimeMemoryManager()
+    monkeypatch.setattr(b, 'memory_manager', manager)
+    monkeypatch.setattr(manager, 'sample', lambda: {
+        'ram': {'total_gb': 53, 'available_gb': 40},
+        'gpu': {'has_gpu': True, 'vram_total_gb': 22, 'vram_free_gb': None},
+        'pressure': {'level': 'unknown', 'reserve': {'ram_gb': 5.3, 'vram_gb': 1.76}}})
+    with pytest.raises(MemoryPressureError, match='MEMORY_BUDGET_EXCEEDED'):
+        b._comfy_start_admission(JobRecord('video', 'test'), stage='test', planned_ram=47.84, planned_vram=20)
+
+
+def test_comfy_guard_monitors_ram_even_if_gpu_measurement_hangs(monkeypatch):
+    import sys, time, threading
+    from studio.engines import ltx_gguf_backend as b
+    from studio.jobs import JobRecord
+    from studio.memory_policy import MemoryPressureError
+    release = threading.Event()
+    monkeypatch.setattr(b, 'query_gpu_info', lambda: release.wait(10))
+    monkeypatch.setattr(b, 'host_memory', lambda: {'total_gb': 53, 'available_gb': 2})
+    proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+    guard = b._ComfyMemoryGuard(proc, JobRecord('video', 'guard'), interval=.01)
+    try:
+        assert proc.wait(timeout=3) != 0
+        with pytest.raises(MemoryPressureError, match='RAM disponible'):
+            guard.raise_if_stopped()
+    finally:
+        release.set()
+        guard.close()
+        b._stop(proc)

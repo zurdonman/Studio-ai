@@ -6,7 +6,7 @@
 * LTX 2.5 destilado UD-Q2_K_XL + Gemma 4 GGUF Q5_K_M: el usuario informa de una generación en L4. No tenemos los parámetros, vídeo ni medición de memoria de esa ejecución. Percibe peor calidad que con el Q4_K_M anterior; no podemos atribuir la diferencia a un componente.
 * **Nuevos, sin prueba GPU:** LTX 2.5 destilado Q4_K_M + Gemma 4 Q5 y UD-Q4_K_XL + Gemma 4 Q5. Usan el mismo entorno/parche aislado, Gemma y VAE que el UD-Q2 + Q5; al cambiar se descarga el DiT que falte y se reutilizan los archivos comunes verificados. Requieren aceptar las condiciones del [encoder elix3r](https://huggingface.co/elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF). En la interfaz, desmarca el filtro «ocultar los que no caben»: no hay medición que permita declarar que caben.
 
-Los tamaños siguientes son de archivos, **no** de memoria usada ni de descarga restante. Las dos últimas combinaciones usan una guarda estimada de 35 GiB RAM y 16 GiB VRAM libres, más reservas y margen por duración/resolución. Pueden ser rechazadas en Colab o agotar memoria incluso si se admiten.
+Los tamaños siguientes son de archivos, **no** de memoria usada ni de descarga restante. Las dos últimas combinaciones tienen una estimación orientativa de 35 GiB RAM y 16 GiB VRAM, con incrementos por duración/resolución. No es un pico medido; pueden detenerse por presión real o agotar memoria.
 
 | DiT | Peso DiT | Total DiT + encoder Q5 + VAE, aprox. |
 |---|---:|---:|
@@ -64,7 +64,7 @@ nuestra combinación concreta ni sus resultados.
 
 Studio prepara la extensión en un runtime aislado, fijada por commit, y descarga y verifica el SHA-256 del adaptador. Un cargador estricto comprueba que los tensores y parches LoRA se hayan reconocido y aplicado; el cargador especializado conserva y valida las embeddings de referencia. El guía usa el latente de vídeo antes de concatenar A/V, `pic1` y el audio codificado en `audio_ref1`; después de separar A/V se aplica `LTXVCropGuides`. La misma imagen se utiliza además como primer fotograma. La muestra es condicionamiento, **no** una pista que se garantice oír literalmente; el nodo puede recortarla a su ventana interna.
 
-El modo se selecciona en Imagen a Vídeo > Audio y voz GGUF > Voz de referencia. El prompt debe describir la escena y el diálogo nuevo. Solo imagen y audio propios o autorizados. Se reserva un margen preventivo adicional de 5 GiB RAM y 3 GiB VRAM, no medido. Bajo presión puede rechazarse antes de descargar o detenerse durante la inferencia; no se garantiza cabida en L4. Si se necesita activar el nodo en un proceso residente anterior, se reinicia el proceso una vez sin borrar pesos y se vuelve a comprobar el presupuesto. Después de generar, el proceso se cierra y los archivos permanecen en disco.
+El modo se selecciona en Imagen a Vídeo > Audio y voz GGUF > Voz de referencia. El prompt debe describir la escena y el diálogo nuevo. Solo imagen y audio propios o autorizados. Se muestra un incremento orientativo de 5 GiB RAM y 3 GiB VRAM, no medido. La admisión comprueba el mínimo real de arranque y el vigilante puede detener Comfy bajo presión durante la inferencia; no se garantiza cabida en L4. Si se necesita activar el nodo en un proceso residente anterior, se reinicia el proceso una vez sin borrar pesos y se vuelve a comprobar el presupuesto. Después de generar, el proceso se cierra y los archivos permanecen en disco.
 
 Los grafos se validaron contra los esquemas reales del Comfy fijado para Gemma Q5 con archivos ficticios, y las rutas y salidas se probaron con mocks. Esto **no ejecuta los pesos reales**, no comprueba la aplicación real del adaptador, ni demuestra compatibilidad de sus tensores con el modelo cuantizado; un error explícito de nodo o `MSR_LORA_INCOMPATIBLE` es un resultado posible. El registro L4 del usuario ya mostró 0,8 GiB libres con la receta base.
 
@@ -96,9 +96,8 @@ Diffusers que carga BF16 y convierte a FP8. Acepta las condiciones LTX y las de
 y configura Hugging Face en Studio con una cuenta autorizada; no pegues tokens en chat.
 
 El transformer ocupa 21,87 GiB en disco, más ~8,86 GiB de encoder y VAE. El autor
-informó una RTX 4090 de 24 GB y 64 GB de RAM, no una L4. El presupuesto de admisión
-(44 GiB RAM + 18 GiB VRAM, más reservas y aumentos según configuración) es una
-estimación preventiva **sin medición de picos**, no una garantía; Comfy puede hacer
+informó una RTX 4090 de 24 GB y 64 GB de RAM, no una L4. La estimación (44 GiB RAM + 18 GiB VRAM, más aumentos según configuración) es
+orientativa **sin medición de picos** y no bloquea por sí sola; no es una garantía; Comfy puede hacer
 offload a CPU y fallar o ir lento. Clips largos y MSR aumentan el presupuesto.
 No se ha probado la carga de los pesos ni la inferencia GPU en Studio. En L4 prueba
 primero 512×320, ~2 s y sin referencia, y verifica la galería. El filtro de modelos
@@ -126,3 +125,19 @@ intermedios se detuvieron tras reutilizar caché con ~0,77 GiB de VRAM libre.
 No prueba que todos los fallos futuros tengan esa causa. Desde este cambio el
 motor se cierra después de cada vídeo; la próxima carga tarda más, pero usa los
 mismos archivos en disco.
+
+
+### Vigilancia de memoria Comfy
+
+En LTX 2.3 y 2.5 con Comfy, las cifras del catálogo y los incrementos por
+duración/audio son estimaciones orientativas, no picos medidos ni criterios de
+rechazo automáticos. Antes de arrancar se requieren 4 GiB de RAM y 2 GiB de
+VRAM libres adicionales a las reservas y medición fiable. Durante el proceso
+Comfy se vigila la RAM disponible efectiva (incluidos límites de cgroup y una
+estimación de caché recuperable) y VRAM de la GPU; por debajo de la reserva RAM
+(10 %, mínimo 1 GiB), del margen crítico VRAM (mitad de 8 %, mínimo 0,25 GiB),
+o al fallar repetidamente la medición se termina el grupo del subproceso. También
+se interrumpe al cancelar. Los pesos permanecen en disco y el motor se libera
+tras cada vídeo. El sondeo puede llegar tarde ante picos súbitos, cargas externas
+o bloqueos del sistema: **no garantiza evitar un OOM o reinicio de Colab**.
+Otros motores que cargan en el proceso principal mantienen sus guardias propias.
