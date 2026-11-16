@@ -2341,17 +2341,18 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "name": "MiniMax H3 local · Audio+Vídeo (candidato, no ejecutable)",
         "category": "video",
         "is_default": False,
-        "badge": "Candidato · backend modular pendiente · no descargar",
+        "badge": "Referencia · H3 GGUF por panel separado",
         "video_modes": ["t2v", "i2v", "flf2v"],
         "description": (
-            "Referencia informativa: MiniMax H3 genera vídeo y audio juntos localmente. "
-            "Studio aún no implementa su backend ModularPipeline ni ha probado inferencia GPU; "
-            "no se puede descargar ni ejecutar desde este registro. Revisar licencia territorial."
+            "Referencia informativa: hay H3 GGUF UD-Q2/Q4, FP8/INT8 safetensors y FastH3 GGUF. "
+            "H3 GGUF FL2VA tiene panel experimental separado en Vídeo; sin prueba L4. "
+            "Este registro informativo no permite descargar ni generar; revisar licencia territorial. "
+            "Consulta la sección H3 del catálogo para fuentes y componentes."
         ),
         "validation_state": "candidate", "gpu_tested": False,
         "engine": "unvalidated", "min_ram_gb": None, "min_vram_gb": None,
         "estimated_gb": None,
-        "l4_seconds_hint": "No probado; el ejemplo int8 oficial requiere ~75 GB de RAM",
+        "l4_seconds_hint": "Sin prueba L4; requisitos distintos según variante y runtime",
         "official_spec": {
             "default_fps": 24, "frame_rule": "17n+5", "mod_value": 32,
             "official_note": "Referencia upstream: 5–15 s, audio conjunto, sin negative prompt ni CFG; no es una receta de Studio.",

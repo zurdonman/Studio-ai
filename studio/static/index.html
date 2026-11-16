@@ -431,6 +431,34 @@
             </div>
           </div>
 
+          <details class="ltx-gguf-callout" id="h3-panel">
+            <summary><strong>🧪 MiniMax H3 GGUF · vídeo con audio (experimental)</strong></summary>
+            <div class="form-stack">
+              <p>Ruta separada de LTX: texto, imagen inicial opcional y fotograma final opcional. Sin prueba de inferencia en L4; puede fallar por memoria, compilación o compatibilidad. Los resultados aparecen en la biblioteca de Vídeo. Para empezar usa UD-Q2, 22 fotogramas y offload.</p>
+              <p>La <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">licencia comunitaria</a> excluye la UE, Reino Unido, EE. UU. y Corea del Sur. El uso personal no elimina esa restricción; solicita una licencia separada cuando corresponda.</p>
+              <label class="check-row"><input type="checkbox" id="h3-license" /> Confirmo que tengo derecho a usar estos modelos en mi territorio, incluida licencia separada cuando corresponda.</label>
+              <label class="field-label">Variante<select id="h3-model"><option value="h3-fl2va-udq2">FL2VA UD-Q2 + encoder Q2 · ~25,1 GiB en archivos</option><option value="h3-fl2va-q4">FL2VA Q4 + encoder Q4 · ~33 GiB en archivos</option></select></label>
+              <p class="muted">Tamaños de archivos, no consumos de RAM/VRAM. Primera preparación: compila un runtime CUDA para L4 y descarga y verifica componentes. Requiere espacio adicional, CUDA/nvcc, CMake y acceso a internet.</p>
+              <button type="button" class="btn btn-secondary" id="h3-prepare">Preparar variante H3</button>
+              <label class="field-label">Descripción<textarea id="h3-prompt" rows="3" maxlength="3000" placeholder="Describe el plano y el audio deseado"></textarea></label>
+              <label class="field-label">Fotograma inicial (opcional)<select id="h3-start"><option value="">— Solo texto —</option></select></label>
+              <label class="btn btn-ghost btn-sm file-btn">Subir imagen inicial<input type="file" id="h3-upload-start" accept="image/*" hidden /></label>
+              <label class="field-label">Fotograma final (opcional, exige inicial)<select id="h3-end"><option value="">— Sin fotograma final —</option></select></label>
+              <label class="btn btn-ghost btn-sm file-btn">Subir imagen final<input type="file" id="h3-upload-end" accept="image/*" hidden /></label>
+              <div class="params-grid-4">
+                <label>Ancho<input type="number" id="h3-width" value="640" min="256" max="768" step="32" /></label>
+                <label>Alto<input type="number" id="h3-height" value="384" min="256" max="768" step="32" /></label>
+                <label>Fotogramas (24 fps)<select id="h3-frames"><option value="22">22 · ~0,92 s</option><option value="39">39 · ~1,63 s</option><option value="56">56 · ~2,33 s</option><option value="73">73 · ~3,04 s</option><option value="124">124 · ~5,17 s</option></select></label>
+                <label>Pasos<select id="h3-steps"><option value="4">4</option><option value="8">8</option></select></label>
+              </div>
+              <label class="field-label">Semilla (0 = azar)<input type="number" id="h3-seed" value="0" min="0" max="4294967295" /></label>
+              <label class="check-row"><input type="checkbox" id="h3-offload" checked /> Offload de pesos a CPU (menos presión VRAM, más RAM y tiempo)</label>
+              <p class="muted">El encoder se ejecuta en CPU; CFG 1 y 24 fps. No acepta aquí audio de referencia, LoRA ni prompt negativo. La vigilancia no garantiza evitar OOM súbito. Los pesos quedan en disco; el proceso termina al acabar cada clip.</p>
+              <button type="button" class="btn btn-primary" id="h3-generate">Generar con H3 GGUF</button>
+              <p id="h3-feedback" class="vid-steps-note" role="status" hidden></p>
+            </div>
+          </details>
+
           <div class="ltx-gguf-callout" id="ltx-gguf-panel" aria-label="LTX 2.3 GGUF Q4 experimental">
             <div class="ltx-gguf-copy">
               <strong>✅ LTX 2.3 GGUF Q4 · generación I2V probada en L4</strong>
@@ -1093,6 +1121,19 @@
             <button class="filter-chip" data-cat="tts">🎙️ Voz / TTS</button>
           </div>
         </div>
+
+        <details class="card compact-details" id="h3-research-info">
+          <summary>MiniMax H3 y FastH3 · información de variantes</summary>
+          <div class="details-body">
+            <p><strong>H3 FL2VA GGUF UD-Q2 y Q4:</strong> ruta experimental en Vídeo → MiniMax H3 GGUF. No validada con pesos en L4. FP8/INT8 safetensors y FastH3 aún no son ejecutables desde Studio; necesitan adaptadores y pruebas propios.</p>
+            <ul>
+              <li><a href="https://huggingface.co/unsloth/MiniMax-H3-GGUF" target="_blank" rel="noopener noreferrer">H3 vídeo GGUF de Unsloth</a>: FL2VA UD-Q2 o Q4, encoder GGUF y VAEs de vídeo y audio. Aproximadamente 25,1 GiB de archivos para UD-Q2 + encoder Q2, o 33 GiB para Q4 + encoder Q4; no son picos de memoria.</li>
+              <li><a href="https://huggingface.co/unsloth/MiniMax-H3-FP8" target="_blank" rel="noopener noreferrer">H3 vídeo FP8 / INT8 safetensors</a>: necesita un cargador compatible, encoder y VAEs. El transformer ocupa unos 20,3 GB; no equivale al consumo completo.</li>
+              <li><a href="https://huggingface.co/realrebelai/FastH3_GGUFs" target="_blank" rel="noopener noreferrer">FastH3 GGUF comunitario</a>: Q4 de unos 21 GB solo para el transformer, además de encoder y VAEs. Requiere atención VSA y kernels compatibles; Comfy estándar puede generar ruido.</li>
+            </ul>
+            <p>La <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">licencia comunitaria de H3</a> excluye la UE, Reino Unido, EE. UU. y Corea del Sur de su territorio aplicable; consulta a MiniMax sobre una licencia separada cuando corresponda. Las cuantizaciones no eliminan las condiciones de los modelos originales.</p>
+          </div>
+        </details>
 
         <!-- Barra de filtro por GPU de Google Colab -->
         <div class="gpu-filter-bar catalog-gpu-bar">

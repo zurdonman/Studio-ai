@@ -1024,6 +1024,62 @@ def api_id_lora_video(req: VoiceConsistencyReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict()}
 
 
+class H3PrepareReq(BaseModel):
+    model_id: Literal["h3-fl2va-udq2", "h3-fl2va-q4"]
+    license_authorized: bool = False
+
+
+class H3GenerateReq(H3PrepareReq):
+    prompt: str = Field(min_length=1, max_length=3000)
+    image_rel: Optional[str] = None
+    end_image_rel: Optional[str] = None
+    width: int = Field(default=640, ge=256, le=768)
+    height: int = Field(default=384, ge=256, le=768)
+    frames: Literal[22, 39, 56, 73, 124] = 22
+    steps: Literal[4, 8] = 4
+    seed: int = Field(default=0, ge=0, le=4294967295)
+    offload: bool = True
+
+
+def _h3_license_check(req: H3PrepareReq) -> None:
+    if not req.license_authorized:
+        raise HTTPException(status_code=400, detail="H3_LICENSE_CONFIRMATION_REQUIRED: confirma que tienes derecho a usar H3 en tu territorio; la licencia comunitaria excluye la UE.")
+
+
+@app.post("/api/video/h3/prepare")
+def api_prepare_h3(req: H3PrepareReq) -> Dict[str, Any]:
+    _h3_license_check(req)
+    from studio.engines.minimax_h3 import prepare
+    job = job_manager.submit(kind="download", title=f"Preparar H3 GGUF experimental · {req.model_id}",
+                             fn=lambda j: prepare(req.model_id, job=j), dedup_key=f"h3-prepare:{req.model_id}")
+    return {"ok": True, "job": job.to_dict()}
+
+
+@app.post("/api/video/h3/generate")
+def api_generate_h3(req: H3GenerateReq) -> Dict[str, Any]:
+    _h3_license_check(req)
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="Describe la escena.")
+    if req.width % 32 or req.height % 32 or req.width * req.height > 768 * 512:
+        raise HTTPException(status_code=400, detail="H3: dimensiones múltiplos de 32 y área máxima 768×512.")
+    if req.end_image_rel and not req.image_rel:
+        raise HTTPException(status_code=400, detail="El fotograma final requiere uno inicial.")
+    image = _resolve_media_rel(req.image_rel) if req.image_rel else None
+    end = _resolve_media_rel(req.end_image_rel) if req.end_image_rel else None
+    try:
+        for path in (image, end):
+            if path:
+                verify_image_file(path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Imagen no válida: {exc}") from exc
+    from studio.engines.minimax_h3 import generate
+    kwargs = dict(model_id=req.model_id, prompt=req.prompt, image=image, end=end, width=req.width,
+                  height=req.height, frames=req.frames, steps=req.steps, seed=req.seed, offload=req.offload)
+    job = job_manager.submit(kind="video", title=f"H3 GGUF experimental · {req.model_id}",
+                             fn=lambda j: generate(job=j, **kwargs))
+    return {"ok": True, "job": job.to_dict()}
+
+
 class LTXGGUFReq(BaseModel):
     model_id: Literal["ltx-2.3-distilled-gguf-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-experimental", "ltx-2.5-distilled-gguf-ud-q4-experimental", "ltx-2.5-distilled-gguf-ud-q2-gemma-q5-experimental", "ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental", "ltx-2.5-distilled-gguf-ud-q4-gemma-q5-experimental", "ltx-2.5-distilled-comfy-fp8-gemma-q5-experimental", "ltx-2.5-distilled-comfy-nvfp4-gemma-q5-experimental"] = "ltx-2.3-distilled-gguf-q4-experimental"
     prompt: str = Field(min_length=1, max_length=3000)

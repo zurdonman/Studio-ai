@@ -501,6 +501,10 @@
   async function handleJobCompleted(job) {
     // El resultado no debe depender de que respondan el catálogo o la galería.
     const res = job.result || {};
+    if (res.prepared && /^h3-fl2va-/.test(res.model_id || "") && $("h3-feedback")) {
+      $("h3-feedback").hidden = false;
+      $("h3-feedback").textContent = "Variante preparada en disco. Selecciónala de nuevo y pulsa Generar; no se ha probado la inferencia.";
+    }
     if (res.prepared && /LTX 2\.[35] (?:GGUF|FP8|NVFP4)/.test(job.title || "")) {
       ggufFeedback("Archivos de la receta preparados en disco. Para crear el vídeo: elige Imagen a Vídeo o Texto a Vídeo, escribe el prompt y pulsa «Generar Clip de Vídeo». Los pesos se cargan al generar.");
     }
@@ -2104,6 +2108,7 @@
     state.assets = await api("/api/assets");
     renderImageGallery();
     renderVideoSelectsAndGallery();
+    renderH3Images();
     // También tras recargar la página: no exigir que la pestaña haya observado
     // el trabajo en directo para poder ver el último vídeo conservado en disco.
     if (!state.lastVideoResult && state.assets.videos.length) showVideoResult(state.assets.videos[0]);
@@ -2459,6 +2464,50 @@
           addShotToTimeline(asset);
         }
       });
+    });
+  }
+
+  function renderH3Images() {
+    const images = [...state.assets.images, ...state.assets.uploads.filter(a => a.type === "image")];
+    for (const [id, placeholder] of [["h3-start", "— Solo texto —"], ["h3-end", "— Sin fotograma final —"]]) {
+      const select = $(id); if (!select) continue;
+      const previous = select.value;
+      select.innerHTML = `<option value="">${placeholder}</option>` + images.map(a =>
+        `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
+      if (images.some(a => a.rel_path === previous)) select.value = previous;
+    }
+  }
+  function bindH3() {
+    const feedback = (text, error = false) => {
+      const el = $("h3-feedback"); el.hidden = false; el.className = `vid-steps-note ${error ? "warn" : "ok"}`; el.textContent = text;
+    };
+    for (const [input, select] of [["h3-upload-start", "h3-start"], ["h3-upload-end", "h3-end"]]) {
+      $(input).addEventListener("change", async ev => {
+        const file = ev.target.files[0]; if (!file) return;
+        try { const asset = await uploadFile(file); $(select).value = asset.rel_path; toast("Imagen H3 seleccionada.", "success"); }
+        catch (e) { toast(e.message, "error"); }
+        finally { ev.target.value = ""; }
+      });
+    }
+    $("h3-prepare").addEventListener("click", async () => {
+      if (!$("h3-license").checked) return feedback("Confirma que tienes derecho a usar el modelo en tu territorio antes de descargarlo.", true);
+      if (!confirm("Se compilará el motor CUDA L4 y se descargarán y verificarán los componentes de la variante elegida. Revisa la licencia y el espacio disponible. ¿Continuar?")) return;
+      try {
+        const result = await api("/api/video/h3/prepare", {method:"POST", body:JSON.stringify({model_id:$("h3-model").value, license_authorized:true})});
+        feedback("Preparación en cola. Sigue el proceso y sus errores en el monitor; después pulsa Generar."); watchJob(result.job);
+      } catch (e) { feedback(e.message, true); toast(e.message, "error"); }
+    });
+    $("h3-generate").addEventListener("click", async () => {
+      if (!$("h3-license").checked) return feedback("Confirma que tienes derecho a usar el modelo en tu territorio.", true);
+      const data = {model_id:$("h3-model").value, license_authorized:true, prompt:$("h3-prompt").value,
+        image_rel:$("h3-start").value || null, end_image_rel:$("h3-end").value || null,
+        width:Number($("h3-width").value), height:Number($("h3-height").value), frames:Number($("h3-frames").value),
+        steps:Number($("h3-steps").value), seed:Number($("h3-seed").value), offload:$("h3-offload").checked};
+      if (!data.prompt.trim()) return feedback("Escribe la descripción del plano.", true);
+      if (data.end_image_rel && !data.image_rel) return feedback("Para usar un fotograma final selecciona también uno inicial.", true);
+      try { const result = await api("/api/video/h3/generate", {method:"POST", body:JSON.stringify(data)});
+        feedback("Generación en cola. Sigue el progreso en el monitor; el clip aparecerá en la biblioteca de Vídeo."); watchJob(result.job);
+      } catch (e) { feedback(e.message, true); toast(e.message, "error"); }
     });
   }
 
@@ -2921,6 +2970,7 @@
 
   // ==================== EVENTOS DE UI ====================
   function bindEvents() {
+    bindH3();
     // Pestañas
     document.querySelectorAll(".tab-btn").forEach((btn) => {
       btn.addEventListener("click", () => switchTab(btn.dataset.tab));

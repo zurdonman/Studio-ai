@@ -55,13 +55,16 @@ def _stop(proc: subprocess.Popen) -> None:
             pass
 
 
-def _command(args: list[str], job: Any, *, stage: str, timeout: int, env: dict | None = None, cwd: str | None = None) -> None:
+def _command(args: list[str], job: Any, *, stage: str, timeout: int, env: dict | None = None, cwd: str | None = None, guard_label: str | None = None) -> None:
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryFile() as log:
         proc = subprocess.Popen(args, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        guard = _ComfyMemoryGuard(proc, job, label=guard_label) if guard_label else None
         start, offset, last = time.monotonic(), 0, 0.0
         try:
             while proc.poll() is None:
+                if guard:
+                    guard.raise_if_stopped()
                 job.check_cancelled()
                 if time.monotonic() - start > timeout:
                     raise TimeoutError(f"{stage}: tiempo máximo superado")
@@ -87,6 +90,8 @@ def _command(args: list[str], job: Any, *, stage: str, timeout: int, env: dict |
                         job.heartbeat(step=stage)
                     last = time.monotonic()
                 time.sleep(.4)
+            if guard:
+                guard.raise_if_stopped()
             job.check_cancelled()
             if proc.returncode:
                 log.flush(); log.seek(0, 2); end = log.tell(); log.seek(max(0, end - 3500))
@@ -97,7 +102,11 @@ def _command(args: list[str], job: Any, *, stage: str, timeout: int, env: dict |
                         tail = tail.replace(token, "[TOKEN OCULTO]")
                 raise RuntimeError(f"GGUF_SETUP_FAILED: {stage} (código {proc.returncode}): " + " | ".join(tail.splitlines()[-5:])[:1200])
         finally:
+            if guard:
+                guard.done.set()
             _stop(proc)
+            if guard:
+                guard.close()
 
 
 def _setup_env() -> dict:
@@ -305,8 +314,8 @@ class _ComfyMemoryGuard:
     On measured pressure, kill only this child process group. Sampling cannot
     prevent an allocation that outruns the monitor or an external process OOM.
     """
-    def __init__(self, proc: subprocess.Popen, job: Any, interval: float = .25):
-        self.proc, self.job, self.interval = proc, job, interval
+    def __init__(self, proc: subprocess.Popen, job: Any, interval: float = .25, label: str = "Comfy"):
+        self.proc, self.job, self.interval, self.label = proc, job, interval, label
         self.reason: str | None = None
         self.cancelled = False
         self.done = threading.Event()
@@ -324,7 +333,7 @@ class _ComfyMemoryGuard:
                 self._kill()
                 return
             if time.monotonic() - self.last_gpu_sample > 5:
-                self.reason = 'GGUF_LIVE_MEMORY_STOP: medición de VRAM bloqueada; se detuvo Comfy.'
+                self.reason = f'GGUF_LIVE_MEMORY_STOP: medición de VRAM bloqueada; se detuvo {self.label}.'
                 self._kill()
                 return
             try:
@@ -367,7 +376,7 @@ class _ComfyMemoryGuard:
 
     def _pressure(self, detail: str) -> None:
         self.reason = ('GGUF_LIVE_MEMORY_STOP: ' + detail +
-                       '. Se detuvo el proceso Comfy para proteger el entorno; pesos en disco intactos.')
+                       f'. Se detuvo el proceso {self.label} para proteger el entorno; pesos en disco intactos.')
         self._kill()
 
     def _kill(self) -> None:
