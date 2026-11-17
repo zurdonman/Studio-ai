@@ -1,6 +1,7 @@
 """Experimental character animation using private, pinned Comfy.
 
-No GPU validation yet. Never expose an arbitrary graph or the private server.
+A short Wan Q4 run completed on L4; long continuation and other settings remain experimental.
+Never expose an arbitrary graph or the private server.
 """
 from __future__ import annotations
 import hashlib
@@ -18,11 +19,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageOps
 from studio.config import DATA_ROOT, VIDEOS_OUT_DIR
 from studio.engines import ltx_gguf_backend as common
 from studio.engines.ffmpeg_utils import get_ffmpeg_bin, probe_media_info, verify_image_file
 from studio.engines.motion_manifest import files_for
+from studio.engines.motion_framing import fit_reference_image, fit_video_filter
 from studio.memory_manager import memory_manager, serialized_gpu_operation
 
 WEIGHTS = DATA_ROOT / 'models' / 'motion-transfer'
@@ -273,8 +274,7 @@ def _generate_wan_segments(session, job, *, total_frames, image_path, video_path
         guide = session.input_dir / guide_name
         # Decode from the start so frame indices remain deterministic even for VFR and keyframes.
         vf = (f'fps=24,trim=start_frame={part["start"]}:end_frame={part["start"] + part["window"]},'
-              f'setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=increase,'
-              f'crop={width}:{height},setsar=1')
+              f'setpts=PTS-STARTPTS,{fit_video_filter(width, height)}')
         common._command([get_ffmpeg_bin(), '-hide_banner','-loglevel','error','-y','-i',str(video_path),
                          '-map','0:v:0','-an','-vf',vf,'-c:v','libx264','-pix_fmt','yuv420p',str(guide)], job,
                         stage=f'Preparando guía {index+1}/{len(plan)}', timeout=1800, guard_label='FFmpeg movimiento')
@@ -335,14 +335,14 @@ def generate(*, engine, quant, image_path: Path, video_path: Path, prompt, negat
     if not common.query_gpu_info().get('has_gpu'): raise RuntimeError('MOTION_GPU_REQUIRED: se necesita GPU CUDA')
     job.log(f'Movimiento: motor {engine}, variante {quant}, {width}×{height}, {total_frames} fotogramas a 24 fps, '
             f'{steps} pasos, CFG {cfg:g}, semilla {seed}, fuerza {strength:g}.')
-    job.log('Movimiento experimental sin validación GPU; salida sin audio. La memoria real se vigila.', level='warning')
+    job.log('Movimiento experimental; foto y guía se ajustan sin recortar y pueden tener márgenes grises. '
+            'Wan Q4 ha completado una prueba corta en L4; los vídeos largos y otros formatos no están validados. Salida sin audio.', level='warning')
     if memory_manager.get_slot('video'): memory_manager.unload_slot('video')
     common._comfy_start_admission(job, stage='Inicio movimiento', planned_ram=6, planned_vram=3)
     names = _prepare(engine, quant, job)
     session = common._ResidentComfy(job, {})
     try:
-        with Image.open(image_path) as im:
-            im = ImageOps.exif_transpose(im).convert('RGB'); im.thumbnail((1024, 1024)); im.save(session.input_dir / 'reference.png')
+        fit_reference_image(image_path, session.input_dir / 'reference.png', width, height)
         segment_count = 1
         if engine == 'wan':
             output, segment_count = _generate_wan_segments(session, job, total_frames=total_frames, image_path=image_path,
@@ -351,7 +351,7 @@ def generate(*, engine, quant, image_path: Path, video_path: Path, prompt, negat
         else:
             source = session.input_dir / 'drive.mp4'
             common._command([get_ffmpeg_bin(), '-hide_banner','-loglevel','error','-y','-i',str(video_path), '-map','0:v:0', '-an',
-                             '-vf',f'fps=24,scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1',
+                             '-vf',f'fps=24,{fit_video_filter(width, height)}',
                              '-frames:v',str(frames), '-c:v','libx264','-pix_fmt','yuv420p',str(source)], job,
                             stage='Preparando segmento guía 24 fps', timeout=600, guard_label='FFmpeg movimiento')
             graph = make_graph(engine=engine, quant=quant, image_name='reference.png', video_name='drive.mp4', names=names,

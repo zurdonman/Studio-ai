@@ -9,12 +9,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from PIL import Image, ImageOps
 from studio.config import DATA_ROOT, VIDEOS_OUT_DIR
 from studio.engines import ltx_gguf_backend as common
 from studio.engines.ffmpeg_utils import get_ffmpeg_bin, probe_media_info, verify_image_file
 from studio.engines.ltx_gguf_workflow import make_graph
 from studio.engines.motion_transfer import _infer
+from studio.engines.motion_framing import fit_reference_image, fit_video_filter
 from studio.memory_manager import memory_manager, serialized_gpu_operation
 
 UNION = ('union', 'Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control', '20a580c8606c06a0988d40375a61309e0fe5893d',
@@ -84,11 +84,10 @@ def generate(*, image_path:Path, video_path:Path, prompt, negative, width, heigh
     lora = _prepare_lora(job)
     session = common._ResidentComfy(job,{})
     try:
-        with Image.open(image_path) as im:
-            im=ImageOps.exif_transpose(im).convert('RGB'); im.thumbnail((1024,1024)); im.save(session.input_dir/'frame.png')
+        fit_reference_image(image_path, session.input_dir/'frame.png', width, height)
         guide=session.input_dir/'guide.mp4'
         common._command([get_ffmpeg_bin(),'-hide_banner','-loglevel','error','-y','-i',str(video_path),'-map','0:v:0','-an',
-                         '-vf',f'fps=24,scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},format=gray,edgedetect=low=0.1:high=0.3:mode=wires,format=yuv420p',
+                         '-vf',f'fps=24,{fit_video_filter(width, height)},format=gray,edgedetect=low=0.1:high=0.3:mode=wires,format=yuv420p',
                          '-frames:v',str(frames),'-c:v','libx264','-pix_fmt','yuv420p',str(guide)],job,
                         stage='Extrayendo bordes del vídeo guía',timeout=600,guard_label='FFmpeg control LTX')
         graph=make_graph(prompt=prompt,negative_prompt=negative,width=width,height=height,frames=frames,fps=24,seed=seed,

@@ -365,3 +365,30 @@ def test_motion_plugin_upgrades_only_known_versions(temp_studio_env, monkeypatch
     assert target.read_text()=='other user plugin'
     target.unlink(); target.symlink_to(tmp_path/'other')
     with pytest.raises(RuntimeError,match='MOTION_PLUGIN_CONFLICT'): m._install_motion_plugin()
+
+
+@pytest.mark.parametrize('width,height',[(512,288),(288,512),(512,320),(320,576)])
+def test_motion_framing_keeps_top_and_bottom_of_inputs(tmp_path,width,height):
+    from PIL import Image, ImageDraw
+    from studio.engines.motion_framing import fit_reference_image, fit_video_filter
+    from studio.engines.ffmpeg_utils import get_ffmpeg_bin
+    # Portrait image with clearly identifiable areas at both extremes.
+    original=Image.new('RGB',(200,400),'green')
+    draw=ImageDraw.Draw(original)
+    draw.rectangle((0,0,199,59),fill=(255,0,0))
+    draw.rectangle((0,340,199,399),fill=(0,0,255))
+    source=tmp_path/'portrait.png'; original.save(source)
+    fitted=tmp_path/'fitted.png'; fit_reference_image(source,fitted,width,height)
+    assert Image.open(fitted).size == (width,height)
+    for point,color in [((width//2,10),'red'),((width//2,height-10),'blue')]:
+        pixel=Image.open(fitted).getpixel(point)
+        assert pixel[0 if color=='red' else 2]>200
+    video_frame=tmp_path/'ffmpeg.png'
+    subprocess.run([get_ffmpeg_bin(),'-hide_banner','-loglevel','error','-y','-i',str(source),
+                    '-vf',fit_video_filter(width,height),'-frames:v','1','-threads','1',str(video_frame)],check=True)
+    video_image=Image.open(video_frame).convert('RGB')
+    assert video_image.size == (width,height)
+    assert video_image.getpixel((width//2,10))[0] > 200
+    assert video_image.getpixel((width//2,height-10))[2] > 200
+    if width / height > 0.5:
+        assert all(abs(c-127)<5 for c in video_image.getpixel((2,height//2)))

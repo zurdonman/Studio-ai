@@ -2141,8 +2141,22 @@
       if(items.some(a=>a.rel_path===prev)) el.value=prev;
     }
   }
+  function configureMotionAspect() {
+    const engine=$("motion-engine")?.value;
+    const selected=document.querySelector('input[name="motion-aspect"]:checked')?.value || "default";
+    const isLtx=engine === "ltx";
+    const presets={default:[512,320], portrait:isLtx?[320,576]:[288,512], landscape:isLtx?[576,320]:[512,288]};
+    const manual=selected === "manual";
+    $("motion-width").disabled=!manual; $("motion-height").disabled=!manual;
+    $("motion-width").step=isLtx?"64":"32"; $("motion-height").step=isLtx?"64":"32";
+    if (!manual && presets[selected]) [$("motion-width").value,$("motion-height").value]=presets[selected];
+    const dimensions=manual ? `Personalizado: múltiplos de ${isLtx?64:32}, máximo 768×512 de área.` : `Salida: ${$("motion-width").value}×${$("motion-height").value} píxeles${isLtx && selected !== "default" ? " (aproximación a 9:16/16:9 por los requisitos de LTX)" : ""}.`;
+    $("motion-aspect-note").textContent=`${dimensions} La foto y el vídeo guía se ajustan completos sin recortar; pueden aparecer márgenes grises. La IA aún puede modificar el encuadre.`;
+  }
+
   function configureMotion() {
     const engine=$("motion-engine")?.value; if (!engine) return;
+    configureMotionAspect();
     const sizes = engine === "wan" ? [6.50,8.58,11.34,12.74,18.14] : [6.02,8.11,10.86,12.27,17.67];
     const common = ["q2","q3","q4","q5","q8"].map((q,i) => [q, `GGUF ${q.toUpperCase()} · ${sizes[i]} GB principales`]);
     const items=engine === "ltx" ? [["q4","LTX 2.3 GGUF Q4 (base) + Union Control"]] : [...common, ...(engine === "wan" ? [["int8","INT8 safetensors · distilled · 16,65 GB"],["bf16","BF16 safetensors · distilled · 32,79 GB"]] : [["fp8","FP8 safetensors · 17,69 GB"],["fp16","FP16 safetensors · 32,79 GB"]])];
@@ -3020,6 +3034,7 @@
     bindH3();
     configureMotion();
     $("motion-engine")?.addEventListener("change", configureMotion);
+    document.querySelectorAll('input[name="motion-aspect"]').forEach(el => el.addEventListener("change", configureMotionAspect));
     for (const [upload,select] of [["motion-image-upload","motion-image"],["motion-video-upload","motion-video"]]) {
       $(upload)?.addEventListener("change", async e => {
         const file=e.target.files?.[0]; if (!file) return;

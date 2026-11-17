@@ -825,7 +825,7 @@
           <p>Funciones por tarea. Las integraciones comunitarias no terminadas están señaladas: no se descargan ni ejecutan al abrir este menú.</p>
           <details id="motion-panel"><summary><strong>💃 Transferir movimiento desde vídeo</strong> — tres rutas experimentales</summary>
             <div class="form-stack">
-              <p><strong>Sin validación de inferencia en GPU.</strong> Primera ejecución: descarga varios GB y prepara Comfy. Usa imagen y vídeo autorizados; los resultados pueden variar. No se garantiza que encaje en L4, ni se limita a L4.</p>
+              <p><strong>Experimental:</strong> Wan Q4 ha completado una prueba corta en L4; la continuación larga y los demás motores siguen sin validar. La primera ejecución descarga varios GB y prepara Comfy. Usa imagen y vídeo autorizados; los resultados pueden variar.</p>
               <label class="field-label" for="motion-engine">Motor</label>
               <select id="motion-engine"><option value="wan">Wan Animate 2 · imagen + movimiento directo</option><option value="scail">SCAIL-2 · imagen + movimiento y máscaras SAM</option><option value="ltx">LTX 2.3 · Union Control por bordes</option></select>
               <p id="motion-engine-note" class="muted"></p>
@@ -835,7 +835,16 @@
               <p class="muted">Los tamaños de los modelos son archivos, no uso de RAM/VRAM. Los componentes comunes y temporales ocupan espacio adicional. Una cuantización más baja puede perder calidad.</p>
               <label class="field-label" for="motion-prompt">Descripción de personajes y escena</label><textarea id="motion-prompt" rows="3" placeholder="Dos personas bailan en una plaza al atardecer..."></textarea>
               <label class="field-label" for="motion-negative">Prompt negativo (opcional)</label><textarea id="motion-negative" rows="2" placeholder="Dedos deformados, rostros borrosos..."></textarea>
+              <fieldset><legend class="field-label">Formato del vídeo</legend>
+                <div class="params-grid-2">
+                  <label class="check-row"><input type="radio" name="motion-aspect" value="default" checked /> Predeterminado · 512×320</label>
+                  <label class="check-row"><input type="radio" name="motion-aspect" value="portrait" /> Vertical · móvil</label>
+                  <label class="check-row"><input type="radio" name="motion-aspect" value="landscape" /> Horizontal · ordenador</label>
+                  <label class="check-row"><input type="radio" name="motion-aspect" value="manual" /> Personalizado</label>
+                </div>
+              </fieldset>
               <div class="params-grid-2"><div><label class="field-label" for="motion-width">Ancho</label><input id="motion-width" type="number" value="512" min="256" max="768" step="32" /></div><div><label class="field-label" for="motion-height">Alto</label><input id="motion-height" type="number" value="320" min="256" max="768" step="32" /></div></div>
+              <p id="motion-aspect-note" class="muted">La foto y el vídeo guía se ajustan completos sin recortar; pueden aparecer márgenes grises si sus proporciones no coinciden. La IA aún puede modificar el encuadre.</p>
               <div class="params-grid-2"><div><div id="motion-duration-wrap"><label class="field-label" for="motion-duration">Duración en segundos (Wan)</label><input id="motion-duration" type="number" min="0.041667" max="86400" step="any" value="2" /></div><div id="motion-frames-wrap" hidden><label class="field-label" for="motion-frames">Segmento a 24 fps</label><select id="motion-frames"><option value="25">25 fotogramas · ~1 s</option><option value="49" selected>49 fotogramas · ~2 s</option><option value="81">81 fotogramas · ~3,4 s</option></select></div></div><div><label class="field-label" for="motion-strength">Fuerza de control</label><input id="motion-strength" type="number" min="0" max="2" step="0.1" value="1" /></div></div>
               <p id="motion-duration-note" class="muted">Wan redondea al fotograma más próximo a 24 fps. Para vídeos largos encadena segmentos experimentales; pueden aparecer cortes o cambios de identidad. La guía debe cubrir toda la duración; salida sin audio. Máximo técnico: 24 horas.</p>
               <div class="params-grid-2"><div><label class="field-label" for="motion-steps">Pasos (Wan / SCAIL)</label><input id="motion-steps" type="number" value="10" min="1" max="50" /></div><div><label class="field-label" for="motion-cfg">CFG (Wan / SCAIL)</label><input id="motion-cfg" type="number" value="1" min="0" max="10" step="0.5" /></div></div>
