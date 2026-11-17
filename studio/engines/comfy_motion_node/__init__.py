@@ -6,7 +6,33 @@ fail closed unless Comfy actually constructed WAN_Animate2. This private Comfy
 worker is single-job and never accepts user-supplied graph nodes.
 """
 import json
+import logging
 import nodes
+
+
+def _fix_gguf_new_empty(reader):
+    """Normalize positional dimensions for the pinned GGUF tensor subclass.
+
+    Wan's attention uses x.new_empty(batch, tokens, heads, dim). The pinned
+    GGUF override accepts this, but records only `batch` as tensor_shape; later
+    shape[1] then fails. Keep the original allocation and quantization metadata,
+    changing only the way positional sizes are passed to it.
+    """
+    tensor_cls = getattr(reader, '__globals__', {}).get('GGMLTensor')
+    if not isinstance(tensor_cls, type) or not callable(getattr(tensor_cls, 'new_empty', None)):
+        raise RuntimeError('STUDIO_MOTION_GGUF_COMPAT_UNAVAILABLE: no se encontró GGMLTensor del cargador fijado')
+    original = tensor_cls.new_empty
+    if getattr(original, '_studio_motion_size_fix', False):
+        return
+
+    def new_empty(self, size, *args, **kwargs):
+        if isinstance(size, int) and all(isinstance(value, int) for value in args):
+            size, args = (size, *args), ()
+        return original(self, size, *args, **kwargs)
+
+    new_empty._studio_motion_size_fix = True
+    tensor_cls.new_empty = new_empty
+    logging.info('[StudioMotion] Compatibilidad GGUF new_empty activada para Wan Animate 2')
 
 
 class StudioWanAnimate2GGUF:
@@ -22,6 +48,7 @@ class StudioWanAnimate2GGUF:
         loader_cls = nodes.NODE_CLASS_MAPPINGS['UnetLoaderGGUF']
         namespace = loader_cls.load_unet.__globals__
         original = namespace['gguf_sd_loader']
+        _fix_gguf_new_empty(original)
 
         def load_with_config(path):
             sd, extra = original(path)

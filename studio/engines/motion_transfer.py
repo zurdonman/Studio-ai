@@ -3,6 +3,7 @@
 No GPU validation yet. Never expose an arbitrary graph or the private server.
 """
 from __future__ import annotations
+import hashlib
 import json
 import math
 import queue
@@ -26,6 +27,7 @@ from studio.memory_manager import memory_manager, serialized_gpu_operation
 
 WEIGHTS = DATA_ROOT / 'models' / 'motion-transfer'
 FOLDERS = {'dit': 'diffusion_models', 'umt5': 'text_encoders', 'vision': 'clip_vision', 'vae': 'vae', 'sam': 'checkpoints'}
+_MOTION_PLUGIN_PREVIOUS_HASHES = frozenset({'de5729c6cc7536397e6111151a44b578b3ed17c23bcf26f04d0768aa26d6d832'})
 
 
 def make_graph(*, engine, quant, image_name, video_name, names, prompt, negative, width, height, frames, seed, steps, cfg, person='human', strength=1.0, continuation_name=None, prefix='studio_motion'):
@@ -98,9 +100,21 @@ def _install_motion_plugin():
         raise RuntimeError('MOTION_PLUGIN_CONFLICT: directorio no gestionado')
     dest.mkdir(parents=True, exist_ok=True)
     target = dest / '__init__.py'
-    if target.is_symlink() or (target.exists() and target.read_bytes() != src.read_bytes()):
-        raise RuntimeError('MOTION_PLUGIN_CONFLICT: nodo diferente, no se sobrescribe')
-    if not target.exists(): shutil.copyfile(src, target)
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise RuntimeError('MOTION_PLUGIN_CONFLICT: nodo no gestionado')
+    desired = src.read_bytes()
+    # Upgrade only the exact previous Studio adapter; never overwrite a user node.
+    if target.exists():
+        current = target.read_bytes()
+        if current == desired: return
+        if hashlib.sha256(current).hexdigest() not in _MOTION_PLUGIN_PREVIOUS_HASHES:
+            raise RuntimeError('MOTION_PLUGIN_CONFLICT: nodo diferente, no se sobrescribe')
+    temp = dest / f'.studio-motion-{uuid.uuid4().hex}.tmp'
+    try:
+        temp.write_bytes(desired)
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _prepare(engine, quant, job):

@@ -47,7 +47,9 @@ def test_adapter_injects_metadata_and_fails_closed(temp_studio_env, monkeypatch)
     # Import the private node with a tiny fake Comfy registry, not Comfy itself.
     fake=ModuleType('nodes'); seen={}
     namespace={'json':json,'SimpleNamespace':SimpleNamespace,'seen':seen}
-    exec("""def gguf_sd_loader(path): return {}, {'metadata': {'config': '{\"transformer\":{\"existing\":7}}'}}
+    exec("""class GGMLTensor:
+    def new_empty(self, size, *args, **kwargs): return size, args, kwargs
+def gguf_sd_loader(path): return {}, {'metadata': {'config': '{\"transformer\":{\"existing\":7}}'}}
 class Loader:
     @classmethod
     def INPUT_TYPES(cls): return {'required': {'unet_name': (['test'],)}}
@@ -303,3 +305,63 @@ def test_comfy_events_log_node_execution(temp_studio_env, monkeypatch, tmp_path)
         m._infer(session,{'1':{'class_type':'StudioWanAnimate2GGUF','inputs':{}}},job)
     assert any('Comfy ejecutando nodo 1: StudioWanAnimate2GGUF' in item['message'] for item in job.logs)
     assert job.current_step=='Comfy StudioWanAnimate2GGUF: 2/10'
+
+
+def test_gguf_positional_new_empty_compatibility(temp_studio_env, monkeypatch):
+    """Reproduce the pinned GGUF subclass + Wan attention buffer shape failure on CPU."""
+    torch=pytest.importorskip('torch')
+    fake=ModuleType('nodes'); monkeypatch.setitem(sys.modules,'nodes',fake)
+    spec=importlib.util.spec_from_file_location('motion_shape_fix','studio/engines/comfy_motion_node/__init__.py')
+    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    # Minimal copy of the pinned GGUF tensor's actual allocation/shape methods.
+    class GGMLTensor(torch.Tensor):
+        def __new__(cls, *args, tensor_type, tensor_shape, patches=None, **kwargs):
+            return super().__new__(cls, *args, **kwargs)
+        def __init__(self, *args, tensor_type, tensor_shape, patches=None, **kwargs):
+            self.tensor_type, self.tensor_shape = tensor_type, tensor_shape
+            self.patches = [] if patches is None else patches
+        def new_empty(self, size, *args, **kwargs):
+            new_tensor=super().new_empty(size, *args, **kwargs)
+            return GGMLTensor(new_tensor, tensor_type=getattr(self,'tensor_type',None),
+                              tensor_shape=size, patches=getattr(self,'patches',[]).copy())
+        @property
+        def shape(self):
+            if not hasattr(self,'tensor_shape'): self.tensor_shape=self.size()
+            return self.tensor_shape
+    def reader(): pass
+    reader.__globals__['GGMLTensor']=GGMLTensor
+    try:
+        x=GGMLTensor(torch.zeros(1,4,2),tensor_type='marker',tensor_shape=(1,4,2),patches=['patch'])
+        broken=x.new_empty(1,6,1,2)
+        with pytest.raises(TypeError,match='not subscriptable'): _=broken.shape[1]
+        module._fix_gguf_new_empty(reader)
+        first=GGMLTensor.new_empty; module._fix_gguf_new_empty(reader)
+        assert GGMLTensor.new_empty is first  # repeated loads don't stack wrappers
+        kbuf=x.new_empty(1,6,1,2,dtype=torch.float64)
+        assert tuple(kbuf.shape)==(1,6,1,2) and kbuf.shape[1]==6
+        assert kbuf.dtype==torch.float64 and kbuf.tensor_type=='marker' and kbuf.patches==['patch']
+        assert tuple(x.new_empty((1,6,1,2)).shape)==(1,6,1,2)
+        assert tuple(x.new_empty(3).shape)==(3,)
+        # The expression used by Wan's forward_gen now handles the buffer branch.
+        assert kbuf.reshape(1,kbuf.shape[1],2).size()==torch.Size([1,6,2])
+    finally:
+        reader.__globals__.pop('GGMLTensor',None)
+
+
+def test_motion_plugin_upgrades_only_known_versions(temp_studio_env, monkeypatch, tmp_path):
+    import hashlib
+    from studio.engines import motion_transfer as m
+    monkeypatch.setattr(m.common,'ROOT',tmp_path)
+    dest=tmp_path/'comfy/custom_nodes/StudioMotion';dest.mkdir(parents=True)
+    target=dest/'__init__.py'
+    old=b'previous known version'
+    target.write_bytes(old)
+    monkeypatch.setattr(m,'_MOTION_PLUGIN_PREVIOUS_HASHES',frozenset({hashlib.sha256(old).hexdigest()}))
+    m._install_motion_plugin()
+    assert target.read_bytes()==(m.Path(m.__file__).with_name('comfy_motion_node')/'__init__.py').read_bytes()
+    m._install_motion_plugin()  # already installed
+    target.write_text('other user plugin')
+    with pytest.raises(RuntimeError,match='MOTION_PLUGIN_CONFLICT'): m._install_motion_plugin()
+    assert target.read_text()=='other user plugin'
+    target.unlink(); target.symlink_to(tmp_path/'other')
+    with pytest.raises(RuntimeError,match='MOTION_PLUGIN_CONFLICT'): m._install_motion_plugin()
