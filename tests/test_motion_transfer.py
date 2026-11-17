@@ -161,3 +161,38 @@ def test_motion_failure_closes_worker(temp_studio_env, monkeypatch,tmp_path,canc
     with pytest.raises(JobCancelledError if cancel else RuntimeError):
         m.generate(engine='wan',quant='q4',image_path=img,video_path=video,prompt='dance',negative='',width=256,height=256,frames=25,seed=1,steps=10,cfg=1,person='human',strength=1,job=JobRecord('video','test'))
     assert closed==[True]
+
+
+def test_infer_reports_node_and_safe_traceback(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import motion_transfer as m
+    from studio.jobs import JobRecord
+    class Reply:
+        ok = True
+        def __init__(self, data): self.data = data
+        def json(self): return self.data
+        def raise_for_status(self): pass
+    event = ['execution_error', {'node_id':'1', 'node_type':'Untrusted',
+             'exception_type':'builtins.TypeError', 'exception_message':"'int' object is not subscriptable",
+             'traceback':['  File "/private/home/ComfyUI/loader.py", line 23, in get_orig_shape\n    user_secret_input\n'],
+             'current_inputs':{'prompt':'do not log this'}}]
+    def get(url, **kwargs):
+        if url.endswith('/object_info'): return Reply({'StudioWanAnimate2GGUF':{}})
+        return Reply({'id': {'status': {'status_str':'error', 'messages':[event]}}})
+    monkeypatch.setattr(m.common.requests, 'get', get)
+    monkeypatch.setattr(m.common.requests, 'post', lambda *a,**k: Reply({'prompt_id':'id'}))
+    session=SimpleNamespace(base='http://test', output_dir=tmp_path, alive=lambda:True,
+                            guard=SimpleNamespace(raise_if_stopped=lambda:None))
+    job=JobRecord('video','test')
+    with pytest.raises(RuntimeError,match=r'nodo 1 \(StudioWanAnimate2GGUF\), builtins.TypeError'):
+        m._infer(session, {'1':{'class_type':'StudioWanAnimate2GGUF','inputs':{}}}, job)
+    logs=str(job.logs)
+    assert 'loader.py:23 en get_orig_shape' in logs
+    assert '/private/home' not in logs and 'user_secret_input' not in logs and 'do not log this' not in logs
+
+
+def test_comfy_error_handles_missing_or_malformed_details(temp_studio_env):
+    from studio.engines.motion_transfer import _report_comfy_error
+    from studio.jobs import JobRecord
+    job=JobRecord('video','test')
+    text=_report_comfy_error([None, [], ['execution_error', {'node_id':'../x', 'traceback':42}]], {}, job)
+    assert 'nodo ? (?)' in text and 'Error desconocido' in text

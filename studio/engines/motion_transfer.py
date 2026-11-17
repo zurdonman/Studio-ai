@@ -5,6 +5,7 @@ No GPU validation yet. Never expose an arbitrary graph or the private server.
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -122,6 +123,34 @@ def _prepare(engine, quant, job):
     return names
 
 
+def _report_comfy_error(messages, graph, job):
+    """Report bounded stack locations, not node inputs, prompts or absolute paths."""
+    from studio.diagnostics import redact_secrets
+
+    error = next((item[1] for item in messages if isinstance(item, (list, tuple))
+                  and len(item) > 1 and item[0] == 'execution_error' and isinstance(item[1], dict)), {}) if isinstance(messages, list) else {}
+    raw_id = str(error.get('node_id', ''))[:80]
+    node_id = raw_id if re.fullmatch(r'[A-Za-z0-9_.-]+', raw_id) else '?'
+    # Trust our submitted graph, not arbitrary strings returned by the worker.
+    node = graph.get(node_id, {})
+    node_type = node.get('class_type', '?') if isinstance(node, dict) else '?'
+    if not isinstance(node_type, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,120}', node_type):
+        node_type = '?'
+    error_type = str(error.get('exception_type', 'unknown'))[:120]
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+', error_type):
+        error_type = 'unknown'
+    message = redact_secrets(str(error.get('exception_message') or 'Error desconocido')).replace('\n', ' ').replace('\r', ' ')[:1000]
+    job.log(f'Comfy error: nodo {node_id} ({node_type}); tipo {error_type}', level='error')
+    stack = error.get('traceback', [])
+    if isinstance(stack, (list, str)):
+        stack_text = stack if isinstance(stack, str) else '\n'.join(x for x in stack if isinstance(x, str))
+        frames = re.findall(r'File "([^"\n]+)", line (\d+), in ([\w<>.]+)', stack_text[-50000:])
+        for filename, line, function in frames[-30:]:
+            basename = filename.replace('\\', '/').rsplit('/', 1)[-1][:120]
+            job.log(f'Comfy traceback: {basename}:{line[:10]} en {function[:120]}', level='error')
+    return f'MOTION_INFERENCE_FAILED: nodo {node_id} ({node_type}), {error_type}: {message}'
+
+
 def _infer(session, graph, job, prefix="studio_motion"):
     info = common.requests.get(session.base + '/object_info', timeout=30); info.raise_for_status()
     missing = {n['class_type'] for n in graph.values()} - set(info.json())
@@ -138,8 +167,7 @@ def _infer(session, graph, job, prefix="studio_motion"):
         if result:
             status = result.get('status') or {}
             if status.get('status_str') == 'error':
-                detail = next((str(m[1].get('exception_message', '')) for m in status.get('messages', []) if len(m) > 1 and m[0] == 'execution_error' and isinstance(m[1], dict)), 'Error desconocido')
-                raise RuntimeError('MOTION_INFERENCE_FAILED: ' + detail[:1000])
+                raise RuntimeError(_report_comfy_error(status.get('messages', []), graph, job))
             if status.get('completed'):
                 paths = list(session.output_dir.glob(prefix + '_*.mp4'))
                 if len(paths) != 1: raise RuntimeError('MOTION_OUTPUT_MISSING')
