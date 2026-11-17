@@ -1097,7 +1097,7 @@ class LTXGGUFReq(BaseModel):
     image_strength: float = Field(default=1.0, ge=0.5, le=1.0, allow_inf_nan=False)
     comfy_vram_mode: Literal["auto", "lowvram", "novram", "highvram"] = "auto"
     comfy_evict_models: bool = False
-    comfy_keep_loaded: bool = False
+    comfy_keep_loaded: bool = True
 
 
 def _comfy_job_function(fn, config, keep_loaded=False):

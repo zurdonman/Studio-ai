@@ -509,3 +509,16 @@ def test_motion_bad_metadata_invalidates_receipt_without_deleting_model(temp_stu
     assert len(list((root/'.motion-verified').iterdir()))==1
     m._invalidate_motion_receipts('wan','q4')
     assert not list((root/'.motion-verified').iterdir()) and path.read_bytes()==b'abc'
+
+
+def test_ltx_union_prepare_reuses_own_resident_not_unrelated(temp_studio_env, monkeypatch):
+    from studio.engines import ltx_gguf_backend as backend
+    from studio.jobs import JobRecord
+    resident=SimpleNamespace(options=('auto',False),keep_loaded=True,names={'dit':'existing'})
+    asked=[]
+    monkeypatch.setattr(backend,'query_gpu_info',lambda:{'has_gpu':True,'bf16_supported':True,'vram_total_gb':22})
+    monkeypatch.setattr(backend,'_resident',lambda model: asked.append(model) or resident)
+    monkeypatch.setattr(backend,'_install',lambda *a,**k:pytest.fail('no reinstall'))
+    job=JobRecord('video','union');job.comfy_keep_loaded=True
+    assert backend._prepare_gguf(job,model_id='ltx23-union-control-q4') == {'dit':'existing'}
+    assert asked == ['ltx23-union-control-q4']

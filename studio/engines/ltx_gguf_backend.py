@@ -416,13 +416,14 @@ def _install_resident_plugin(root: Path) -> None:
     destination = root / 'comfy' / 'custom_nodes' / 'StudioResident'
     if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
         raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: directorio ajeno, no se modifica')
-    old_core = 'f00e4157aea663dbf2c0c03beb154263d5352de7bdbd5f958932b45a9234d5db'
+    old_cores = {'f00e4157aea663dbf2c0c03beb154263d5352de7bdbd5f958932b45a9234d5db',
+                 '07682439076a008995ff4a80735f7aef3800fb596fbd820c5f5cadfadf52044e'}
     for name in ('__init__.py', 'core.py'):
         target = destination / name
         if target.is_symlink() or (target.exists() and not target.is_file()):
             raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: nodo diferente, no se sobrescribe')
         if target.exists() and target.read_bytes() != (source / name).read_bytes():
-            if name != 'core.py' or hashlib.sha256(target.read_bytes()).hexdigest() != old_core:
+            if name != 'core.py' or hashlib.sha256(target.read_bytes()).hexdigest() not in old_cores:
                 raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: nodo diferente, no se sobrescribe')
     destination.mkdir(parents=True, exist_ok=True)
     for name in ('__init__.py', 'core.py'):
@@ -681,12 +682,12 @@ def _fingerprint():
         return None
 
 
-def _prepare_gguf(job: Any, *, extra_ram: float = 0, extra_vram: float = 0) -> dict[str, str]:
+def _prepare_gguf(job: Any, *, extra_ram: float = 0, extra_vram: float = 0, model_id: str = MODEL_ID) -> dict[str, str]:
     global _verified_fingerprint
     gpu = query_gpu_info()
     if not gpu.get("has_gpu") or not gpu.get("bf16_supported") or float(gpu.get("vram_total_gb") or 0) < 16:
         raise RuntimeError("GGUF_GPU_UNSUPPORTED: se necesita una GPU BF16 con al menos 16 GiB; no se descargó nada")
-    session = _resident()
+    session = _resident() if model_id == MODEL_ID else _resident(model_id)
     if session is not None and (getattr(session, "options", ("auto", False)) != job_options(job)
                                 or getattr(session, "keep_loaded", False) != _keep_loaded(job)):
         memory_manager.unload_slot("video")

@@ -78,11 +78,14 @@ def generate(*, image_path:Path, video_path:Path, prompt, negative, width, heigh
         raise ValueError('LTX_MOTION_VIDEO_TOO_SHORT: vídeo guía demasiado corto')
     if not common.query_gpu_info().get('has_gpu'): raise RuntimeError('LTX_MOTION_GPU_REQUIRED')
     job.log('Union Control experimental: guía de bordes, no poses ni clonación de identidad. Sin validación GPU.',level='warning')
-    # This graph is not compatible with resident result cache; close only after obtaining GPU lock.
-    if memory_manager.get_slot('video'): memory_manager.unload_slot('video')
-    names = common._prepare_gguf(job, extra_ram=2, extra_vram=1)
+    # Reuse the same recipe's isolated worker; never reuse a different model's cache.
+    job.comfy_keep_loaded = True
+    model_id = 'ltx23-union-control-q4'
+    names = common._prepare_gguf(job, extra_ram=2, extra_vram=1, model_id=model_id)
     lora = _prepare_lora(job)
-    session = common._ResidentComfy(job,{})
+    session = common._open_resident(job, names, model_id)
+    session.motion_cleanup_failed = False
+    success = False
     try:
         fit_reference_image(image_path, session.input_dir/'frame.png', width, height)
         guide=session.input_dir/'guide.mp4'
@@ -116,7 +119,9 @@ def generate(*, image_path:Path, video_path:Path, prompt, negative, width, heigh
             if created:
                 dest.unlink(missing_ok=True); meta_path.unlink(missing_ok=True)
             raise
+        success = True
         return meta
     except Exception:
         session.guard.raise_if_stopped();raise
-    finally: session.unload()
+    finally:
+        common._finish_session(session, job, success)

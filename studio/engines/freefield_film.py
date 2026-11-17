@@ -1,7 +1,7 @@
 """Freefield's FILM idea, implemented using ComfyUI core in an isolated worker.
 
 This is a bounded, experimental 2x recipe, not the full Freefield application.
-No inference result is cached; the worker is stopped after every job.
+Completed jobs can reuse the private worker when selective cleanup succeeds.
 """
 from __future__ import annotations
 
@@ -107,6 +107,19 @@ def _infer(session: Any, graph: dict, job: Any) -> Path:
                 files = list(session.output_dir.glob(graph['6']['inputs']['filename_prefix'] + '_*.mp4'))
                 if len(files) != 1:
                     raise RuntimeError('FILM_OUTPUT_MISSING: no se produjo un MP4 único.')
+                if getattr(session, 'keep_loaded', False):
+                    try:
+                        cleaned = common.requests.get(session.base + '/studio-resident/status', timeout=10)
+                        cleaned.raise_for_status()
+                        state = cleaned.json()
+                        if state.get('version') != 1 or state.get('prompt_id') != ident or state.get('ok') is not True:
+                            raise RuntimeError('limpieza no confirmada')
+                        deleted = common.requests.post(session.base + '/history', json={'delete': [ident]}, timeout=10)
+                        deleted.raise_for_status()
+                        session.cleanup_ok = True
+                    except Exception:
+                        session.cleanup_ok = False
+                        job.log('No se confirmó la limpieza; Comfy se cerrará tras guardar el resultado.', level='warning')
                 return files[0]
         job.heartbeat(step='FILM: interpolando fotogramas; duración y memoria dependen del clip')
         time.sleep(1)
@@ -122,11 +135,16 @@ def interpolate(path: Path, *, job: Any) -> dict:
         raise RuntimeError('FILM_GPU_REQUIRED: esta receta experimental necesita GPU NVIDIA/CUDA.')
     job.log('FILM experimental: el vídeo se normaliza a 24 fps y se interpola a 48 fps; el audio se recompone. No validado en GPU.', level='warning')
     # A job waits for the same serialized GPU lock as LTX. Never stop an active generation.
-    if memory_manager.get_slot('video'):
-        memory_manager.unload_slot('video')
-    common._comfy_start_admission(job, stage='Inicio FILM', planned_ram=4, planned_vram=2)
+    job.comfy_keep_loaded = True
+    model_id = 'freefield-film'
+    resident = common._resident(model_id)
+    if resident is None:
+        if memory_manager.get_slot('video'):
+            memory_manager.unload_slot('video')
+        common._comfy_start_admission(job, stage='Inicio FILM', planned_ram=4, planned_vram=2)
     _prepare(job)
-    session = common._ResidentComfy(job, {})
+    session = common._open_resident(job, {}, model_id)
+    success = False
     try:
         source = session.input_dir / 'input.mp4'
         # Strictly bounded decoded output, with fixed framerate, to avoid an unbounded
@@ -144,7 +162,9 @@ def interpolate(path: Path, *, job: Any) -> dict:
         VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
         name = f'film_{datetime.now().strftime("%Y%m%d_%H%M%S")}_{uuid.uuid4().hex[:8]}.mp4'
         dest = VIDEOS_OUT_DIR / name
-        temporary = session.root / 'final.mp4'
+        work = session.root / 'motion-work'
+        work.mkdir(exist_ok=True)
+        temporary = work / 'final.mp4'
         if info['has_audio']:
             common._command([get_ffmpeg_bin(), '-v', 'error', '-y', '-i', str(output), '-i', str(source),
                              '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac',
@@ -171,9 +191,10 @@ def interpolate(path: Path, *, job: Any) -> dict:
             dest.unlink(missing_ok=True)
             metadata.unlink(missing_ok=True)
             raise
+        success = True
         return meta
     except Exception:
         session.guard.raise_if_stopped()
         raise
     finally:
-        session.unload()
+        common._finish_session(session, job, success)

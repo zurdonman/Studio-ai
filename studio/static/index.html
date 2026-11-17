@@ -471,7 +471,7 @@
               <p class="muted">También disponible: <strong>LTX 2.5 22B destilado NVFP4 Comfy DDB + Gemma Q5</strong>, conversión comunitaria experimental. Cuatro clips I2V de unos 10 s completados en una L4 según registro; otros modos y calidad no verificados. La L4 no dispone de FP4 nativo. Requiere acceso a Gemma Q5 y puede fallar por memoria o compatibilidad.</p>
               <p class="muted">Nueva opción experimental: <strong>LTX 2.5 FP8 Comfy + Gemma 4 GGUF Q5</strong>. El transformer se descarga ya convertido a FP8; no es la conversión desde BF16 de la receta FP8 en memoria. Requiere acceso elix3r, puede usar CPU offload y no se ha validado en GPU/L4. Comienza con un clip de unos 2 s; la presión real puede detener la carga.</p>
               <p class="muted">LTX 2.5 FP8 en memoria es otro modelo: exige un presupuesto preventivo de 72 GiB de RAM más reserva. Si esta sesión solo tiene 53 GiB de RAM, no podrá cargarse con esta política. No se relajan las guardias.</p>
-              <p class="muted">LTX 2.3 descarga ~24 GiB más dependencias; se requieren licencias LTX y Gemma. Por defecto, al terminar cada vídeo se libera el motor; puedes probar la opción de mantenerlo activo en Memoria y offload. Las voces constantes no están garantizadas.</p>
+              <p class="muted">LTX 2.3 descarga ~24 GiB más dependencias; se requieren licencias LTX y Gemma. Por defecto se intenta conservar Comfy entre vídeos de la misma variante. Las voces constantes no están garantizadas.</p>
               <p id="ltx-gguf-error" role="alert" hidden></p>
             </div>
           </div>
@@ -488,7 +488,7 @@
                 <option value="highvram">Priorizar GPU: highvram (menos offload, mayor riesgo de OOM)</option>
               </select>
               <label class="gpu-compat-toggle"><input type="checkbox" id="comfy-evict-models"> <span>Descarga más agresiva entre modelos hacia RAM</span></label>
-              <label class="gpu-compat-toggle"><input type="checkbox" id="comfy-keep-loaded"> <span>Mantener Comfy y cargadores de pesos entre vídeos (experimental)</span></label>
+              <label class="gpu-compat-toggle"><input type="checkbox" id="comfy-keep-loaded" checked> <span>Mantener Comfy y cargadores de pesos entre vídeos (experimental)</span></label>
               <p class="muted">Solo LTX Comfy. Elimina resultados intermedios, historial y temporales; Comfy puede mover o descargar pesos por presión, no garantiza residencia en VRAM. Al vaciar memoria, cambiar modelo u opciones, cancelar o fallar se cierra. Vigilancia activa también en reposo; no evita todos los OOM súbitos. No probado aún en L4.</p>
               <p class="muted">Desmarcado no desactiva el offload automático. Lowvram también puede llevar el codificador a CPU; highvram no garantiza que todo permanezca en GPU. Offload suele reducir VRAM a costa de RAM y velocidad. Se aplica al próximo proceso; el vigilante sigue activo y los pesos se conservan en disco.</p>
             </div>

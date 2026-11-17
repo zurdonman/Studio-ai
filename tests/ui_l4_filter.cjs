@@ -105,7 +105,7 @@ const model = (id, fit, extra = {}) => ({
   if ($("comfy-offload-settings").hidden) throw Error("Comfy options not visible for GGUF");
   $("comfy-vram-mode").value = "lowvram"; $("comfy-vram-mode").dispatchEvent(new w.Event("change"));
   $("comfy-evict-models").checked = true; $("comfy-evict-models").dispatchEvent(new w.Event("change"));
-  if (JSON.parse(w.localStorage.getItem("studio-comfy-offload-v1")).mode !== "lowvram") throw Error("Comfy settings not saved");
+  if (JSON.parse(w.localStorage.getItem("studio-comfy-offload-v2")).mode !== "lowvram" || !$('comfy-keep-loaded').checked) throw Error("Comfy settings or resident default not saved");
   $("btn-prepare-video").click();
   await wait(20);
   const prep = requests.find(r => r.method === "POST" && r.path === "/api/video/ltx-gguf/prepare");

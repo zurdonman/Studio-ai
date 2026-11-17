@@ -93,7 +93,7 @@ def test_cleanup_error_closes_process(temp_studio_env, monkeypatch, tmp_path):
 def test_api_option_propagates_and_defaults_off(temp_studio_env):
     import app
     job = SimpleNamespace()
-    assert app.LTXGGUFReq(prompt='test').comfy_keep_loaded is False
+    assert app.LTXGGUFReq(prompt='test').comfy_keep_loaded is True
     app._comfy_job_function(lambda j: j.comfy_keep_loaded, ('auto', False), True)(job)
     assert job.comfy_keep_loaded is True and job.comfy_options == ('auto', False)
 
@@ -124,3 +124,12 @@ def test_motion_prunes_intermediates_and_retains_compatible_loaders(engine, mode
     result = prune_completed(executor, graph)
     assert result['total_loaders'] == (5 if extra else 4)
     assert set(executor.caches.outputs.cache) == ({'key1','key2','key3','key4','key20'} if extra else {'key1','key2','key3','key4'})
+
+
+def test_film_graph_keeps_interpolation_loader_only():
+    executor, graph = fake_executor()
+    graph = {'1':{'class_type':'LoadVideo'}, '2':{'class_type':'GetVideoComponents'},
+             '3':{'class_type':'FrameInterpolationModelLoader'}, '4':{'class_type':'FrameInterpolate'},
+             '5':{'class_type':'CreateVideo'}, '6':{'class_type':'SaveVideo'}}
+    assert prune_completed(executor, graph) == {'retained_loaders':1, 'total_loaders':1}
+    assert set(executor.caches.outputs.cache) == {'key3'}
