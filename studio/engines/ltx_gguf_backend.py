@@ -2,7 +2,7 @@
 
 I2V with real weights was observed on an L4 at 512×320, including 10 s and
 20 s with a resident cache. Guardrails do not measure peak memory or guarantee
-other configurations. The private child process is stopped after each generation.
+other configurations. Compatible recipes can share the private resident process.
 """
 from __future__ import annotations
 
@@ -416,14 +416,16 @@ def _install_resident_plugin(root: Path) -> None:
     destination = root / 'comfy' / 'custom_nodes' / 'StudioResident'
     if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
         raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: directorio ajeno, no se modifica')
-    old_cores = {'f00e4157aea663dbf2c0c03beb154263d5352de7bdbd5f958932b45a9234d5db',
-                 '07682439076a008995ff4a80735f7aef3800fb596fbd820c5f5cadfadf52044e'}
+    old_versions = {'core.py': {'f00e4157aea663dbf2c0c03beb154263d5352de7bdbd5f958932b45a9234d5db',
+                                '07682439076a008995ff4a80735f7aef3800fb596fbd820c5f5cadfadf52044e',
+                                '0145c73e2b9ead7dada4cd0b3a625ae8f6202edc88f3c1abe93438670469879a'},
+                    '__init__.py': {'9e6d8d11e127ad676cd38441ce303309613e7ef7ee0108281638eeb9d61d323c'}}
     for name in ('__init__.py', 'core.py'):
         target = destination / name
         if target.is_symlink() or (target.exists() and not target.is_file()):
             raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: nodo diferente, no se sobrescribe')
         if target.exists() and target.read_bytes() != (source / name).read_bytes():
-            if name != 'core.py' or hashlib.sha256(target.read_bytes()).hexdigest() not in old_cores:
+            if hashlib.sha256(target.read_bytes()).hexdigest() not in old_versions.get(name, set()):
                 raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: nodo diferente, no se sobrescribe')
     destination.mkdir(parents=True, exist_ok=True)
     for name in ('__init__.py', 'core.py'):
@@ -445,6 +447,7 @@ class _ResidentComfy:
     """Comfy cache owned by the video slot. Unload stops the process and frees its GPU."""
     def __init__(self, job: Any, names: dict[str, str], runtime_root: Path | None = None):
         runtime_root = runtime_root or ROOT
+        self.runtime_root = Path(runtime_root).resolve()
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix="ltx-gguf-session-", dir=TEMP_DIR)
         self.root = Path(self.temp.name)
@@ -465,12 +468,18 @@ class _ResidentComfy:
                 _install_resident_plugin(runtime_root)
             command = (_server_command(self.port, self.input_dir, self.output_dir, runtime_root, self.options, True)
                        if self.keep_loaded else _server_command(self.port, self.input_dir, self.output_dir, runtime_root, self.options))
-            if getattr(job, "studio_motion_plugin", False):
-                # The whitelist is private and limited to the motion metadata adapter.
+            motion_node = runtime_root / 'comfy/custom_nodes/StudioMotion/__init__.py'
+            motion_source = Path(__file__).with_name('comfy_motion_node') / '__init__.py'
+            # Once installed, load the verified private node on every compatible
+            # server so a later Wan request need not restart this process.
+            motion_ready = (not motion_node.is_symlink() and not motion_node.parent.is_symlink()
+                            and motion_node.is_file() and motion_node.read_bytes() == motion_source.read_bytes())
+            if getattr(job, "studio_motion_plugin", False) or motion_ready:
                 at = command.index("--whitelist-custom-nodes") + 1
                 command.insert(at, "StudioMotion")
             self.proc = subprocess.Popen(command, cwd=runtime_root / "comfy",
                                          env=_runtime_env(), stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
+            job.log(f'Comfy privado iniciado: proceso {self.proc.pid}, runtime {self.runtime_root.name}.')
             self.guard = _ComfyMemoryGuard(self.proc, job)
             _wait_server(self.proc, self.base, self.log, job)
             if self.keep_loaded:
@@ -515,12 +524,104 @@ def _resident(model_id: str = MODEL_ID) -> _ResidentComfy | None:
     return session
 
 
+_IDLE_COMFY = 'studio-comfy-idle'
+
+
+def _switch_to_idle(job: Any, runtime_root: Path | None = None) -> bool:
+    """Release cached tensors on Comfy's worker thread, retaining a compatible process.
+
+    The GPU-operation lock serializes this with inference and memory-manager changes.
+    A failed or unsupported reset closes the process; it never preserves unknown state.
+    """
+    slot = memory_manager.get_slot('video')
+    if not slot:
+        return False
+    session = slot.get('handle')
+    runtime = Path(runtime_root or ROOT).resolve()
+    if (not isinstance(session, _ResidentComfy) or not session.alive()
+        or getattr(session, 'runtime_root', None) != runtime
+        or not getattr(session, 'keep_loaded', False) or not _keep_loaded(job)
+        or getattr(session, 'options', None) != job_options(job)):
+        job.log('Comfy anterior no es compatible con el runtime o política solicitados; se iniciará otro proceso.', level='warning')
+        memory_manager.unload_slot('video')
+        return False
+    if slot.get('model_id') == _IDLE_COMFY:
+        return True
+    try:
+        if not session.cleanup_ok:
+            raise RuntimeError('limpieza anterior no confirmada')
+        if session.guard: session.guard.job = job
+        job.check_cancelled()
+        reply = requests.post(session.base + '/prompt', json={'prompt': {'1': {'class_type': 'StudioResidentReset', 'inputs': {}}}}, timeout=20)
+        reply.raise_for_status()
+        ident = reply.json()['prompt_id']
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            job.check_cancelled()
+            session.guard.raise_if_stopped()
+            if not session.alive(): raise RuntimeError('proceso detenido')
+            response = requests.get(session.base + '/history/' + ident, timeout=10)
+            response.raise_for_status()
+            result = response.json().get(ident)
+            if result:
+                if not (result.get('status') or {}).get('completed'):
+                    raise RuntimeError('reset rechazado')
+                status = requests.get(session.base + '/studio-resident/status', timeout=10)
+                status.raise_for_status()
+                state = status.json()
+                if state.get('version') != 1 or state.get('prompt_id') != ident or state.get('ok') is not True or state.get('total_loaders') != 0:
+                    raise RuntimeError('reset no confirmado')
+                deleted = requests.post(session.base + '/history', json={'delete': [ident]}, timeout=10)
+                deleted.raise_for_status()
+                session.names = {}
+                session.cleanup_ok = True
+                if session.guard: session.guard.job = None
+                memory_manager.register_loaded('video', _IDLE_COMFY, 'Comfy · proceso compartido', session)
+                job.log(f'Comfy compartido: proceso {session.proc.pid} sigue activo; caché del modelo anterior liberada.')
+                return True
+            job.heartbeat(step='Liberando pesos del modelo anterior en Comfy')
+            time.sleep(.25)
+        raise TimeoutError('reset agotó el tiempo')
+    except Exception as exc:
+        memory_manager.unload_slot('video')
+        job.check_cancelled()
+        if isinstance(exc, (MemoryPressureError, MemoryError)):
+            raise
+        job.log('No se pudo confirmar el cambio seguro de modelo; se cerró Comfy y se iniciará un proceso aislado nuevo.', level='warning')
+        return False
+
+
 def _open_resident(job: Any, names: dict[str, str], model_id: str = MODEL_ID, runtime_root: Path | None = None) -> _ResidentComfy:
     session = _resident(model_id)
     if session is not None and (getattr(session, "options", ("auto", False)) != job_options(job)
                                 or getattr(session, "keep_loaded", False) != _keep_loaded(job)):
         memory_manager.unload_slot("video")
         session = None
+    if session is None:
+        idle = _resident(_IDLE_COMFY)
+        if idle and (getattr(idle, 'runtime_root', None) != Path(runtime_root or ROOT).resolve()
+                     or getattr(idle, 'options', None) != job_options(job)
+                     or getattr(idle, 'keep_loaded', False) != _keep_loaded(job)):
+            memory_manager.unload_slot('video')
+            idle = None
+        if idle:
+            required = set(getattr(job, 'comfy_required_nodes', set()))
+            if getattr(job, 'studio_motion_plugin', False): required.add('StudioWanAnimate2GGUF')
+            try:
+                if required:
+                    response = requests.get(idle.base + '/object_info', timeout=30)
+                    response.raise_for_status()
+                    missing = required - set(response.json())
+                    if missing: raise RuntimeError('faltan nodos para la nueva receta')
+            except Exception:
+                job.log('Se instalaron nodos nuevos o no pudieron comprobarse; se reinicia Comfy para activarlos.', level='warning')
+                memory_manager.unload_slot('video')
+                idle = None
+        if idle:
+            memory_manager.register_loaded('video', model_id, 'Comfy · motor activo', idle)
+            idle.names = names
+            session = idle
+            job.log(f'Comfy compartido: reutilizando proceso {session.proc.pid} para la nueva receta.')
     if session is not None:
         if getattr(session, 'guard', None):
             session.guard.job = job
@@ -696,10 +797,7 @@ def _prepare_gguf(job: Any, *, extra_ram: float = 0, extra_vram: float = 0, mode
         job.log("Comfy activo: estimaciones orientativas; continúa la vigilancia de memoria real.", level="warning")
         job.log("Reutilizando motor GGUF y cargadores; Comfy puede mover o liberar pesos según la presión de memoria.")
         return session.names
-    slot = memory_manager.get_slot("video")
-    if slot:
-        job.log("Liberando el modelo de vídeo anterior; los archivos en disco se conservan")
-        memory_manager.unload_slot("video")
+    _switch_to_idle(job)
     _comfy_start_admission(job, stage="LTX 2.3 GGUF", planned_ram=32 + extra_ram, planned_vram=14 + extra_vram)
     ROOT.mkdir(parents=True, exist_ok=True)
     remaining = sum(size for role, _, _, _, size, _ in FILES if not _artifact_path(role).is_file() or _artifact_path(role).stat().st_size != size)
@@ -881,6 +979,8 @@ def generate_gguf(*, image_path: Path | None, prompt: str, negative_prompt: str,
     image_name = None
     audio_name = None
     generated = None
+    if voice_mode == 'voice_reference':
+        job.comfy_required_nodes = {'StudioStrictVoiceLoRA'}
     session = _open_resident(job, names)
     completed = False
     try:

@@ -651,7 +651,7 @@ def test_ltx25_q5_uses_separate_runtime_and_memory_guard(temp_studio_env, monkey
     monkeypatch.setattr(b.common, '_install', lambda job,root,rev: calls.append(('install',root,rev)))
     monkeypatch.setattr(b.common, '_probe_runtime', lambda job,nodes,root: calls.append(('probe',root,nodes)))
     monkeypatch.setattr(b.common, '_command', lambda args,job,**kw: calls.append(('command',args,kw['stage'])))
-    monkeypatch.setattr(b, '_links', lambda mid: {'dit':'d.gguf'})
+    monkeypatch.setattr(b, '_links', lambda mid, *args: {'dit':'d.gguf'})
     monkeypatch.setattr(b.shutil, 'disk_usage', lambda p: type('Disk',(),{'free':100*1024**3})())
     mid = getattr(b, variant)
     b._prepare(mid, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
@@ -1187,7 +1187,7 @@ def test_ltx25_large_estimate_does_not_reject_when_start_floor_fits(temp_studio_
     monkeypatch.setattr(b.common, '_probe_runtime', lambda *a: None)
     monkeypatch.setattr(b.common, '_command', lambda *a, **kw: None)
     monkeypatch.setattr(b.shutil, 'disk_usage', lambda *_: type('Disk', (), {'free': 100*1024**3})())
-    monkeypatch.setattr(b, '_links', lambda mid: {'dit':'existing'})
+    monkeypatch.setattr(b, '_links', lambda mid, *args: {'dit':'existing'})
     b._prepare(b.NVFP4_Q5_ID, JobRecord('video', 'test'), extra_ram=7.84, extra_vram=2)
     assert calls == [(4, 2)]
 
@@ -1206,7 +1206,7 @@ def test_ltx25_fp8_cold_admission_and_runtime(temp_studio_env, monkeypatch, tmp_
     monkeypatch.setattr(b.common, '_install', lambda job, runtime, commit: calls.append(('install',runtime,commit)))
     monkeypatch.setattr(b.common, '_probe_runtime', lambda job, nodes, runtime: calls.append(('probe',nodes,runtime)))
     monkeypatch.setattr(b.common, '_command', lambda cmd, *a, **kw: calls.append(('command',cmd)))
-    monkeypatch.setattr(b, '_links', lambda model_id: {'dit':'cached.safetensors'})
+    monkeypatch.setattr(b, '_links', lambda model_id, *args: {'dit':'cached.safetensors'})
     monkeypatch.setattr(b.shutil, 'disk_usage', lambda *_: type('Disk', (), {'free':100*1024**3})())
     b._prepare(b.FP8_Q5_ID, JobRecord('video','test'), extra_ram=2, extra_vram=.5)
     assert ('capacity',4,2) in calls
@@ -1304,7 +1304,7 @@ def test_ltx25_cold_restart_reuses_verified_disk_without_download(temp_studio_en
     monkeypatch.setattr(b.shutil, 'disk_usage', lambda *_: type('Disk', (), {'free':100*1024**3})())
     monkeypatch.setattr(b, '_fingerprint', lambda _: ('stable',))
     monkeypatch.setitem(b._verified, mid, ('stable',))
-    monkeypatch.setattr(b, '_links', lambda _: {'dit':'existing'})
+    monkeypatch.setattr(b, '_links', lambda _, *args: {'dit':'existing'})
     commands=[]
     monkeypatch.setattr(b.common, '_command', lambda cmd, *a, **kw: commands.append(cmd))
     for _ in range(2): assert b._prepare(mid, JobRecord('video','test')) == {'dit':'existing'}
@@ -1487,7 +1487,7 @@ def test_comfy_changed_policy_restarts_resident(monkeypatch):
     new = SimpleNamespace(options=('novram', False))
     job = JobRecord('video', 'test')
     job.comfy_options = ('novram', False)
-    monkeypatch.setattr(b, '_resident', lambda *args: old)
+    monkeypatch.setattr(b, '_resident', lambda *args: None if args and args[0] == b._IDLE_COMFY else old)
     monkeypatch.setattr(b.memory_manager, 'unload_slot', lambda slot: calls.append(('unload', slot)))
     monkeypatch.setattr(b.memory_manager, 'register_loaded', lambda *args: calls.append(('register', args[1])))
     monkeypatch.setattr(b, '_ResidentComfy', lambda job, names: new)

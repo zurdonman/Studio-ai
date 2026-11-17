@@ -17,6 +17,10 @@ def execute_and_prune(self, prompt, prompt_id, *args, **kwargs):
         return result
     try:
         summary = prune_completed(self, prompt)
+        if len(prompt) == 1 and prompt.get('1', {}).get('class_type') == 'StudioResidentReset':
+            import comfy.model_management as mm
+            mm.unload_all_models()
+            mm.soft_empty_cache()
         status.update(prompt_id=prompt_id, ok=True, error=None, **summary)
     except Exception as exc:
         logging.exception('Studio: failed to prune intermediate outputs')
@@ -43,4 +47,16 @@ class StudioResidentCleanup:
         return ()
 
 
-NODE_CLASS_MAPPINGS = {'StudioResidentCleanup': StudioResidentCleanup}
+class StudioResidentReset:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {'required': {}}
+    RETURN_TYPES = ()
+    FUNCTION = 'reset'
+    OUTPUT_NODE = True
+    CATEGORY = 'Studio'
+    def reset(self):
+        return ()
+
+
+NODE_CLASS_MAPPINGS = {'StudioResidentCleanup': StudioResidentCleanup, 'StudioResidentReset': StudioResidentReset}

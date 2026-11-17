@@ -1,12 +1,15 @@
 """LTX-2.5 single-pass GGUF and preconverted FP8 A/V recipes, experimental.
 
-BF16 uses the pinned Comfy runtime shared with LTX 2.3; Gemma 4 GGUF
-uses a separate patched runtime. No silent fallback to the 2.3 graph.
+The pinned shared runtime is preferred; Gemma 4 uses the isolated pinned
+runtime if the verified patch or explicit compatibility checks fail. No fallback
+to a different model or to the 2.3 graph.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -87,7 +90,8 @@ def path_for(item) -> Path:
 
 def files_present(model_id: str) -> bool:
     try:
-        return ((Q5_RUNTIME if model_id in Q5_IDS else common.ROOT) / 'ready.json').is_file() and (model_id not in Q5_IDS or (Q5_RUNTIME / 'gemma4-patch.json').is_file()) and all(path_for(x).is_file() and path_for(x).stat().st_size == x[4] for x in files_for(model_id))
+        runtimes = (common.ROOT, Q5_RUNTIME) if model_id in Q5_IDS else (common.ROOT,)
+        return any((runtime / 'ready.json').is_file() and (model_id not in Q5_IDS or (runtime / 'gemma4-patch.json').is_file()) for runtime in runtimes) and all(path_for(x).is_file() and path_for(x).stat().st_size == x[4] for x in files_for(model_id))
     except OSError:
         return False
 
@@ -115,8 +119,8 @@ def _fingerprint(model_id: str) -> tuple | None:
         return None
 
 
-def _links(model_id: str) -> dict[str, str]:
-    runtime = Q5_RUNTIME if model_id in Q5_IDS else common.ROOT
+def _links(model_id: str, runtime: Path | None = None) -> dict[str, str]:
+    runtime = runtime or (Q5_RUNTIME if model_id in Q5_IDS else common.ROOT)
     folders = {'dit': 'diffusion_models', 'text_encoder': 'text_encoders', 'video_vae': 'vae', 'audio_vae': 'vae'}
     names = {}
     for item in files_for(model_id):
@@ -149,17 +153,84 @@ def _check_q5_access(job: Any) -> None:
                     env=env, cwd=repo, stage='Comprobando acceso a Gemma 4 antes de cambiar de modelo', timeout=90)
 
 
+def _try_shared_gemma(job: Any, model_id: str) -> bool:
+    """Try the pinned Gemma patch on the managed shared runtime, never forcing it.
+
+    If a newly applied patch fails the node probe, restore only the exact managed
+    file whose digest the patch recorded. Never overwrite an unknown local edit.
+    """
+    from studio.engines.ltx25_gguf_patch import PATCH_SHA256
+    from studio.catalog import catalog_manager
+    root = common.ROOT
+    plugin = root / 'comfy/custom_nodes/ComfyUI-GGUF'
+    loader = plugin / 'loader.py'
+    stamp = root / 'gemma4-patch.json'
+    before = None
+    had_stamp = stamp.exists()
+    try:
+        common._install(job)
+        if plugin.is_symlink() or loader.is_symlink() or stamp.is_symlink() or not loader.is_file():
+            raise RuntimeError('shared GGUF loader not managed')
+        before = loader.read_bytes()
+        env = os.environ.copy()
+        token = catalog_manager.get_hf_token()
+        if token: env['HF_TOKEN'] = token
+        env['PYTHONPATH'] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get('PYTHONPATH', '')
+        common._command([sys.executable, '-m', 'studio.engines.ltx25_gguf_patch', str(plugin), str(stamp)], job,
+                        env=env, stage='Preparando Gemma 4 en Comfy compartido', timeout=600)
+        changed = before != loader.read_bytes()
+        if changed and memory_manager.get_slot('video'):
+            job.log('El cargador GGUF cambió: se reinicia Comfy una vez para activar el parche verificado.')
+            memory_manager.unload_slot('video')
+        required = {'CLIPLoaderGGUF', 'LTXVDualCFGGuider', 'VAEDecodeTiled', 'UnetLoaderGGUF',
+                    'WanAnimate2ToVideo', 'WanSCAILToVideo', 'FrameInterpolate'}
+        if model_id in {FP8_Q5_ID, NVFP4_Q5_ID}: required.add('UNETLoader')
+        common._probe_runtime(job, required, root)
+        job.log('Gemma 4: nodos comprobados en Comfy compartido; la compatibilidad de inferencia sigue siendo experimental.')
+        return True
+    except Exception as exc:
+        # Never mask an unknown modification or a failed rollback.
+        if before is not None and loader.is_file() and loader.read_bytes() != before and not had_stamp:
+            try:
+                if plugin.is_symlink() or loader.is_symlink() or stamp.is_symlink():
+                    raise RuntimeError('unexpected symlink')
+                state = json.loads(stamp.read_text())
+                current = loader.read_bytes()
+                if state != {'patch_sha256': PATCH_SHA256, 'loader_sha256': hashlib.sha256(current).hexdigest()}:
+                    raise RuntimeError('patch stamp mismatch')
+                temp = loader.with_name('.studio-rollback-' + uuid.uuid4().hex)
+                try:
+                    temp.write_bytes(before)
+                    os.replace(temp, loader)
+                    stamp.unlink()
+                finally:
+                    temp.unlink(missing_ok=True)
+            except Exception as rollback_error:
+                raise RuntimeError('GGUF_SHARED_ROLLBACK_FAILED: no se modifica un cargador inesperado; revisa el runtime') from rollback_error
+        job.check_cancelled()
+        from studio.memory_policy import MemoryPressureError, MemoryAdmissionImpossible
+        if isinstance(exc, (MemoryPressureError, MemoryAdmissionImpossible, MemoryError)):
+            raise
+        codes = ', '.join(dict.fromkeys(re.findall(r'\b(?:GGUF|MOTION|LTX|MSR)_[A-Z0-9_]+\b', str(exc))))
+        job.log(f'Comfy compartido no pudo preparar Gemma 4 ({type(exc).__name__}{": " + codes if codes else ""}); se intentará el runtime aislado fijado.', level='warning')
+        return False
+
+
 def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float = 0) -> dict:
     files = files_for(model_id)  # allowlist before any side effect
     gpu = common.query_gpu_info()
     if not gpu.get('has_gpu') or not gpu.get('bf16_supported') or float(gpu.get('vram_total_gb') or 0) < 16:
         raise RuntimeError('GGUF_GPU_UNSUPPORTED: LTX 2.5 requiere GPU BF16 con al menos 16 GiB; no se descargó nada')
     session = common._resident(model_id)
+    if session and model_id in Q5_IDS and getattr(job, 'ltx25_force_fallback', False) and getattr(session, 'runtime_root', Q5_RUNTIME) != Q5_RUNTIME:
+        memory_manager.unload_slot('video')
+        session = None
     if session and (getattr(session, "options", ("auto", False)) != common.job_options(job)
                     or getattr(session, "keep_loaded", False) != common._keep_loaded(job)):
         memory_manager.unload_slot("video")
         session = None
     if session:
+        job.ltx25_runtime = getattr(session, 'runtime_root', Q5_RUNTIME if model_id in Q5_IDS else common.ROOT)
         job.log('Comfy activo: las estimaciones adicionales son orientativas; sigue la vigilancia de memoria real.', level='warning')
         job.log('Reutilizando motor LTX 2.5 y cargadores; Comfy puede mover o liberar pesos bajo presión.')
         return session.names
@@ -169,40 +240,48 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
     # gated encoder cannot be accessed. Offline reuse is still possible if the
     # encoder and previously stamped plugin are already on disk.
     if q5 and not (path_for(Q5_ENCODER).is_file() and path_for(Q5_ENCODER).stat().st_size == Q5_ENCODER[4]
-                   and (Q5_RUNTIME / 'gemma4-patch.json').is_file()):
+                   and any((root / 'gemma4-patch.json').is_file() for root in (common.ROOT, Q5_RUNTIME))):
         _check_q5_access(job)
-    if memory_manager.get_slot('video'):
-        job.log('Liberando el modelo de vídeo anterior para cambiar de receta; archivos intactos.')
-        memory_manager.unload_slot('video')
-    # Estimates are advisory; admission uses real free memory and a start floor.
-    runtime = Q5_RUNTIME if q5 else common.ROOT
-    # The 26.3 GB BF16 Gemma 4 encoder is not the quantized Gemma 3 of LTX 2.3.
-    # This estimate is not a measured peak or a guarantee of fit.
+    # Prefer the shared runtime; the known pinned Gemma runtime is the fallback.
+    common._switch_to_idle(job, common.ROOT)
     common._comfy_start_admission(job, stage='LTX 2.5', planned_ram=base_ram + extra_ram,
                                   planned_vram=base_vram + extra_vram)
+    common.ROOT.mkdir(parents=True, exist_ok=True)
+    missing = sum(x[4] for x in files if not path_for(x).is_file() or path_for(x).stat().st_size != x[4])
+    if shutil.disk_usage(common.ROOT).free < missing + 10 * 1024**3:
+        raise RuntimeError('GGUF_DISK_LOW: faltan espacio para archivos y margen del runtime.')
+    runtime = common.ROOT
+    if q5 and (getattr(job, 'ltx25_force_fallback', False) or not _try_shared_gemma(job, model_id)):
+        runtime = Q5_RUNTIME
+        common._switch_to_idle(job, runtime)
+    job.ltx25_runtime = runtime
+    # Estimates are advisory; admission uses real free memory and a start floor.
+    # The 26.3 GB BF16 Gemma 4 encoder is not the quantized Gemma 3 of LTX 2.3.
+    # This estimate is not a measured peak or a guarantee of fit.
     runtime.mkdir(parents=True, exist_ok=True)
     missing = sum(x[4] for x in files if not path_for(x).is_file() or path_for(x).stat().st_size != x[4])
     required = missing + 10 * 1024**3
     if shutil.disk_usage(runtime).free < required:
         raise RuntimeError(f'GGUF_DISK_LOW: se requieren {required / 1024**3:.1f} GiB libres para archivos y entorno')
     if q5:
-        job.log('Variante Gemma 4 GGUF Q5: runtime aislado y estimaciones de memoria no medidas; requiere acceso al repositorio elix3r.')
+        job.log(f'Variante Gemma 4 GGUF Q5: runtime {runtime.name}; estimaciones de memoria no medidas; requiere acceso al repositorio elix3r.')
         if model_id == FP8_Q5_ID:
             job.log('Transformer FP8 Comfy preconvertido: estimación base no medida 44 GiB RAM y 18 GiB VRAM; compatibilidad y picos en L4 no probados. Comfy puede usar memoria de CPU.')
         if model_id == NVFP4_Q5_ID:
             job.log('NVFP4 DDB Comfy: estimación base no medida 40 GiB RAM y 18 GiB VRAM. En L4 falta aceleración nativa FP4; cuatro clips I2V completados según un registro, sin garantizar otros modos o sesiones.')
-        common._install(job, runtime, Q5_COMFY_COMMIT)
-        from studio.catalog import catalog_manager
-        env = os.environ.copy()
-        token = catalog_manager.get_hf_token()
-        if token:
-            env['HF_TOKEN'] = token
-        repo = str(Path(__file__).resolve().parents[2])
-        env['PYTHONPATH'] = repo + os.pathsep + env.get('PYTHONPATH', '')
-        common._command([sys.executable, '-m', 'studio.engines.ltx25_gguf_patch',
-                         str(runtime / 'comfy' / 'custom_nodes' / 'ComfyUI-GGUF'), str(runtime / 'gemma4-patch.json')],
-                        job, env=env, cwd=repo, stage='Verificando acceso y parche Gemma 4 GGUF', timeout=600)
-        common._probe_runtime(job, {'CLIPLoaderGGUF', 'LTXVDualCFGGuider', 'VAEDecodeTiled'} | ({'UNETLoader'} if model_id in {FP8_Q5_ID, NVFP4_Q5_ID} else set()), runtime)
+        if runtime == Q5_RUNTIME:
+            common._install(job, runtime, Q5_COMFY_COMMIT)
+            from studio.catalog import catalog_manager
+            env = os.environ.copy()
+            token = catalog_manager.get_hf_token()
+            if token:
+                env['HF_TOKEN'] = token
+            repo = str(Path(__file__).resolve().parents[2])
+            env['PYTHONPATH'] = repo + os.pathsep + env.get('PYTHONPATH', '')
+            common._command([sys.executable, '-m', 'studio.engines.ltx25_gguf_patch',
+                             str(runtime / 'comfy' / 'custom_nodes' / 'ComfyUI-GGUF'), str(runtime / 'gemma4-patch.json')],
+                            job, env=env, cwd=repo, stage='Verificando acceso y parche Gemma 4 GGUF', timeout=600)
+            common._probe_runtime(job, {'CLIPLoaderGGUF', 'LTXVDualCFGGuider', 'VAEDecodeTiled'} | ({'UNETLoader'} if model_id in {FP8_Q5_ID, NVFP4_Q5_ID} else set()), runtime)
         if model_id == NVFP4_Q5_ID:
             # A loader node can exist even when Comfy's quantization package did
             # not import. Check that before downloading this 12.6 GiB artifact.
@@ -227,7 +306,7 @@ def _prepare(model_id: str, job: Any, *, extra_ram: float = 0, extra_vram: float
         _verified[model_id] = _fingerprint(model_id)
     else:
         job.log('Componentes LTX 2.5 ya verificados en esta sesión y sin cambios.')
-    return _links(model_id)
+    return _links(model_id, runtime)
 
 
 def make_graph25(*, prompt: str, negative_prompt: str, width: int, height: int, frames: int, fps: int,
@@ -255,8 +334,7 @@ def prepare(model_id: str, *, job: Any) -> dict:
     return {'prepared': True, 'note': 'LTX 2.5 preparado en disco; se cargará durante la generación.'}
 
 
-@serialized_gpu_operation(slots=('video',), managed=True)
-def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any,
+def _generate_once(*, model_id: str, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any,
              width: int, height: int, duration_sec: float, fps: int, speech_language: str, image_strength: float,
              voice_mode: str = 'none', voice_path: Path | None = None) -> dict:
     from studio.engines.ltx23_voice import add_voice_graph, frames_for_audio
@@ -300,14 +378,17 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
     names = _prepare(model_id, job, extra_ram=extra_ram, extra_vram=extra_vram)
     if voice_mode == 'voice_reference':
         from studio.engines.ltx25_msr import prepare_msr
-        runtime = Q5_RUNTIME if model_id in Q5_IDS else common.ROOT
+        runtime = getattr(job, 'ltx25_runtime', Q5_RUNTIME if model_id in Q5_IDS else common.ROOT)
         if prepare_msr(job, runtime=runtime, weights=WEIGHTS, model_id=model_id):
             names = _prepare(model_id, job, extra_ram=extra_ram, extra_vram=extra_vram)
     VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     seed = int(seed) if seed else int.from_bytes(os.urandom(4), 'big')
     job.log(f'LTX 2.5: {width}×{height}, {frames} fotogramas a {fps} fps (~{frames/fps:.2f} s), una pasada, 8 pasos.')
     suffix, generated, image_name, audio_name = uuid.uuid4().hex, None, None, None
-    session = (common._open_resident(job, names, model_id, Q5_RUNTIME) if model_id in Q5_IDS
+    if voice_mode == 'voice_reference':
+        job.comfy_required_nodes = {'StudioStrictMSRLoader', 'ComfyUILTX25MSRMultiReferenceGuide'}
+    runtime = getattr(job, 'ltx25_runtime', Q5_RUNTIME if model_id in Q5_IDS else common.ROOT)
+    session = (common._open_resident(job, names, model_id, runtime) if runtime != common.ROOT
                else common._open_resident(job, names, model_id))
     completed = False
     try:
@@ -386,3 +467,32 @@ def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_pr
         memory_manager.unload_slot("video")
         raise
     return meta
+
+
+@serialized_gpu_operation(slots=('video',), managed=True)
+def generate(*, model_id: str, image_path: Path | None, prompt: str, negative_prompt: str, seed: int, job: Any,
+             width: int, height: int, duration_sec: float, fps: int, speech_language: str, image_strength: float,
+             voice_mode: str = 'none', voice_path: Path | None = None) -> dict:
+    """Retry only explicit shared-runtime compatibility failures, after cleanup."""
+    kwargs = dict(model_id=model_id, image_path=image_path, prompt=prompt, negative_prompt=negative_prompt,
+                  seed=seed, job=job, width=width, height=height, duration_sec=duration_sec, fps=fps,
+                  speech_language=speech_language, image_strength=image_strength, voice_mode=voice_mode, voice_path=voice_path)
+    try:
+        return _generate_once(**kwargs)
+    except Exception as exc:
+        from studio.memory_policy import MemoryPressureError, MemoryAdmissionImpossible
+        job.check_cancelled()
+        text = str(exc).lower()
+        compatibility = ('gguf_runtime_missing_nodes' in text or
+                         ('gguf_inference_failed' in text and any(x in text for x in
+                          ('unknown architecture', 'unsupported architecture', 'architecture not supported'))))
+        if (isinstance(exc, (MemoryPressureError, MemoryAdmissionImpossible, MemoryError)) or 'out of memory' in text
+            or model_id not in Q5_IDS or getattr(job, 'ltx25_runtime', None) != common.ROOT
+            or getattr(job, 'ltx25_force_fallback', False) or not compatibility):
+            raise
+        job.log('Comfy compartido devolvió una incompatibilidad de nodos o arquitectura; se reintentará una vez con el runtime aislado fijado.', level='warning')
+        job.ltx25_force_fallback = True
+        try:
+            return _generate_once(**kwargs)
+        finally:
+            job.ltx25_force_fallback = False

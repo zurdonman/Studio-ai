@@ -452,6 +452,7 @@ def test_motion_resident_lifecycle_reuses_and_invalidates(temp_studio_env, monke
     monkeypatch.setattr(m.memory_manager,'get_slot',lambda *_: slot.get('value'))
     monkeypatch.setattr(m.memory_manager,'unload_slot',unload)
     monkeypatch.setattr(m.common,'_resident',resident)
+    monkeypatch.setattr(m.common,'_switch_to_idle',lambda *_: unload('video') or False)
     monkeypatch.setattr(m.common,'_open_resident',open_session)
     monkeypatch.setattr(m.common,'_finish_session',finish)
     monkeypatch.setattr(m,'_prepare',lambda *a:{'dit':'dit','umt5':'text','vision':'vision','vae':'vae'})

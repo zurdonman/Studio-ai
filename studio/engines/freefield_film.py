@@ -139,8 +139,7 @@ def interpolate(path: Path, *, job: Any) -> dict:
     model_id = 'freefield-film'
     resident = common._resident(model_id)
     if resident is None:
-        if memory_manager.get_slot('video'):
-            memory_manager.unload_slot('video')
+        common._switch_to_idle(job)
         common._comfy_start_admission(job, stage='Inicio FILM', planned_ram=4, planned_vram=2)
     _prepare(job)
     session = common._open_resident(job, {}, model_id)

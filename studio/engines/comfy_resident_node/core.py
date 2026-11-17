@@ -17,7 +17,9 @@ def prune_completed(executor, prompt):
     if not isinstance(prompt, dict):
         raise ValueError('not a recognized Studio graph')
     classes = {key: node.get('class_type') for key, node in prompt.items() if isinstance(node, dict)}
-    if classes.get('4') == 'FrameInterpolate' and classes.get('6') == 'SaveVideo':
+    if classes == {'1': 'StudioResidentReset'}:
+        loaders = {}
+    elif classes.get('4') == 'FrameInterpolate' and classes.get('6') == 'SaveVideo':
         loaders = {'3': {'FrameInterpolationModelLoader'}}
     elif classes.get('14') in ('WanAnimate2ToVideo', 'WanSCAILToVideo'):
         loaders = {'1': {'StudioWanAnimate2GGUF', 'UnetLoaderGGUF', 'UNETLoader'},

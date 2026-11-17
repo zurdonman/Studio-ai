@@ -380,7 +380,7 @@ def generate(*, engine, quant, image_path: Path, video_path: Path, prompt, negat
         job.log('Los archivos o la configuración cambiaron: reiniciando Comfy de forma segura.')
         memory_manager.unload_slot('video'); resident = None
     if resident is None:
-        if memory_manager.get_slot('video'): memory_manager.unload_slot('video')
+        common._switch_to_idle(job)
         common._comfy_start_admission(job, stage='Inicio movimiento', planned_ram=6, planned_vram=3)
     try:
         names = _prepare(engine, quant, job)
