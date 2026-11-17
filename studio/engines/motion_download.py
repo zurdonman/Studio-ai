@@ -5,4 +5,4 @@ from studio.engines.motion_manifest import files_for
 from studio.engines.ltx_gguf_download import main
 
 if __name__ == '__main__':
-    main(Path(sys.argv[1]), files_for(sys.argv[2], sys.argv[3]))
+    main(Path(sys.argv[1]), files_for(sys.argv[2], sys.argv[3]), motion_cache=True)

@@ -37,7 +37,44 @@ def verify(path: Path, size: int, sha: str, progress=None) -> bool:
     return digest.hexdigest() == sha
 
 
-def main(root: Path, files=None) -> None:
+def _stat_fingerprint(path: Path):
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+
+
+def _verify_motion_cached(root: Path, target: Path, size: int, sha: str, progress=None) -> bool:
+    """Reuse a verified digest only while the file and pinned digest remain unchanged.
+
+    A receipt is an optimization, not proof against malicious same-user changes.
+    """
+    receipt_dir = root / '.motion-verified'
+    key = hashlib.sha256(str(target.relative_to(root)).encode()).hexdigest()
+    receipt = receipt_dir / (key + '.json')
+    if not target.is_file() or target.stat().st_size != size:
+        receipt.unlink(missing_ok=True)
+        return False
+    before = _stat_fingerprint(target)
+    expected = {'sha256': sha, 'stat': before}
+    try:
+        if json.loads(receipt.read_text()) == expected:
+            print('GGUF_NOTE:Archivo verificado previamente y sin cambios; se omite SHA-256.', flush=True)
+            return True
+    except (OSError, ValueError, TypeError):
+        pass
+    receipt.unlink(missing_ok=True)
+    if not verify(target, size, sha, progress) or _stat_fingerprint(target) != before:
+        return False
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    tmp = receipt_dir / (key + f'.{os.getpid()}.tmp')
+    try:
+        tmp.write_text(json.dumps(expected))
+        os.replace(tmp, receipt)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return True
+
+
+def main(root: Path, files=None, *, motion_cache=False) -> None:
     files = FILES if files is None else files
     total_bytes = sum(item[4] for item in files)
     before = 0
@@ -46,6 +83,9 @@ def main(root: Path, files=None) -> None:
         target = target_dir / filename
         print(f'[{index}/{len(files)}] Preparando {role} ({size / 1024**3:.2f} GiB)', flush=True)
         if not target.exists():
+            if motion_cache:
+                key = hashlib.sha256(str(target.relative_to(root)).encode()).hexdigest()
+                (root / '.motion-verified' / (key + '.json')).unlink(missing_ok=True)
             target_dir.mkdir(parents=True, exist_ok=True)
             kwargs = dict(repo_id=repo, revision=revision, filename=filename,
                           local_dir=str(target_dir), token=os.environ.get('HF_TOKEN') or None)
@@ -81,7 +121,8 @@ def main(root: Path, files=None) -> None:
                 print('GGUF_NOTE:Descarga en curso; porcentaje no disponible con esta versión de huggingface_hub.', flush=True)
             hf_hub_download(**kwargs)
         _emit(role, 'verificación', 0, size, before, total_bytes)
-        if not verify(target, size, sha, lambda n: _emit(role, 'verificación', n, size, before, total_bytes)):
+        check = (lambda: _verify_motion_cached(root, target, size, sha, lambda n: _emit(role, 'verificación', n, size, before, total_bytes))) if motion_cache else (lambda: verify(target, size, sha, lambda n: _emit(role, 'verificación', n, size, before, total_bytes)))
+        if not check():
             raise RuntimeError(f'GGUF_CORRUPT_EXISTING: {role} no coincide con SHA-256; no se modifica. Revisa el archivo antes de reintentar.')
         before += size
         print(f'[{index}/{len(files)}] Verificado {role}', flush=True)

@@ -7,6 +7,7 @@ other configurations. The private child process is stopped after each generation
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -415,15 +416,24 @@ def _install_resident_plugin(root: Path) -> None:
     destination = root / 'comfy' / 'custom_nodes' / 'StudioResident'
     if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
         raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: directorio ajeno, no se modifica')
+    old_core = 'f00e4157aea663dbf2c0c03beb154263d5352de7bdbd5f958932b45a9234d5db'
     for name in ('__init__.py', 'core.py'):
         target = destination / name
-        if target.is_symlink() or (target.exists() and target.read_bytes() != (source / name).read_bytes()):
+        if target.is_symlink() or (target.exists() and not target.is_file()):
             raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: nodo diferente, no se sobrescribe')
+        if target.exists() and target.read_bytes() != (source / name).read_bytes():
+            if name != 'core.py' or hashlib.sha256(target.read_bytes()).hexdigest() != old_core:
+                raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: nodo diferente, no se sobrescribe')
     destination.mkdir(parents=True, exist_ok=True)
     for name in ('__init__.py', 'core.py'):
         target = destination / name
-        if not target.exists():
-            shutil.copyfile(source / name, target)
+        if not target.exists() or target.read_bytes() != (source / name).read_bytes():
+            temp = destination / ('.' + name + '.' + uuid.uuid4().hex)
+            try:
+                shutil.copyfile(source / name, temp)
+                os.replace(temp, target)
+            finally:
+                temp.unlink(missing_ok=True)
 
 
 def _keep_loaded(job: Any) -> bool:
@@ -643,7 +653,7 @@ def _finish_session(session: Any, job: Any, success: bool) -> None:
     if keep:
         try:
             # All paths are private to this process, never the user's result directory.
-            for folder in (session.input_dir, session.output_dir, session.root / 'temp'):
+            for folder in (session.input_dir, session.output_dir, session.root / 'temp', session.root / 'motion-work'):
                 if folder.is_symlink():
                     raise RuntimeError('directorio temporal inesperado')
                 if folder.exists():

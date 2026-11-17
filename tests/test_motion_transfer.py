@@ -392,3 +392,120 @@ def test_motion_framing_keeps_top_and_bottom_of_inputs(tmp_path,width,height):
     assert video_image.getpixel((width//2,height-10))[2] > 200
     if width / height > 0.5:
         assert all(abs(c-127)<5 for c in video_image.getpixel((2,height//2)))
+
+
+def test_motion_verified_receipt_reuses_hash_and_detects_changes(temp_studio_env, monkeypatch, tmp_path):
+    import hashlib, os
+    from studio.engines import ltx_gguf_download as download
+    root=tmp_path/'weights'; root.mkdir()
+    target=root/'model'; target.write_bytes(b'abc')
+    digest=hashlib.sha256(b'abc').hexdigest()
+    calls=[]; real=download.verify
+    monkeypatch.setattr(download,'verify',lambda *args,**kwargs: calls.append(1) or real(*args,**kwargs))
+    assert download._verify_motion_cached(root,target,3,digest)
+    assert download._verify_motion_cached(root,target,3,digest)
+    assert calls == [1]
+    old=target.stat().st_mtime_ns
+    target.write_bytes(b'bad'); os.utime(target, ns=(old+2_000_000_000,old+2_000_000_000))
+    assert not download._verify_motion_cached(root,target,3,digest)
+    assert calls == [1,1]
+    target.unlink(); assert not download._verify_motion_cached(root,target,3,digest)
+    target.write_bytes(b'abc'); assert download._verify_motion_cached(root,target,3,digest)
+    assert len(calls) == 3
+    assert not download._verify_motion_cached(root,target,3,'0'*64)
+
+
+def test_motion_resident_lifecycle_reuses_and_invalidates(temp_studio_env, monkeypatch, tmp_path):
+    from PIL import Image
+    from studio.engines import motion_transfer as m
+    from studio.jobs import JobRecord, JobCancelledError
+    _,root=temp_studio_env
+    img=root/'uploads'/'ref.png'; Image.new('RGB',(256,256)).save(img)
+    video=root/'uploads'/'guide.mp4'; make_clip(video)
+    slot={}; starts=[]; destroyed=[]; fingerprint=['one']; failing=[False]
+    def unload(name):
+        session=slot.pop('value',None)
+        if session: destroyed.append(session)
+    def resident(model):
+        value=slot.get('value')
+        return value if value and value.model_id==model else None
+    def open_session(job,names,model):
+        session=resident(model)
+        if session is None:
+            base=tmp_path/f'session{len(starts)}'; base.mkdir()
+            (base/'in').mkdir(); (base/'out').mkdir()
+            session=SimpleNamespace(model_id=model,root=base,input_dir=base/'in',output_dir=base/'out',
+                options=('auto',False), keep_loaded=True, cleanup_ok=False,
+                guard=SimpleNamespace(raise_if_stopped=lambda:None))
+            slot['value']=session; starts.append(session)
+        else: session.cleanup_ok=False
+        return session
+    def finish(session,job,success):
+        if not success or not session.cleanup_ok: unload('video')
+    def infer(session,graph,job,**kwargs):
+        if failing[0]: raise JobCancelledError('cancelled')
+        session.cleanup_ok=True
+        clip=session.output_dir/'generated.mp4';make_clip(clip);return clip
+    monkeypatch.setattr(m.common,'query_gpu_info',lambda:{'has_gpu':True})
+    monkeypatch.setattr(m.common,'_ComfyMemoryGuard',FakeGuard)
+    monkeypatch.setattr(m.common,'_comfy_start_admission',lambda *a,**kw:None)
+    monkeypatch.setattr(m.memory_manager,'get_slot',lambda *_: slot.get('value'))
+    monkeypatch.setattr(m.memory_manager,'unload_slot',unload)
+    monkeypatch.setattr(m.common,'_resident',resident)
+    monkeypatch.setattr(m.common,'_open_resident',open_session)
+    monkeypatch.setattr(m.common,'_finish_session',finish)
+    monkeypatch.setattr(m,'_prepare',lambda *a:{'dit':'dit','umt5':'text','vision':'vision','vae':'vae'})
+    monkeypatch.setattr(m,'_motion_fingerprint',lambda *a:fingerprint[0])
+    monkeypatch.setattr(m,'_infer',infer)
+    def run(quant='q4'):
+        return m.generate(engine='wan',quant=quant,image_path=img,video_path=video,prompt='person',negative='',
+            width=256,height=256,frames=25,seed=1,steps=10,cfg=1,person='human',strength=1,job=JobRecord('video','test'))
+    run();run();assert len(starts)==1 and not destroyed
+    fingerprint[0]='two';run();assert len(starts)==2 and len(destroyed)==1
+    run('q5');assert len(starts)==3 and len(destroyed)==2
+    failing[0]=True
+    with pytest.raises(JobCancelledError): run('q5')
+    assert len(destroyed)==3 and not slot
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_motion_infer_resident_confirms_cleanup_before_reuse(temp_studio_env, monkeypatch, tmp_path, valid):
+    from studio.engines import motion_transfer as m
+    from studio.jobs import JobRecord
+    out=tmp_path/'out';out.mkdir();(out/'studio_motion_00001.mp4').write_bytes(b'video')
+    calls=[]
+    class Reply:
+        ok=True
+        def __init__(self, data): self.data=data
+        def json(self): return self.data
+        def raise_for_status(self): pass
+    def get(url, **kwargs):
+        if url.endswith('/object_info'): return Reply({'Test':{}})
+        if '/history/' in url: return Reply({'id':{'status':{'completed':True}}})
+        if url.endswith('/studio-resident/status'): return Reply({'version':1,'prompt_id':'id','ok':valid,'retained_loaders':4})
+        raise AssertionError(url)
+    def post(url, **kwargs):
+        calls.append(url)
+        return Reply({'prompt_id':'id'})
+    monkeypatch.setattr(m.common.requests,'get',get)
+    monkeypatch.setattr(m.common.requests,'post',post)
+    monkeypatch.setattr(m.common,'_events_listener',lambda base,cid,events,stop,ready: ready.set())
+    session=SimpleNamespace(base='http://private',output_dir=out,keep_loaded=True,cleanup_ok=False,
+        guard=SimpleNamespace(raise_if_stopped=lambda:None),alive=lambda:True)
+    m._infer(session,{'1':{'class_type':'Test'}},JobRecord('video','test'))
+    assert session.cleanup_ok is valid
+    assert any(x.endswith('/history') for x in calls) is valid
+    if not valid: assert session.motion_cleanup_failed
+
+
+def test_motion_bad_metadata_invalidates_receipt_without_deleting_model(temp_studio_env, monkeypatch, tmp_path):
+    import hashlib
+    from studio.engines import motion_transfer as m, ltx_gguf_download as download
+    root=tmp_path/'weights'; root.mkdir()
+    monkeypatch.setattr(m,'WEIGHTS',root)
+    monkeypatch.setattr(m,'files_for',lambda *args:[('dit','repo','revision','model',3,hashlib.sha256(b'abc').hexdigest())])
+    path=root/'ltx'/'model';path.parent.mkdir();path.write_bytes(b'abc')
+    assert download._verify_motion_cached(root,path,3,hashlib.sha256(b'abc').hexdigest())
+    assert len(list((root/'.motion-verified').iterdir()))==1
+    m._invalidate_motion_receipts('wan','q4')
+    assert not list((root/'.motion-verified').iterdir()) and path.read_bytes()==b'abc'

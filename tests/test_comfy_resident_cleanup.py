@@ -110,3 +110,17 @@ def test_optional_plugin_command_and_conflict(temp_studio_env, tmp_path):
     with pytest.raises(RuntimeError, match='CONFLICT'):
         backend._install_resident_plugin(tmp_path)
     assert target.read_text() == 'other file, do not overwrite'
+
+
+@pytest.mark.parametrize('engine,model,extra', [('wan','StudioWanAnimate2GGUF',False), ('wan','UNETLoader',False), ('scail','UnetLoaderGGUF',True)])
+def test_motion_prunes_intermediates_and_retains_compatible_loaders(engine, model, extra):
+    executor, graph = fake_executor()
+    graph['1']['class_type'] = model
+    graph['4']['class_type'] = 'CLIPVisionLoader'
+    graph['14'] = {'class_type': 'WanSCAILToVideo' if extra else 'WanAnimate2ToVideo'}
+    if extra:
+        graph['20'] = {'class_type':'CheckpointLoaderSimple'}
+        executor.caches.outputs.cache['key20'] = object()
+    result = prune_completed(executor, graph)
+    assert result['total_loaders'] == (5 if extra else 4)
+    assert set(executor.caches.outputs.cache) == ({'key1','key2','key3','key4','key20'} if extra else {'key1','key2','key3','key4'})

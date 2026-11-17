@@ -118,6 +118,22 @@ def _install_motion_plugin():
         temp.unlink(missing_ok=True)
 
 
+def _motion_fingerprint(engine, quant):
+    try:
+        return tuple((p.stat().st_dev, p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns)
+                     for p in (WEIGHTS / 'ltx' / item[3] for item in files_for(engine, quant)))
+    except OSError:
+        return None
+
+
+def _invalidate_motion_receipts(engine, quant):
+    directory = WEIGHTS / '.motion-verified'
+    for _, _, _, filename, _, _ in files_for(engine, quant):
+        relative = str(Path('ltx') / filename)
+        key = hashlib.sha256(relative.encode()).hexdigest()
+        (directory / (key + '.json')).unlink(missing_ok=True)
+
+
 def _prepare(engine, quant, job):
     components = files_for(engine, quant)
     WEIGHTS.mkdir(parents=True, exist_ok=True)
@@ -228,6 +244,22 @@ def _infer(session, graph, job, prefix="studio_motion"):
                 if status.get('completed'):
                     paths = list(session.output_dir.glob(prefix + '_*.mp4'))
                     if len(paths) != 1: raise RuntimeError('MOTION_OUTPUT_MISSING')
+                    if getattr(session, 'keep_loaded', False):
+                        try:
+                            cleanup = common.requests.get(session.base + '/studio-resident/status', timeout=10)
+                            cleanup.raise_for_status()
+                            status = cleanup.json()
+                            if status.get('version') != 1 or status.get('prompt_id') != ident or status.get('ok') is not True:
+                                raise RuntimeError('limpieza no confirmada')
+                            deleted = common.requests.post(session.base + '/history', json={'delete': [ident]}, timeout=10)
+                            deleted.raise_for_status()
+                            if not getattr(session, 'motion_cleanup_failed', False):
+                                session.cleanup_ok = True
+                            job.log(f"Comfy ha limpiado los temporales en memoria; conserva {status.get('retained_loaders', 0)} cargadores para reutilizar.")
+                        except Exception:
+                            session.cleanup_ok = False
+                            session.motion_cleanup_failed = True
+                            job.log('No se confirmó la limpieza de Comfy; se cerrará al finalizar el trabajo.', level='warning')
                     return paths[0]
             if current_node is None:
                 job.heartbeat(step='Movimiento: preparando nodos Comfy')
@@ -264,6 +296,8 @@ def _generate_wan_segments(session, job, *, total_frames, image_path, video_path
     plan = list(_wan_plan(total_frames))
     job.log(f'Wan: {total_frames} fotogramas a 24 fps ({total_frames/24:.3f} s), {len(plan)} segmento(s); '
             'continuación experimental con un fotograma solapado, sin audio.', level='warning')
+    work = session.root / 'motion-work'
+    work.mkdir(exist_ok=True)
     previous = None
     clips = []
     for index, part in enumerate(plan):
@@ -292,7 +326,7 @@ def _generate_wan_segments(session, job, *, total_frames, image_path, video_path
                            seed=(seed + index) % (2**32), steps=steps, cfg=cfg, person=person, strength=strength,
                            continuation_name=previous_name, prefix=prefix)
         previous = _infer(session, graph, job, prefix=prefix)
-        clip = session.root / f'piece_{index:06d}.mp4'
+        clip = work / f'piece_{index:06d}.mp4'
         start = part['overlap']; end = start + part['take']
         common._command([get_ffmpeg_bin(),'-hide_banner','-loglevel','error','-y','-i',str(previous),
                          '-vf',f'trim=start_frame={start}:end_frame={end},setpts=PTS-STARTPTS',
@@ -302,9 +336,9 @@ def _generate_wan_segments(session, job, *, total_frames, image_path, video_path
         if not info['has_video'] or abs(info['duration_seconds'] - part['take']/24) > .02:
             raise RuntimeError('MOTION_SEGMENT_INVALID: el segmento generado no contiene los fotogramas esperados.')
         clips.append(clip)
-    listing = session.root / 'segments.ffconcat'
+    listing = work / 'segments.ffconcat'
     listing.write_text('ffconcat version 1.0\n' + ''.join(f"file '{p.name}'\n" for p in clips), encoding='utf8')
-    result = session.root / 'wan_joined.mp4'
+    result = work / 'wan_joined.mp4'
     common._command([get_ffmpeg_bin(),'-hide_banner','-loglevel','error','-y','-f','concat','-safe','1',
                      '-i',str(listing),'-map','0:v:0','-an','-c','copy','-movflags','+faststart',str(result)], job,
                     stage='Uniendo segmentos de movimiento',timeout=1800,guard_label='FFmpeg movimiento')
@@ -337,10 +371,28 @@ def generate(*, engine, quant, image_path: Path, video_path: Path, prompt, negat
             f'{steps} pasos, CFG {cfg:g}, semilla {seed}, fuerza {strength:g}.')
     job.log('Movimiento experimental; foto y guía se ajustan sin recortar y pueden tener márgenes grises. '
             'Wan Q4 ha completado una prueba corta en L4; los vídeos largos y otros formatos no están validados. Salida sin audio.', level='warning')
-    if memory_manager.get_slot('video'): memory_manager.unload_slot('video')
-    common._comfy_start_admission(job, stage='Inicio movimiento', planned_ram=6, planned_vram=3)
-    names = _prepare(engine, quant, job)
-    session = common._ResidentComfy(job, {})
+    # Each engine/variant has its own cache identity; never reuse incompatible loaders.
+    job.comfy_keep_loaded = True
+    model_id = f'{engine}-motion-{quant}'
+    resident = common._resident(model_id)
+    if resident and (getattr(resident, 'motion_fingerprint', None) != _motion_fingerprint(engine, quant)
+                     or getattr(resident, 'options', None) != common.job_options(job)):
+        job.log('Los archivos o la configuración cambiaron: reiniciando Comfy de forma segura.')
+        memory_manager.unload_slot('video'); resident = None
+    if resident is None:
+        if memory_manager.get_slot('video'): memory_manager.unload_slot('video')
+        common._comfy_start_admission(job, stage='Inicio movimiento', planned_ram=6, planned_vram=3)
+    try:
+        names = _prepare(engine, quant, job)
+        if resident:
+            job.log('Comfy activo: reutilizando proceso y cargadores cuando sea posible.')
+        session = common._open_resident(job, names, model_id)
+        session.motion_fingerprint = _motion_fingerprint(engine, quant)
+        session.motion_cleanup_failed = False
+    except BaseException:
+        if resident: memory_manager.unload_slot('video')
+        raise
+    success = False
     try:
         fit_reference_image(image_path, session.input_dir / 'reference.png', width, height)
         segment_count = 1
@@ -379,8 +431,16 @@ def generate(*, engine, quant, image_path: Path, video_path: Path, prompt, negat
             if created:
                 dest.unlink(missing_ok=True); meta_path.unlink(missing_ok=True)
             raise
+        success = True
         return meta
     except Exception:
+        if not getattr(job, 'cancel_requested', False):
+            # An inference/load failure may indicate corruption even when metadata
+            # looks unchanged. Force a full digest on the next attempt, not deletion.
+            try:
+                _invalidate_motion_receipts(engine, quant)
+            except OSError:
+                pass
         session.guard.raise_if_stopped(); raise
     finally:
-        session.unload()
+        common._finish_session(session, job, success)
