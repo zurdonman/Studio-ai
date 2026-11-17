@@ -127,7 +127,8 @@ def test_synthetic_pipeline_closes_worker_and_publishes(temp_studio_env,monkeypa
     monkeypatch.setattr(l,'_prepare_lora',lambda *a:'union.safetensors')
     monkeypatch.setattr(m.common,'_prepare_gguf',lambda *a,**k:{'dit':'dit','text_encoder':'text','connectors':'connector','video_vae':'video','audio_vae':'audio'})
     def fake_infer(sess,graph,job,**kwargs):
-        assert (inp/('guide.mp4' if engine=='ltx' else 'drive.mp4')).exists()
+        guide = 'guide.mp4' if engine == 'ltx' else graph['6']['inputs']['file']
+        assert (inp/guide).exists()
         clip=out/'generated.mp4';make_clip(clip,audio=engine=='ltx');return clip
     monkeypatch.setattr(m,'_infer',fake_infer);monkeypatch.setattr(l,'_infer',fake_infer)
     common=dict(image_path=img,video_path=video,prompt='dance',negative='',width=256,height=256,frames=25,seed=1,strength=1,job=JobRecord('video','test'))
@@ -196,3 +197,109 @@ def test_comfy_error_handles_missing_or_malformed_details(temp_studio_env):
     job=JobRecord('video','test')
     text=_report_comfy_error([None, [], ['execution_error', {'node_id':'../x', 'traceback':42}]], {}, job)
     assert 'nodo ? (?)' in text and 'Error desconocido' in text
+
+
+@pytest.mark.parametrize('frames', [1, 2, 24, 80, 81, 82, 161, 192, 720])
+def test_wan_duration_plan_covers_frames_exactly(frames):
+    from studio.engines.motion_transfer import _wan_plan, _duration_frames
+    plan=list(_wan_plan(frames))
+    assert sum(x['take'] for x in plan)==frames
+    done=0
+    for i, part in enumerate(plan):
+        assert part['start']==done-(i>0)
+        assert part['overlap']==(i>0)
+        assert 5 <= part['window'] <= 81 and (part['window']-1)%4==0
+        assert part['window']>=part['take']+part['overlap']
+        done+=part['take']
+    assert _duration_frames(frames/24)==frames
+
+
+@pytest.mark.parametrize('total', [192, 720])
+def test_wan_long_segments_real_ffmpeg_fake_model(temp_studio_env, monkeypatch, tmp_path, total):
+    from studio.engines import motion_transfer as m
+    from studio.engines.ffmpeg_utils import get_ffmpeg_bin, probe_media_info
+    from studio.jobs import JobRecord
+    from PIL import Image
+    inp=tmp_path/'input'; out=tmp_path/'output'; inp.mkdir();out.mkdir()
+    source=tmp_path/'reference_video.mp4'
+    subprocess.run([get_ffmpeg_bin(),'-hide_banner','-loglevel','error','-y','-f','lavfi',
+                    '-i',f'color=blue:s=256x256:r=24:d={total/24}','-c:v','libx264','-pix_fmt','yuv420p',str(source)],check=True)
+    image=tmp_path/'ref.png'; Image.new('RGB',(256,256)).save(image)
+    seen=[]
+    def fake_infer(sess, graph, job, prefix):
+        i=len(seen); seen.append(graph)
+        part=graph['14']['inputs']
+        if i:
+            assert part['continue_motion']==['24',0]
+            assert (inp/graph['23']['inputs']['file']).is_file()
+            assert part['video_frame_offset']==0
+        else: assert 'continue_motion' not in part
+        frames=part['length']; clip=out/f'{prefix}_00001_.mp4'
+        subprocess.run([get_ffmpeg_bin(),'-hide_banner','-loglevel','error','-y','-f','lavfi','-i',
+                        f'color={"red" if i%2==0 else "green"}:s=256x256:r=24', '-frames:v',str(frames),
+                        '-c:v','libx264','-pix_fmt','yuv420p',str(clip)],check=True)
+        return clip
+    monkeypatch.setattr(m,'_infer',fake_infer)
+    monkeypatch.setattr(m.common,'_ComfyMemoryGuard',FakeGuard)
+    session=SimpleNamespace(root=tmp_path,input_dir=inp,output_dir=out,guard=SimpleNamespace(raise_if_stopped=lambda:None))
+    names={'dit':'a','umt5':'b','vision':'c','vae':'d'}
+    output,count=m._generate_wan_segments(session, JobRecord('video','test'),total_frames=total,
+        image_path=image,video_path=source,names=names,quant='q4',prompt='dance',negative='',width=256,height=256,
+        seed=42,steps=10,cfg=1,person='human',strength=1)
+    plan=list(m._wan_plan(total))
+    assert count==len(plan)==len(seen) and probe_media_info(output)['duration_seconds']==total/24
+    decoded=subprocess.run([get_ffmpeg_bin(),'-hide_banner','-loglevel','error','-i',str(output),
+                            '-map','0:v:0','-f','framemd5','-'],check=True,capture_output=True,text=True).stdout
+    frames=[line for line in decoded.splitlines() if line and not line.startswith('#')]
+    assert len(frames)==total
+    assert [int(line.split(',')[2]) for line in frames] == list(range(total))
+    assert [g['14']['inputs']['length'] for g in seen]==[p['window'] for p in plan]
+    assert [g['15']['inputs']['noise_seed'] for g in seen]==list(range(42,42+count))
+
+
+def test_api_duration_validation_and_legacy_modes(temp_studio_env, monkeypatch):
+    import app
+    client,root=temp_studio_env
+    (root/'uploads'/'ref.png').write_bytes(b'x'); (root/'uploads'/'drive.mp4').write_bytes(b'x')
+    data={'engine':'wan','quant':'q4','image_rel':'uploads/ref.png','video_rel':'uploads/drive.mp4','prompt':'dance', 'duration_sec':30.2}
+    jobs=[]
+    monkeypatch.setattr(app.job_manager,'submit',lambda **kw: jobs.append(kw) or SimpleNamespace(to_dict=lambda **kw:{'id':'job'}))
+    assert client.post('/api/community/motion',json=data).status_code==200
+    assert client.post('/api/community/motion',json={**data,'duration_sec':86401}).status_code==422
+    assert client.post('/api/community/motion',json={**data,'engine':'ltx'}).status_code==400
+    assert client.post('/api/community/motion',json={**data,'engine':'ltx','duration_sec':None}).status_code==200
+
+
+def test_duration_rejects_short_guide_before_model_setup(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import motion_transfer as m
+    from studio.jobs import JobRecord
+    from PIL import Image
+    image=tmp_path/'ref.png'; Image.new('RGB',(256,256)).save(image)
+    video=tmp_path/'drive.mp4';make_clip(video)
+    monkeypatch.setattr(m, '_prepare', lambda *a: pytest.fail('must not download'))
+    with pytest.raises(ValueError, match='MOTION_VIDEO_TOO_SHORT'):
+        m.generate(engine='wan',quant='q4',image_path=image,video_path=video,prompt='dance',negative='',
+                   width=256,height=256,frames=49,duration_sec=30,seed=1,steps=10,cfg=1,person='human',strength=1,job=JobRecord('video','test'))
+
+
+def test_comfy_events_log_node_execution(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import motion_transfer as m
+    from studio.jobs import JobRecord
+    class Reply:
+        ok=True
+        def __init__(self, data): self.data=data
+        def json(self): return self.data
+        def raise_for_status(self): pass
+    def listener(base, client_id, events, stop, ready):
+        events.put({'type':'executing','data':{'prompt_id':'id','node':'1'}})
+        events.put({'type':'progress','data':{'prompt_id':'id','node':'1','value':2,'max':10}})
+        ready.set()
+    monkeypatch.setattr(m.common,'_events_listener',listener)
+    monkeypatch.setattr(m.common.requests,'get',lambda url,**k: Reply({'StudioWanAnimate2GGUF':{}}) if url.endswith('object_info') else Reply({'id':{'status':{'status_str':'error','messages':[]}}}))
+    monkeypatch.setattr(m.common.requests,'post',lambda *a,**k: Reply({'prompt_id':'id'}))
+    session=SimpleNamespace(base='http://test',output_dir=tmp_path,alive=lambda:True,guard=SimpleNamespace(raise_if_stopped=lambda:None))
+    job=JobRecord('video','test')
+    with pytest.raises(RuntimeError,match='MOTION_INFERENCE_FAILED'):
+        m._infer(session,{'1':{'class_type':'StudioWanAnimate2GGUF','inputs':{}}},job)
+    assert any('Comfy ejecutando nodo 1: StudioWanAnimate2GGUF' in item['message'] for item in job.logs)
+    assert job.current_step=='Comfy StudioWanAnimate2GGUF: 2/10'

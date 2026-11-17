@@ -2152,8 +2152,10 @@
     $("motion-steps").value=engine === "scail" ? "30" : engine === "ltx" ? "8" : "10";
     $("motion-cfg").value=engine === "scail" ? "5" : "1";
     $("motion-steps").disabled=engine === "ltx"; $("motion-cfg").disabled=engine === "ltx";
+    $("motion-duration-wrap").hidden=engine!=="wan"; $("motion-frames-wrap").hidden=engine==="wan";
+    $("motion-duration-note").hidden=engine!=="wan";
     $("motion-engine-note").textContent= engine === "wan"
-      ? "Wan Animate 2 distilled: 10 pasos y CFG 1. Añade ~8,25 GB de archivos comunes al modelo principal. Solo primer segmento; salida muda. GGUF usa un adaptador privado de arquitectura."
+      ? "Wan Animate 2 distilled: 10 pasos y CFG 1. Añade ~8,25 GB de archivos comunes al modelo principal. Salida muda; continuación experimental sin validar en GPU. GGUF usa un adaptador privado de arquitectura."
       : engine === "scail" ? "SCAIL-2 y SAM 3.1 añaden ~10 GB de archivos comunes al modelo principal. SAM ordena personajes de izquierda a derecha y puede confundirlos al cruzarse. Salida muda; primer segmento."
       : "LTX 2.3 Q4 usa Union Control con bordes extraídos del vídeo; no es pose ni garantiza copiar el baile. Genera audio propio y NO usa el audio guía. Requiere ancho y alto múltiplos de 64.";
   }
@@ -3029,11 +3031,14 @@
       const engine=$("motion-engine").value;
       if (!$("motion-image").value || !$("motion-video").value || !$("motion-prompt").value.trim()) { toast("Selecciona imagen, vídeo y describe la escena.","error"); return; }
       if (engine === "scail" && !$("motion-sam-license").checked) { toast("Revisa y acepta la licencia SAM 3.1.","error"); return; }
+      const duration = Number($("motion-duration").value);
+      if (engine === "wan" && (!Number.isFinite(duration) || duration < 1/24 || duration > 86400)) { toast("Duración Wan: entre 1/24 de segundo y 24 horas.","error"); return; }
       const body={engine,quant:$("motion-quant").value,image_rel:$("motion-image").value,video_rel:$("motion-video").value,
         prompt:$("motion-prompt").value,negative:$("motion-negative").value,width:Number($("motion-width").value),height:Number($("motion-height").value),
         frames:Number($("motion-frames").value),seed:Number($("motion-seed").value),steps:Number($("motion-steps").value),cfg:Number($("motion-cfg").value),
         strength:Number($("motion-strength").value),person:$("motion-person").value,sam_license_accepted:$("motion-sam-license").checked,
         comfy_vram_mode:$("motion-offload").value,comfy_evict_models:$("motion-evict").checked};
+      if (engine === "wan") body.duration_sec=duration;
       try { const res=await api("/api/community/motion",{method:"POST",body:JSON.stringify(body)});
         $("motion-feedback").textContent="Trabajo en cola. Consulta el monitor para progreso, errores y cancelación."; watchJob(res.job);
       } catch(err) { toast(err.message,"error"); }

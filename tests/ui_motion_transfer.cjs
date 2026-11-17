@@ -66,8 +66,9 @@ async function until(test, label) {
   body=JSON.parse(calls.filter(x=>x.path==='/api/community/motion').at(-1).body);
   if(body.engine!=='ltx' || body.quant!=='q4' || body.steps!==8) throw Error('Incorrect LTX payload');
   $('motion-engine').value='wan'; $('motion-engine').dispatchEvent(new w.Event('change'));
-  $('motion-quant').value='int8'; $('motion-run').click(); await until(()=>calls.filter(x=>x.path==='/api/community/motion').length===3,'Wan submit');
+  if ($('motion-duration-wrap').hidden || !$('motion-frames-wrap').hidden) throw Error('Wan duration field missing');
+  $('motion-duration').value='30.25'; $('motion-quant').value='int8'; $('motion-run').click(); await until(()=>calls.filter(x=>x.path==='/api/community/motion').length===3,'Wan submit');
   body=JSON.parse(calls.filter(x=>x.path==='/api/community/motion').at(-1).body);
-  if(body.engine!=='wan' || body.quant!=='int8') throw Error('Incorrect Wan payload');
+  if(body.engine!=='wan' || body.quant!=='int8' || body.duration_sec!==30.25) throw Error('Incorrect Wan payload');
   if(errors.length) throw Error(errors.join('; ')); w.close(); console.log('Motion UI selection, licensing, payloads: OK');
 })().catch(e => { console.error(e); process.exit(1); });

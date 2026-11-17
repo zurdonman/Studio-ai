@@ -1587,6 +1587,7 @@ class MotionTransferReq(BaseModel):
     width: int = Field(default=512, ge=256, le=768)
     height: int = Field(default=320, ge=256, le=768)
     frames: Literal[25, 49, 81] = 49
+    duration_sec: Optional[float] = Field(default=None, ge=1/24, le=86400, allow_inf_nan=False)
     seed: int = Field(default=42, ge=0, le=4294967295)
     steps: int = Field(default=10, ge=1, le=50)
     cfg: float = Field(default=1.0, ge=0, le=10, allow_inf_nan=False)
@@ -1612,6 +1613,8 @@ def api_community_motion(req: MotionTransferReq) -> Dict[str, Any]:
         except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
     if req.engine == "scail" and not req.sam_license_accepted:
         raise HTTPException(status_code=400, detail="Confirma que aceptas la licencia de SAM 3.1 para el seguimiento de personas.")
+    if req.engine != "wan" and req.duration_sec is not None:
+        raise HTTPException(status_code=400, detail="La duración en segundos solo está disponible para Wan; SCAIL y LTX siguen limitados a un segmento.")
     align = 64 if req.engine == "ltx" else 32
     if req.width % align or req.height % align or req.width * req.height > 768 * 512:
         raise HTTPException(status_code=400, detail=f"Usa dimensiones múltiplos de {align}, área máxima 768×512.")
@@ -1625,7 +1628,7 @@ def api_community_motion(req: MotionTransferReq) -> Dict[str, Any]:
     if req.engine == "ltx":
         fn = lambda j: generate_ltx_motion(job=j, **common)
     else:
-        fn = lambda j: generate_motion(engine=req.engine, quant=req.quant, steps=req.steps, cfg=req.cfg, person=req.person, job=j, **common)
+        fn = lambda j: generate_motion(engine=req.engine, quant=req.quant, steps=req.steps, cfg=req.cfg, person=req.person, duration_sec=req.duration_sec, job=j, **common)
     config = options(req.comfy_vram_mode, req.comfy_evict_models)
     job = job_manager.submit(kind="video", title=f"Movimiento experimental · {req.engine.upper()} {req.quant}", fn=_comfy_job_function(fn, config))
     return {"ok": True, "job": job.to_dict(include_logs=True)}

@@ -1,9 +1,12 @@
-"""Experimental single-window character animation using private, pinned Comfy.
+"""Experimental character animation using private, pinned Comfy.
 
 No GPU validation yet. Never expose an arbitrary graph or the private server.
 """
 from __future__ import annotations
 import json
+import math
+import queue
+import threading
 import os
 import re
 import shutil
@@ -25,17 +28,17 @@ WEIGHTS = DATA_ROOT / 'models' / 'motion-transfer'
 FOLDERS = {'dit': 'diffusion_models', 'umt5': 'text_encoders', 'vision': 'clip_vision', 'vae': 'vae', 'sam': 'checkpoints'}
 
 
-def make_graph(*, engine, quant, image_name, video_name, names, prompt, negative, width, height, frames, seed, steps, cfg, person='human', strength=1.0):
+def make_graph(*, engine, quant, image_name, video_name, names, prompt, negative, width, height, frames, seed, steps, cfg, person='human', strength=1.0, continuation_name=None, prefix='studio_motion'):
     files_for(engine, quant)
     if not prompt.strip() or len(prompt) > 2000 or len(negative) > 2000:
         raise ValueError('MOTION_PROMPT_INVALID')
     if width < 256 or height < 256 or width % 32 or height % 32 or width * height > 768 * 512 or max(width, height) > 768:
         raise ValueError('MOTION_SIZE_INVALID: múltiplos de 32; máximo 768×512 de área y 768 px de lado.')
-    if frames not in (25, 49, 81) or not 1 <= steps <= 50 or not 0 <= cfg <= 10 or not 0 <= strength <= 2:
+    if not isinstance(frames, int) or frames < 5 or frames > 81 or (frames - 1) % 4 or not 1 <= steps <= 50 or not 0 <= cfg <= 10 or not 0 <= strength <= 2:
         raise ValueError('MOTION_CONFIG_INVALID')
     if not 0 <= seed <= 2**32 - 1 or not person.strip() or len(person) > 120:
         raise ValueError('MOTION_CONFIG_INVALID')
-    for value in [image_name, video_name, *names.values()]:
+    for value in [image_name, video_name, *names.values(), *([continuation_name] if continuation_name else []), prefix]:
         if not value or '/' in value or '\\' in value or value in ('.', '..'):
             raise ValueError('MOTION_FILENAME_INVALID')
     def n(kind, **kw): return {'class_type': kind, 'inputs': kw}
@@ -59,7 +62,7 @@ def make_graph(*, engine, quant, image_name, video_name, names, prompt, negative
               positive=['14', 0], negative=['14', 1], sampler=['13', 0], sigmas=['12', 0], latent_image=['14', 2]),
       '17': n('VAEDecode', samples=['15', 1] if engine == 'scail' else ['16', 0], vae=['3', 0]),
       '18': n('CreateVideo', images=['17', 0], fps=24.0),
-      '19': n('SaveVideo', video=['18', 0], filename_prefix='studio_motion', format='auto', **{'format.codec':'auto'}),
+      '19': n('SaveVideo', video=['18', 0], filename_prefix=prefix, format='auto', **{'format.codec':'auto'}),
     }
     if engine == 'wan':
         g['20'] = n('ImageFromBatch', image=['7', 0], batch_index=0, length=1)
@@ -69,7 +72,12 @@ def make_graph(*, engine, quant, image_name, video_name, names, prompt, negative
                     clip_vision_output_pose=['21', 0], width=width, height=height, length=frames, batch_size=1,
                     video_frame_offset=0, pose_strength=strength, pose_start_percent=0.0, pose_end_percent=1.0, reference_image_strength=1.0)
         g['16'] = n('TrimVideoLatent', samples=['15', 0], trim_amount=['14', 3])
+        if continuation_name:
+            g['23'] = n('LoadVideo', file=continuation_name)
+            g['24'] = n('GetVideoComponents', video=['23', 0])
+            g['14']['inputs']['continue_motion'] = ['24', 0]
     else:
+        if continuation_name: raise ValueError('MOTION_CONTINUATION_UNSUPPORTED')
         # Native SAM3 tracks independently on reference and driving image, then
         # assigns identities left-to-right. Not a guarantee when subjects cross.
         g['20'] = n('CheckpointLoaderSimple', ckpt_name=names['sam'])
@@ -141,6 +149,10 @@ def _report_comfy_error(messages, graph, job):
         error_type = 'unknown'
     message = redact_secrets(str(error.get('exception_message') or 'Error desconocido')).replace('\n', ' ').replace('\r', ' ')[:1000]
     job.log(f'Comfy error: nodo {node_id} ({node_type}); tipo {error_type}', level='error')
+    executed = error.get('executed')
+    if isinstance(executed, list):
+        known = [str(item) for item in executed if str(item) in graph][:50]
+        job.log('Nodos completados antes del fallo: ' + (', '.join(f'{item} ({graph[item].get("class_type", "?")})' for item in known) or 'ninguno'), level='error')
     stack = error.get('traceback', [])
     if isinstance(stack, (list, str)):
         stack_text = stack if isinstance(stack, str) else '\n'.join(x for x in stack if isinstance(x, str))
@@ -155,45 +167,161 @@ def _infer(session, graph, job, prefix="studio_motion"):
     info = common.requests.get(session.base + '/object_info', timeout=30); info.raise_for_status()
     missing = {n['class_type'] for n in graph.values()} - set(info.json())
     if missing: raise RuntimeError('MOTION_RUNTIME_MISSING_NODES: ' + ', '.join(sorted(missing)))
-    reply = common.requests.post(session.base + '/prompt', json={'prompt': graph}, timeout=30)
-    if not reply.ok: raise RuntimeError('MOTION_GRAPH_REJECTED: ' + reply.text[:1500])
-    ident = reply.json()['prompt_id']
-    deadline = time.monotonic() + 7200
-    while time.monotonic() < deadline:
+    client_id = uuid.uuid4().hex
+    events = queue.Queue()
+    stop, ready = threading.Event(), threading.Event()
+    thread = threading.Thread(target=common._events_listener,
+                              args=(session.base, client_id, events, stop, ready), daemon=True)
+    thread.start(); ready.wait(5)
+    try:
+        reply = common.requests.post(session.base + '/prompt', json={'prompt': graph, 'client_id': client_id}, timeout=30)
+        if not reply.ok:
+            from studio.diagnostics import redact_secrets
+            raise RuntimeError('MOTION_GRAPH_REJECTED: ' + redact_secrets(reply.text[:1500]))
+        ident = reply.json()['prompt_id']
+        job.log(f'Comfy aceptó el grafo {ident}; {len(graph)} nodos. Monitorizando ejecución.')
+        deadline = time.monotonic() + 7200
+        current_node = None
+        while time.monotonic() < deadline:
+            job.check_cancelled(); session.guard.raise_if_stopped()
+            if not session.alive(): raise RuntimeError('MOTION_ENGINE_EXITED: proceso Comfy detenido')
+            while not events.empty():
+                event = events.get_nowait()
+                if not isinstance(event, dict): continue
+                data = event.get('data') or {}
+                if not isinstance(data, dict) or data.get('prompt_id') not in (None, ident): continue
+                if event.get('type') == 'executing' and data.get('node') is not None:
+                    node_id = str(data['node'])
+                    if node_id in graph and node_id != current_node:
+                        current_node = node_id
+                        job.log(f'Comfy ejecutando nodo {node_id}: {graph[node_id]["class_type"]}',
+                                step=f'Comfy: {graph[node_id]["class_type"]}')
+                elif event.get('type') == 'progress':
+                    try:
+                        value, maximum = float(data['value']), float(data['max'])
+                        if math.isfinite(value) and math.isfinite(maximum) and maximum > 0:
+                            node_id = str(data.get('node') or current_node or '')
+                            node_type = graph.get(node_id, {}).get('class_type', 'procesando')
+                            job.heartbeat(step=f'Comfy {node_type}: {value:g}/{maximum:g}')
+                    except (KeyError, ValueError, TypeError): pass
+            response = common.requests.get(session.base + '/history/' + ident, timeout=10); response.raise_for_status()
+            result = response.json().get(ident)
+            if result:
+                status = result.get('status') or {}
+                if status.get('status_str') == 'error':
+                    raise RuntimeError(_report_comfy_error(status.get('messages', []), graph, job))
+                if status.get('completed'):
+                    paths = list(session.output_dir.glob(prefix + '_*.mp4'))
+                    if len(paths) != 1: raise RuntimeError('MOTION_OUTPUT_MISSING')
+                    return paths[0]
+            if current_node is None:
+                job.heartbeat(step='Movimiento: preparando nodos Comfy')
+            else:
+                job.heartbeat()
+            time.sleep(1)
+        raise TimeoutError('MOTION_TIMEOUT: máximo dos horas por segmento')
+    finally:
+        stop.set(); thread.join(timeout=2)
+
+
+def _duration_frames(seconds):
+    try: seconds = float(seconds)
+    except (TypeError, ValueError): raise ValueError('MOTION_DURATION_INVALID') from None
+    if not math.isfinite(seconds) or not 1/24 <= seconds <= 86400:
+        raise ValueError('MOTION_DURATION_INVALID: entre 1/24 de segundo y 24 horas.')
+    return max(1, math.floor(seconds * 24 + .5))
+
+
+def _wan_plan(total_frames):
+    if not isinstance(total_frames, int) or not 1 <= total_frames <= 86400 * 24:
+        raise ValueError('MOTION_DURATION_INVALID')
+    produced = 0
+    while produced < total_frames:
+        overlap = 1 if produced else 0
+        take = min(81 - overlap, total_frames - produced)
+        needed = take + overlap
+        window = max(5, 1 + 4 * math.ceil((needed - 1) / 4))
+        yield {'start': produced - overlap, 'overlap': overlap, 'take': take, 'window': window}
+        produced += take
+
+
+def _generate_wan_segments(session, job, *, total_frames, image_path, video_path, names, quant, prompt, negative, width, height, seed, steps, cfg, person, strength):
+    plan = list(_wan_plan(total_frames))
+    job.log(f'Wan: {total_frames} fotogramas a 24 fps ({total_frames/24:.3f} s), {len(plan)} segmento(s); '
+            'continuación experimental con un fotograma solapado, sin audio.', level='warning')
+    previous = None
+    clips = []
+    for index, part in enumerate(plan):
         job.check_cancelled(); session.guard.raise_if_stopped()
-        if not session.alive(): raise RuntimeError('MOTION_ENGINE_EXITED: proceso Comfy detenido')
-        response = common.requests.get(session.base + '/history/' + ident, timeout=10); response.raise_for_status()
-        result = response.json().get(ident)
-        if result:
-            status = result.get('status') or {}
-            if status.get('status_str') == 'error':
-                raise RuntimeError(_report_comfy_error(status.get('messages', []), graph, job))
-            if status.get('completed'):
-                paths = list(session.output_dir.glob(prefix + '_*.mp4'))
-                if len(paths) != 1: raise RuntimeError('MOTION_OUTPUT_MISSING')
-                return paths[0]
-        job.heartbeat(step='Movimiento: preparación e inferencia; progreso no disponible')
-        time.sleep(1)
-    raise TimeoutError('MOTION_TIMEOUT: máximo dos horas')
+        job.log(f'Segmento {index+1}/{len(plan)}: guía desde fotograma {part["start"]}, '
+                f'ventana {part["window"]}, salida {part["take"]}, solape {part["overlap"]}.')
+        guide_name = f'drive_{index:06d}.mp4'
+        guide = session.input_dir / guide_name
+        # Decode from the start so frame indices remain deterministic even for VFR and keyframes.
+        vf = (f'fps=24,trim=start_frame={part["start"]}:end_frame={part["start"] + part["window"]},'
+              f'setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=increase,'
+              f'crop={width}:{height},setsar=1')
+        common._command([get_ffmpeg_bin(), '-hide_banner','-loglevel','error','-y','-i',str(video_path),
+                         '-map','0:v:0','-an','-vf',vf,'-c:v','libx264','-pix_fmt','yuv420p',str(guide)], job,
+                        stage=f'Preparando guía {index+1}/{len(plan)}', timeout=1800, guard_label='FFmpeg movimiento')
+        guide_info = probe_media_info(guide)
+        # Wan pads at most the window rounding; never accept a missing required frame.
+        if not guide_info['has_video'] or guide_info['duration_seconds'] + .015 < (part['take'] + part['overlap']) / 24:
+            raise ValueError('MOTION_VIDEO_TOO_SHORT: faltan fotogramas en el vídeo guía convertido a 24 fps.')
+        previous_name = None
+        if previous is not None:
+            previous_name = f'continuation_{index:06d}.mp4'
+            shutil.copyfile(previous, session.input_dir / previous_name)
+        prefix = f'studio_motion_{index:06d}'
+        graph = make_graph(engine='wan', quant=quant, image_name='reference.png', video_name=guide_name, names=names,
+                           prompt=prompt, negative=negative, width=width, height=height, frames=part['window'],
+                           seed=(seed + index) % (2**32), steps=steps, cfg=cfg, person=person, strength=strength,
+                           continuation_name=previous_name, prefix=prefix)
+        previous = _infer(session, graph, job, prefix=prefix)
+        clip = session.root / f'piece_{index:06d}.mp4'
+        start = part['overlap']; end = start + part['take']
+        common._command([get_ffmpeg_bin(),'-hide_banner','-loglevel','error','-y','-i',str(previous),
+                         '-vf',f'trim=start_frame={start}:end_frame={end},setpts=PTS-STARTPTS',
+                         '-an','-c:v','libx264','-pix_fmt','yuv420p',str(clip)], job,
+                        stage=f'Recortando segmento {index+1}/{len(plan)}',timeout=600,guard_label='FFmpeg movimiento')
+        info = probe_media_info(clip)
+        if not info['has_video'] or abs(info['duration_seconds'] - part['take']/24) > .02:
+            raise RuntimeError('MOTION_SEGMENT_INVALID: el segmento generado no contiene los fotogramas esperados.')
+        clips.append(clip)
+    listing = session.root / 'segments.ffconcat'
+    listing.write_text('ffconcat version 1.0\n' + ''.join(f"file '{p.name}'\n" for p in clips), encoding='utf8')
+    result = session.root / 'wan_joined.mp4'
+    common._command([get_ffmpeg_bin(),'-hide_banner','-loglevel','error','-y','-f','concat','-safe','1',
+                     '-i',str(listing),'-map','0:v:0','-an','-c','copy','-movflags','+faststart',str(result)], job,
+                    stage='Uniendo segmentos de movimiento',timeout=1800,guard_label='FFmpeg movimiento')
+    info = probe_media_info(result)
+    if not info['has_video'] or abs(info['duration_seconds'] - total_frames/24) > .04:
+        raise RuntimeError('MOTION_OUTPUT_INVALID: duración final incorrecta.')
+    return result, len(plan)
 
 
 @serialized_gpu_operation(slots=('video',), managed=True)
-def generate(*, engine, quant, image_path: Path, video_path: Path, prompt, negative, width, height, frames, seed, steps, cfg, person, strength, job: Any):
+def generate(*, engine, quant, image_path: Path, video_path: Path, prompt, negative, width, height, frames, seed, steps, cfg, person, strength, job: Any, duration_sec=None):
     started = time.monotonic()
     files_for(engine, quant)
     if image_path.stat().st_size > 50 * 1024**2: raise ValueError('MOTION_IMAGE_TOO_LARGE')
     w, h = verify_image_file(image_path)
     if w * h > 32_000_000: raise ValueError('MOTION_IMAGE_TOO_LARGE: máximo 32 megapíxeles')
     if not video_path.is_file() or video_path.stat().st_size > 200 * 1024**2: raise ValueError('MOTION_VIDEO_TOO_LARGE')
+    if duration_sec is not None and engine != 'wan':
+        raise ValueError('MOTION_DURATION_UNSUPPORTED: duración en segundos disponible solo para Wan.')
+    total_frames = _duration_frames(duration_sec) if duration_sec is not None else frames
     info = probe_media_info(video_path)
-    if not info['has_video'] or not info['duration_seconds'] or info['duration_seconds'] < frames / 24 - .01:
-        raise ValueError('MOTION_VIDEO_TOO_SHORT: el clip debe cubrir los fotogramas solicitados a 24 fps')
+    if not info['has_video'] or not info['duration_seconds'] or info['duration_seconds'] + .01 < total_frames / 24:
+        raise ValueError(f'MOTION_VIDEO_TOO_SHORT: se necesitan {total_frames / 24:.2f} s de vídeo guía a 24 fps.')
     # Validate config before downloads/unloading any resident process.
     placeholder = {item[0]:'placeholder' for item in files_for(engine, quant)}
     make_graph(engine=engine, quant=quant, image_name='reference.png', video_name='drive.mp4', names=placeholder,
-               prompt=prompt, negative=negative, width=width, height=height, frames=frames, seed=seed, steps=steps, cfg=cfg, person=person, strength=strength)
+               prompt=prompt, negative=negative, width=width, height=height, frames=next(_wan_plan(total_frames))['window'] if engine == 'wan' else frames, seed=seed, steps=steps, cfg=cfg, person=person, strength=strength)
     if not common.query_gpu_info().get('has_gpu'): raise RuntimeError('MOTION_GPU_REQUIRED: se necesita GPU CUDA')
-    job.log('Movimiento experimental sin validación GPU: solo un segmento, sin audio. La memoria real se vigila.', level='warning')
+    job.log(f'Movimiento: motor {engine}, variante {quant}, {width}×{height}, {total_frames} fotogramas a 24 fps, '
+            f'{steps} pasos, CFG {cfg:g}, semilla {seed}, fuerza {strength:g}.')
+    job.log('Movimiento experimental sin validación GPU; salida sin audio. La memoria real se vigila.', level='warning')
     if memory_manager.get_slot('video'): memory_manager.unload_slot('video')
     common._comfy_start_admission(job, stage='Inicio movimiento', planned_ram=6, planned_vram=3)
     names = _prepare(engine, quant, job)
@@ -201,14 +329,20 @@ def generate(*, engine, quant, image_path: Path, video_path: Path, prompt, negat
     try:
         with Image.open(image_path) as im:
             im = ImageOps.exif_transpose(im).convert('RGB'); im.thumbnail((1024, 1024)); im.save(session.input_dir / 'reference.png')
-        source = session.input_dir / 'drive.mp4'
-        common._command([get_ffmpeg_bin(), '-hide_banner','-loglevel','error','-y','-i',str(video_path), '-map','0:v:0', '-an',
-                         '-vf',f'fps=24,scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1',
-                         '-frames:v',str(frames), '-c:v','libx264','-pix_fmt','yuv420p',str(source)], job,
-                        stage='Preparando segmento guía 24 fps', timeout=600, guard_label='FFmpeg movimiento')
-        graph = make_graph(engine=engine, quant=quant, image_name='reference.png', video_name='drive.mp4', names=names,
-                           prompt=prompt, negative=negative, width=width, height=height, frames=frames, seed=seed, steps=steps, cfg=cfg, person=person, strength=strength)
-        output = _infer(session, graph, job)
+        segment_count = 1
+        if engine == 'wan':
+            output, segment_count = _generate_wan_segments(session, job, total_frames=total_frames, image_path=image_path,
+                video_path=video_path, names=names, quant=quant, prompt=prompt, negative=negative, width=width, height=height,
+                seed=seed, steps=steps, cfg=cfg, person=person, strength=strength)
+        else:
+            source = session.input_dir / 'drive.mp4'
+            common._command([get_ffmpeg_bin(), '-hide_banner','-loglevel','error','-y','-i',str(video_path), '-map','0:v:0', '-an',
+                             '-vf',f'fps=24,scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1',
+                             '-frames:v',str(frames), '-c:v','libx264','-pix_fmt','yuv420p',str(source)], job,
+                            stage='Preparando segmento guía 24 fps', timeout=600, guard_label='FFmpeg movimiento')
+            graph = make_graph(engine=engine, quant=quant, image_name='reference.png', video_name='drive.mp4', names=names,
+                               prompt=prompt, negative=negative, width=width, height=height, frames=frames, seed=seed, steps=steps, cfg=cfg, person=person, strength=strength)
+            output = _infer(session, graph, job)
         output_info = probe_media_info(output)
         if not output_info['has_video']: raise RuntimeError('MOTION_OUTPUT_INVALID')
         job.check_cancelled(); VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -218,7 +352,8 @@ def generate(*, engine, quant, image_path: Path, video_path: Path, prompt, negat
                 'type':'video','model_id':f'{engine}-motion-{quant}', 'model_name':f'{engine.upper()} movimiento · {quant}',
                 'video_submode':'Transferencia de movimiento', 'width':output_info['width'], 'height':output_info['height'],
                 'fps':24, 'duration_seconds':output_info['duration_seconds'], 'steps':steps, 'guidance_scale':cfg,
-                'elapsed_seconds':round(time.monotonic()-started, 1), 'has_audio':False}
+                'elapsed_seconds':round(time.monotonic()-started, 1), 'has_audio':False,
+                'requested_duration_sec': duration_sec, 'segments': segment_count}
         if meta_path.exists(): raise RuntimeError('MOTION_OUTPUT_COLLISION')
         created = False
         try:
