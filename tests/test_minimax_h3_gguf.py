@@ -43,7 +43,9 @@ def test_h3_api_license_and_inputs_fail_before_job_submission(temp_studio_env, m
     base = {'model_id': 'h3-fl2va-udq2', 'prompt': 'Una escena'}
     assert client.post('/api/video/h3/prepare', json={'model_id': base['model_id']}).status_code == 400
     assert client.post('/api/video/h3/generate', json=base).status_code == 400
-    allowed = {**base, 'license_authorized': True}
+    assert client.post('/api/video/h3/generate', json={**base, 'license_authorized': True}).status_code == 400
+    assert not submitted
+    allowed = {**base, 'license_authorized': True, 'download_authorized': True}
     assert client.post('/api/video/h3/generate', json={**allowed, 'end_image_rel':'uploads/last.png'}).status_code == 400
     assert client.post('/api/video/h3/generate', json={**allowed, 'width': 513}).status_code == 400
     assert client.post('/api/video/h3/generate', json={**allowed, 'frames': 25}).status_code == 422
@@ -67,13 +69,21 @@ def test_preparation_rejects_non_l4_before_install(temp_studio_env, monkeypatch)
         h3._prepare('h3-fl2va-udq2', JobRecord('download', 'test'))
 
 
-def test_no_implicit_download_on_unprepared_generation(temp_studio_env, monkeypatch, tmp_path):
+def test_generation_prepares_missing_model_and_propagates_setup_errors(temp_studio_env, monkeypatch, tmp_path):
     from studio.engines import minimax_h3 as h3
     from studio.jobs import JobRecord
     monkeypatch.setattr(h3, 'ROOT', tmp_path / 'empty')
-    monkeypatch.setattr(h3, '_prepare', lambda *args: pytest.fail('must not download'))
-    with pytest.raises(RuntimeError, match='H3_NOT_PREPARED'):
-        h3.generate('h3-fl2va-udq2', prompt='hola', image=None, end=None, width=640, height=384, frames=22, steps=4, seed=0, offload=True, job=JobRecord('video', 'test'))
+    calls = []
+    def prepare(model_id, job):
+        calls.append(model_id)
+        raise RuntimeError('setup failure')
+    monkeypatch.setattr(h3, '_prepare', prepare)
+    with pytest.raises(RuntimeError, match='setup failure'):
+        h3.generate('h3-fl2va-q4', prompt='hola', image=None, end=None, width=640, height=384, frames=22, steps=4, seed=0, offload=True, job=JobRecord('video', 'test'))
+    assert calls == ['h3-fl2va-q4']
+    with pytest.raises(ValueError, match='H3_INPUT_INVALID'):
+        h3.generate('h3-fl2va-q4', prompt='', image=None, end=None, width=640, height=384, frames=22, steps=4, seed=0, offload=True, job=JobRecord('video', 'test'))
+    assert calls == ['h3-fl2va-q4']
 
 
 @pytest.mark.parametrize('conversion_fails', [False, True])
@@ -88,7 +98,7 @@ import subprocess, sys
 out = sys.argv[sys.argv.index("--output") + 1]
 subprocess.run([%r, "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=320x256:r=24:d=1", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:v", "mjpeg", "-threads", "1", "-c:a", "pcm_s16le", "-shortest", "-y", out], check=True)
 ''' % get_ffmpeg_bin())
-    binary.chmod(0o755); (runtime / 'ready.json').write_text('{}')
+    binary.chmod(0o755)  # fake preparer below; no ready marker or weights exist
     monkeypatch.setattr(h3, 'ROOT', runtime)
     monkeypatch.setattr(h3, 'TEMP_DIR', tmp_path / 'temp')
     monkeypatch.setattr(h3, 'VIDEOS_OUT_DIR', tmp_path / 'videos')

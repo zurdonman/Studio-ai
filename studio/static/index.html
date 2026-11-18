@@ -439,8 +439,8 @@
               <p>La <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">licencia comunitaria</a> excluye la UE, Reino Unido, EE. UU. y Corea del Sur. El uso personal no elimina esa restricción; solicita una licencia separada cuando corresponda.</p>
               <label class="check-row"><input type="checkbox" id="h3-license" /> Confirmo que tengo derecho a usar estos modelos en mi territorio, incluida licencia separada cuando corresponda.</label>
               <label class="field-label">Variante<select id="h3-model"><option value="h3-fl2va-udq2">FL2VA UD-Q2 + encoder Q2 · ~25,1 GiB en archivos</option><option value="h3-fl2va-q4">FL2VA Q4 + encoder Q4 · ~33 GiB en archivos</option></select></label>
-              <p class="muted">Tamaños de archivos, no consumos de RAM/VRAM. Primera preparación: compila un runtime CUDA para L4 y descarga y verifica componentes. Requiere espacio adicional, CUDA/nvcc, CMake y acceso a internet.</p>
-              <button type="button" class="btn btn-secondary" id="h3-prepare">Preparar variante H3</button>
+              <p class="muted">Tamaños de archivos, no consumos de RAM/VRAM. Al generar por primera vez, Studio prepara automáticamente el runtime CUDA para L4 y descarga los componentes necesarios. Requiere espacio adicional, CUDA/nvcc, CMake y acceso a internet. Revisa la licencia antes de continuar.</p>
+              <button type="button" class="btn btn-secondary" id="h3-prepare">Preparar variante H3 por adelantado (opcional)</button>
               <label class="field-label">Descripción<textarea id="h3-prompt" rows="3" maxlength="3000" placeholder="Describe el plano y el audio deseado"></textarea></label>
               <label class="field-label">Fotograma inicial (opcional)<select id="h3-start"><option value="">— Solo texto —</option></select></label>
               <label class="btn btn-ghost btn-sm file-btn">Subir imagen inicial<input type="file" id="h3-upload-start" accept="image/*" hidden /></label>

@@ -1030,6 +1030,7 @@ class H3PrepareReq(BaseModel):
 
 
 class H3GenerateReq(H3PrepareReq):
+    download_authorized: bool = False
     prompt: str = Field(min_length=1, max_length=3000)
     image_rel: Optional[str] = None
     end_image_rel: Optional[str] = None
@@ -1058,6 +1059,8 @@ def api_prepare_h3(req: H3PrepareReq) -> Dict[str, Any]:
 @app.post("/api/video/h3/generate")
 def api_generate_h3(req: H3GenerateReq) -> Dict[str, Any]:
     _h3_license_check(req)
+    if not req.download_authorized:
+        raise HTTPException(status_code=400, detail="H3_DOWNLOAD_CONFIRMATION_REQUIRED: autoriza la instalación y descarga de los componentes que falten.")
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Describe la escena.")
     if req.width % 32 or req.height % 32 or req.width * req.height > 768 * 512:

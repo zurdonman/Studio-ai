@@ -2566,8 +2566,11 @@
         steps:Number($("h3-steps").value), seed:Number($("h3-seed").value), offload:$("h3-offload").checked};
       if (!data.prompt.trim()) return feedback("Escribe la descripción del plano.", true);
       if (data.end_image_rel && !data.image_rel) return feedback("Para usar un fotograma final selecciona también uno inicial.", true);
+      const size = data.model_id === "h3-fl2va-q4" ? "~33 GiB" : "~25,1 GiB";
+      if (!confirm(`Si faltan componentes de H3, se compilará el motor CUDA y se descargarán y verificarán archivos (${size} en total, más espacio adicional). ¿Autorizar y generar?`)) return;
+      data.download_authorized = true;
       try { const result = await api("/api/video/h3/generate", {method:"POST", body:JSON.stringify(data)});
-        feedback("Generación en cola. Sigue el progreso en el monitor; el clip aparecerá en la biblioteca de Vídeo."); watchJob(result.job);
+        feedback("En cola. Si H3 no está preparado, se instalará y descargará automáticamente antes de generar. Sigue el monitor; el clip aparecerá en Vídeo."); watchJob(result.job);
       } catch (e) { feedback(e.message, true); toast(e.message, "error"); }
     });
   }

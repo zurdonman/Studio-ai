@@ -1,7 +1,7 @@
 """Experimental FL2VA MiniMax H3 GGUF runner, separate from Comfy and LTX.
 
-Pin every component. Preparation downloads only after an explicit user action;
-this runtime has not been benchmarked or validated with real weights on L4.
+Pin every component. Generating automatically prepares missing components after
+license and download authorization; this runtime has not been validated with real weights on L4.
 """
 from __future__ import annotations
 
@@ -179,12 +179,12 @@ def generate(model_id: str, *, prompt: str, image: Path | None, end: Path | None
     for item in (image, end):
         if item:
             verify_image_file(item)
-    marker = ROOT / 'ready.json'
-    binary = ROOT / 'build' / 'bin' / 'sd-cli'
-    if not binary.is_file() or not marker.is_file() or fingerprint(model_id) is None:
-        raise RuntimeError('H3_NOT_PREPARED: pulsa Preparar antes de generar.')
-    # Checks hash if files have changed; _prepare does not silently change variant.
+    # The API requires explicit license authorization before submitting this job.
+    # Preparation handles missing runtime/weights, existing files and cancellation;
+    # it never changes the requested variant or bypasses integrity checks.
+    job.log('H3: preparando automáticamente la variante seleccionada si faltan componentes; sigue el progreso en el monitor.')
     binary = _prepare(model_id, job)
+    job.check_cancelled()
     if memory_manager.get_slot('video'):
         memory_manager.unload_slot('video')
     memory_manager.ensure_capacity(ram_gb=4, vram_gb=2, stage='Inicio H3: mínimo real y reservas', job=job)
@@ -197,10 +197,11 @@ def generate(model_id: str, *, prompt: str, image: Path | None, end: Path | None
         with tempfile.TemporaryFile() as log:
             proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             guard = common._ComfyMemoryGuard(proc, job, label='H3')
+            inference_started = time.monotonic()
             try:
                 while proc.poll() is None:
                     job.check_cancelled(); guard.raise_if_stopped()
-                    if time.monotonic() - started > 10800:
+                    if time.monotonic() - inference_started > 10800:
                         raise TimeoutError('H3_TIMEOUT: tiempo máximo superado')
                     job.heartbeat(step='Generando H3: proceso aislado en ejecución')
                     time.sleep(1)

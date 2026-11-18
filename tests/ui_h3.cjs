@@ -60,10 +60,15 @@ async function until(test, label) {
   await uploadH3('h3-upload-start', 'h3-start', 'replacement.png');
   if ($('h3-end').value) throw Error('Start upload assigned end');
   await uploadH3('h3-upload-end', 'h3-end', 'end.png');
-  $('h3-prompt').value = 'una escena'; $('h3-generate').click();
+  $('h3-prompt').value = 'una escena';
+  w.confirm = () => false;
+  $('h3-generate').click();
+  if (calls.some(c => c.path === '/api/video/h3/generate')) throw Error('Generation did not require download confirmation');
+  w.confirm = () => true;
+  $('h3-generate').click();
   await until(() => calls.some(c => c.path === '/api/video/h3/generate'), 'H3 generate');
   body = JSON.parse(calls.find(c => c.path === '/api/video/h3/generate').body);
-  if (body.image_rel !== 'uploads/replacement.png' || body.end_image_rel !== 'uploads/end.png' || body.frames !== 22 || !body.offload || !body.license_authorized) throw Error('Wrong H3 inputs');
+  if (body.image_rel !== 'uploads/replacement.png' || body.end_image_rel !== 'uploads/end.png' || body.frames !== 22 || !body.offload || !body.license_authorized || !body.download_authorized) throw Error('Wrong H3 inputs');
   if (errors.length) throw Error(errors.join('; '));
   w.close(); console.log('H3 UI prepare, license and frames: OK');
 })().catch(e => { console.error(e); process.exit(1); });
