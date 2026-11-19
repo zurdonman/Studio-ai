@@ -12,6 +12,7 @@ import json
 import math
 import os
 import queue
+import re
 import threading
 import uuid
 import shutil
@@ -56,7 +57,7 @@ def _stop(proc: subprocess.Popen) -> None:
             pass
 
 
-def _command(args: list[str], job: Any, *, stage: str, timeout: int, env: dict | None = None, cwd: str | None = None, guard_label: str | None = None) -> None:
+def _command(args: list[str], job: Any, *, stage: str, timeout: int, env: dict | None = None, cwd: str | None = None, guard_label: str | None = None, build_progress: bool = False) -> None:
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryFile() as log:
         proc = subprocess.Popen(args, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -75,7 +76,11 @@ def _command(args: list[str], job: Any, *, stage: str, timeout: int, env: dict |
                     offset = log.tell()
                     progress_lines = [line for line in lines if line.startswith("GGUF_PROGRESS:")]
                     visible = [line for line in lines if line.startswith("[") and ("Preparando" in line or "Verificado" in line)]
-                    if progress_lines:
+                    build_lines = [line for line in lines if re.match(r'^\[\s*\d+%\] ', line)] if build_progress else []
+                    if build_lines:
+                        match = re.match(r'^\[\s*(\d+)%\]', build_lines[-1])
+                        job.heartbeat(step=f'{stage}: compilación {match.group(1)}% (no es el progreso total)')
+                    elif progress_lines:
                         try:
                             p = json.loads(progress_lines[-1].split(":", 1)[1])
                             pct = 100 * p["done"] / p["total"] if p["total"] else 0

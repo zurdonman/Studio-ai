@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,8 @@ from studio.config import DATA_ROOT, TEMP_DIR, VIDEOS_OUT_DIR
 from studio.engines import ltx_gguf_backend as common
 from studio.engines.ffmpeg_utils import get_ffmpeg_bin, probe_media_info, verify_image_file
 from studio.memory_manager import memory_manager, serialized_gpu_operation
+from studio.jobs import JobCancelledError
+from studio.memory_policy import MemoryPressureError
 
 RUNTIME_REV = '27b9ddca07be0c25ace3d1a560bcbad281eb660d'
 REV = 'babc040eff0084465460ead58fdb8ec44296f8dd'
@@ -65,6 +68,103 @@ def fingerprint(model_id: str) -> tuple | None:
         return None
 
 
+def _cuda_env() -> dict:
+    """Keep host settings and add typical Colab/toolkit and NVIDIA wheel library paths."""
+    env = os.environ.copy()
+    paths = [x for x in env.get('LD_LIBRARY_PATH', '').split(os.pathsep) if x]
+    roots = [Path('/usr/local/cuda'), Path('/usr/local/cuda-12'), Path('/usr/local/cuda-13')]
+    for key in ('CUDA_HOME', 'CUDA_PATH'):
+        if env.get(key):
+            roots.append(Path(env[key]))
+    candidates = [root / 'lib64' for root in roots]
+    for entry in sys.path:
+        if entry:
+            candidates.extend((Path(entry) / 'nvidia' / 'cuda_runtime' / 'lib',
+                               Path(entry) / 'nvidia' / 'cublas' / 'lib'))
+    for path in candidates:
+        if path.is_dir() and str(path) not in paths:
+            paths.append(str(path))
+    if paths:
+        env['LD_LIBRARY_PATH'] = os.pathsep.join(paths)
+    return env
+
+
+def _cuda_major(env: dict) -> str | None:
+    # Check actual loadable libraries and runtime version, not the maximum CUDA
+    # version printed by nvidia-smi. The release was linked with CUDA 12.8 / 13.3.
+    if sys.platform != 'linux' or platform.machine().lower() not in ('x86_64', 'amd64'):
+        return None
+    probe = '''import ctypes, sys\nm = sys.argv[1]\nr = ctypes.CDLL("libcudart.so." + m)\nctypes.CDLL("libcublas.so." + m)\nctypes.CDLL("libcublasLt.so." + m)\nv = ctypes.c_int()\nif r.cudaRuntimeGetVersion(ctypes.byref(v)) != 0 or v.value < int(sys.argv[2]): sys.exit(1)\n'''
+    for major, minimum in (('12', '12080'), ('13', '13030')):
+        try:
+            result = subprocess.run([sys.executable, '-c', probe, major, minimum], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            if result.returncode == 0:
+                return major
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return None
+
+
+def _install_prebuilt(job: Any) -> Path | None:
+    from studio.engines.minimax_h3_prebuilt import ASSETS, REVISION
+    env = _cuda_env()
+    major = _cuda_major(env)
+    if major is None:
+        job.log('H3: bibliotecas CUDA 12.8+ o 13.3+ del precompilado no detectadas; se intentará compilar el motor.', level='warning')
+        return None
+    dest = ROOT / f'prebuilt-cuda{major}'
+    binary = dest / 'sd-cli'
+    marker = dest / 'studio-ready.json'
+    expected = {'revision': REVISION, 'cuda_major': major, 'sha256': ASSETS[major][1]}
+    if dest.exists():
+        try:
+            if dest.is_symlink() or json.loads(marker.read_text()) != expected or not binary.is_file():
+                raise ValueError('carpeta sin marcador válido')
+            common._command([str(binary), '--help'], job, stage='Comprobando runtime H3 precompilado', timeout=90, env=env)
+            job.log(f'H3: reutilizando runtime precompilado CUDA {major}; sin compilación.')
+            return binary
+        except (JobCancelledError, MemoryPressureError, MemoryError):
+            raise
+        except (OSError, ValueError, RuntimeError, TimeoutError):
+            job.check_cancelled()
+            job.log('H3: el runtime precompilado guardado no está utilizable; se intentará compilar sin sobrescribirlo.', level='warning')
+            return None
+    phase = 'descarga o verificación'
+    try:
+        job.check_cancelled()
+        job.log(f'H3: descargando runtime precompilado CUDA {major} de Unsloth y verificando SHA-256; no es necesario compilar.')
+        with tempfile.TemporaryDirectory(prefix='.h3-prebuilt-', dir=ROOT) as temp:
+            repo = str(Path(__file__).resolve().parents[2])
+            child_env = env.copy()
+            child_env['PYTHONPATH'] = repo + os.pathsep + child_env.get('PYTHONPATH', '')
+            common._command([sys.executable, '-m', 'studio.engines.minimax_h3_prebuilt', major, temp], job,
+                            stage='Descargando y verificando runtime H3 precompilado', timeout=1800, env=child_env, cwd=repo)
+            staged = Path(temp) / 'bundle'
+            phase = 'comprobación del ejecutable'
+            common._command([str(staged / 'sd-cli'), '--help'], job, stage='Comprobando runtime H3 precompilado', timeout=90, env=env)
+            job.check_cancelled()
+            (staged / 'studio-ready.json').write_text(json.dumps(expected), encoding='utf8')
+            os.rename(staged, dest)
+        job.log(f'H3: runtime precompilado CUDA {major} preparado y verificado; sin compilación.')
+        return binary
+    except (JobCancelledError, MemoryPressureError, MemoryError):
+        raise
+    except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
+        job.check_cancelled()
+        detail = str(exc)
+        if 'H3_PREBUILT_INVALID' in detail or 'H3_PREBUILT_ARCHIVE_INVALID' in detail:
+            reason = 'integridad o contenido incorrectos'
+        elif 'URLError' in detail or 'HTTPError' in detail:
+            reason = 'error de red o acceso a GitHub'
+        elif isinstance(exc, TimeoutError):
+            reason = 'tiempo agotado'
+        else:
+            reason = type(exc).__name__
+        job.log(f'H3: falló la {phase} del precompilado ({reason}); se intentará compilar el motor.', level='warning')
+        return None
+
+
 def _install(job: Any) -> Path:
     source = ROOT / 'source'
     binary = ROOT / 'build' / 'bin' / 'sd-cli'
@@ -75,6 +175,10 @@ def _install(job: Any) -> Path:
     except (OSError, ValueError):
         pass
     ROOT.mkdir(parents=True, exist_ok=True)
+    prebuilt = _install_prebuilt(job)
+    if prebuilt is not None:
+        return prebuilt
+    job.log('H3: iniciando compilación CUDA local; puede tardar varios minutos.')
     for executable in ('git', 'cmake', 'nvcc'):
         if not shutil.which(executable):
             raise RuntimeError(f'H3_BUILD_TOOL_MISSING: falta {executable}; instala la herramienta en el entorno antes de preparar H3. No se han descargado pesos.')
@@ -106,7 +210,7 @@ def _install(job: Any) -> Path:
                      '-DSD_CUDA=ON', '-DSD_WEBP=OFF', '-DSD_WEBM=OFF', '-DSD_CUDA_CUTLASS_PATH:PATH=',
                      '-DCMAKE_CUDA_ARCHITECTURES=89'], job, stage='Configurando H3 CUDA (Ada/L4)', timeout=300)
     common._command(['cmake', '--build', str(ROOT / 'build'), '--target', 'sd-cli', '--parallel', '1'],
-                    job, stage='Compilando H3 CUDA (puede tardar)', timeout=3600, guard_label='compilación H3')
+                    job, stage='Compilando H3 CUDA (puede tardar)', timeout=3600, guard_label='compilación H3', build_progress=True)
     if not binary.is_file():
         raise RuntimeError('H3_RUNTIME_MISSING: no se compiló sd-cli')
     common._command([str(binary), '--help'], job, stage='Comprobando ejecutable H3', timeout=90)
@@ -195,7 +299,8 @@ def generate(model_id: str, *, prompt: str, image: Path | None, end: Path | None
         avi = Path(temp) / 'clip.avi'
         cmd = build_command(binary, model_id, prompt, width, height, frames, steps, actual_seed, avi, image, end, offload)
         with tempfile.TemporaryFile() as log:
-            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            env = _cuda_env() if binary.parent.name.startswith('prebuilt-cuda') else None
+            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)
             guard = common._ComfyMemoryGuard(proc, job, label='H3')
             inference_started = time.monotonic()
             try:

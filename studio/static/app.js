@@ -2552,7 +2552,7 @@
     }
     $("h3-prepare").addEventListener("click", async () => {
       if (!$("h3-license").checked) return feedback("Confirma que tienes derecho a usar el modelo en tu territorio antes de descargarlo.", true);
-      if (!confirm("Se compilará el motor CUDA L4 y se descargarán y verificarán los componentes de la variante elegida. Revisa la licencia y el espacio disponible. ¿Continuar?")) return;
+      if (!confirm("Se descargará un motor CUDA precompilado si es compatible; de lo contrario se compilará. También se descargarán y verificarán los componentes necesarios de la variante elegida. Revisa la licencia y el espacio disponible. ¿Continuar?")) return;
       try {
         const result = await api("/api/video/h3/prepare", {method:"POST", body:JSON.stringify({model_id:$("h3-model").value, license_authorized:true})});
         feedback("Preparación en cola. Sigue el proceso y sus errores en el monitor; después pulsa Generar."); watchJob(result.job);
@@ -2567,7 +2567,7 @@
       if (!data.prompt.trim()) return feedback("Escribe la descripción del plano.", true);
       if (data.end_image_rel && !data.image_rel) return feedback("Para usar un fotograma final selecciona también uno inicial.", true);
       const size = data.model_id === "h3-fl2va-q4" ? "~33 GiB" : "~25,1 GiB";
-      if (!confirm(`Si faltan componentes de H3, se compilará el motor CUDA y se descargarán y verificarán archivos (${size} en total, más espacio adicional). ¿Autorizar y generar?`)) return;
+      if (!confirm(`Si faltan componentes de H3, se descargará un motor precompilado compatible o se compilará, y se descargarán y verificarán archivos (${size} en total, más espacio adicional). ¿Autorizar y generar?`)) return;
       data.download_authorized = true;
       try { const result = await api("/api/video/h3/generate", {method:"POST", body:JSON.stringify(data)});
         feedback("En cola. Si H3 no está preparado, se instalará y descargará automáticamente antes de generar. Sigue el monitor; el clip aparecerá en Vídeo."); watchJob(result.job);
