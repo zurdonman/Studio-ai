@@ -20,6 +20,8 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response, Streami
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from studio.engines.models_3d import MODELS_OUT_DIR
+from studio.engines.scene_jobs import WORLDS_OUT_DIR
 from studio.catalog import (
     COLAB_GPU_PROFILES,
     catalog_manager,
@@ -296,7 +298,7 @@ def _resolve_media_rel(rel: Optional[str]) -> Optional[Path]:
 def _count_unexported_outputs() -> int:
     last_ts = _export_tracker["last_export_ts"]
     count = 0
-    for folder in (IMAGES_OUT_DIR, VIDEOS_OUT_DIR, AUDIO_OUT_DIR, MONTAGES_OUT_DIR):
+    for folder in (IMAGES_OUT_DIR, VIDEOS_OUT_DIR, AUDIO_OUT_DIR, MONTAGES_OUT_DIR, MODELS_OUT_DIR, WORLDS_OUT_DIR):
         if not folder.exists():
             continue
         for fp in folder.iterdir():
@@ -313,6 +315,8 @@ def _collect_assets() -> Dict[str, List[Dict[str, Any]]]:
         "videos": [],
         "audio": [],
         "montages": [],
+        "models3d": [],
+        "worlds": [],
     }
 
     if UPLOADS_DIR.exists():
@@ -347,6 +351,8 @@ def _collect_assets() -> Dict[str, List[Dict[str, Any]]]:
         ("videos", VIDEOS_OUT_DIR, "outputs/videos", "video"),
         ("audio", AUDIO_OUT_DIR, "outputs/audio", "audio"),
         ("montages", MONTAGES_OUT_DIR, "outputs/montages", "video"),
+        ("models3d", MODELS_OUT_DIR, "outputs/3d", "3d"),
+        ("worlds", WORLDS_OUT_DIR, "outputs/worlds", "world"),
     ]
     for key, folder, rel_prefix, default_type in mapping:
         if not folder.exists():
@@ -1623,16 +1629,131 @@ def api_mix_master(req: AudioMixMasterReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict()}
 
 
+class Model3DReq(BaseModel):
+    engine: Literal["sf3d", "triposr", "hunyuan2", "hunyuanmini", "hunyuan21", "trellis2", "idol"]
+    image_rel: str = Field(min_length=1, max_length=1024)
+    texture_resolution: Literal[512, 1024, 2048] = 1024
+    variant: Literal["base", "fast", "turbo", "q4", "q8"] = "base"
+    texture: bool = True
+    steps: int = Field(default=30, ge=1, le=100)
+    seed: int = Field(default=42, ge=0, le=4294967295)
+    idol_mode: Literal["synthetic", "real"] = "synthetic"
+    license_accepted: bool = False
+
+
+class World3DReq(BaseModel):
+    engine: Literal["sharp", "worldgen", "mirror", "mirror2", "world1", "world2", "worldsplat"]
+    images_rel: List[str] = Field(default_factory=list, max_length=17)
+    prompt: str = Field(default="", max_length=2000)
+    seed: int = Field(default=42, ge=0, le=4294967295)
+    low_vram: bool = True
+    mesh: bool = False
+    fp8: bool = False
+    license_accepted: bool = False
+
+
+class SceneSetupReq(BaseModel):
+    engine: Literal["sf3d", "triposr", "hunyuan2", "hunyuanmini", "hunyuan21", "trellis2", "idol", "sharp", "worldgen", "mirror", "mirror2", "world1", "world2", "worldsplat"]
+    variant: Literal["base", "fast", "turbo", "q4", "q8"] = "base"
+    texture: bool = False
+    license_accepted: bool = False
+
+
+@app.post("/api/3d/prepare")
+def api_scene_prepare(req: SceneSetupReq) -> Dict[str, Any]:
+    from studio.engines.scene_setup import AUTOMATED, runtime_key, prepare
+    if not req.license_accepted:
+        raise HTTPException(status_code=400, detail="Revisa y acepta las licencias de todos los componentes antes de instalar.")
+    key = runtime_key(req.engine, req.variant)
+    if key not in AUTOMATED:
+        raise HTTPException(status_code=400, detail="La preparación automática de este motor o variante todavía no está disponible; consulta la configuración manual en la documentación.")
+    variants = ("base", "fast", "turbo") if req.engine in ("hunyuan2", "hunyuanmini") else ("q4", "q8") if key == "trellisgguf" else ("base",)
+    if req.variant not in variants:
+        raise HTTPException(status_code=400, detail="Variante incompatible con este motor.")
+    job = job_manager.submit(kind="scene_setup", title=f"Preparar 3D · {req.engine}",
+        fn=lambda j: prepare(req.engine, req.variant, req.texture, job=j))
+    return {"job": job.to_dict(include_logs=True)}
+
+
+def _scene_images(rels: List[str]) -> List[Path]:
+    paths = []
+    for rel in rels:
+        if len(rel) > 1024: raise HTTPException(status_code=400, detail="Ruta demasiado larga.")
+        path = _resolve_media_rel(rel)
+        if not path or not path.is_file() or path.parent not in (UPLOADS_DIR.resolve(), IMAGES_OUT_DIR.resolve()) or path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+            raise HTTPException(status_code=400, detail="Selecciona imágenes subidas o de la biblioteca.")
+        paths.append(path)
+    return paths
+
+
 @app.get("/api/3d/catalog")
 def api_3d_catalog() -> Dict[str, Any]:
-    from studio.scene_catalog import CATALOG_3D
-    return {"models": CATALOG_3D}
+    from studio.catalog_3d import catalog
+    from studio.engines.scene_jobs import runtime_status
+    models = catalog()
+    for model in models:
+        if model['id'] in ('trellis2', 'hunyuan2', 'hunyuanmini'):
+            variants = ('base', 'q4', 'q8') if model['id'] == 'trellis2' else ('base', 'fast', 'turbo')
+            model['variant_status'] = {v: runtime_status(model['id'], v) for v in variants}
+    return {"models": models}
+
+
+@app.post("/api/3d/generate")
+def api_3d_generate(req: Model3DReq) -> Dict[str, Any]:
+    from studio.engines.models_3d import generate, runtime_status
+    from studio.engines.scene_jobs import generate as generate_scene, runtime_status as scene_status
+    if not req.license_accepted:
+        raise HTTPException(status_code=400, detail="Revisa y acepta las licencias aplicables al modelo y dependencias.")
+    path = _scene_images([req.image_rel])[0]
+    if req.engine in ("sf3d", "triposr"):
+        if req.variant != "base": raise HTTPException(status_code=400, detail="Variante no disponible para este adaptador.")
+        status = runtime_status(req.engine)
+        fn = lambda j: generate(req.engine, path, req.texture_resolution, job=j)
+    else:
+        allowed = {"hunyuan2": ("base", "fast", "turbo"), "hunyuanmini": ("base", "fast", "turbo"),
+                   "hunyuan21": ("base",), "trellis2": ("base", "q4", "q8"), "idol": ("base",)}
+        if req.variant not in allowed[req.engine]: raise HTTPException(status_code=400, detail="Variante incompatible con este motor.")
+        status = scene_status(req.engine, req.variant)
+        fn = lambda j: generate_scene(req.engine, [path], "", req.variant, req.texture, req.texture_resolution, req.seed,
+                                      req.steps, True, False, req.idol_mode, False, job=j)
+    if not status['configured']:
+        if not status.get('auto_setup') or status.get('manual_override'):
+            raise HTTPException(status_code=400, detail="Runtime 3D sin configurar: " + ", ".join(status['missing']) + ". Consulta docs/MODELOS_3D.md.")
+        from studio.engines.scene_setup import prepare
+        run = fn
+        def fn(j):
+            prepare(req.engine, req.variant, req.texture, job=j)
+            return run(j)
+    job = job_manager.submit(kind="model3d", title=f"3D · {req.engine} ({path.name})", fn=fn)
+    return {"job": job.to_dict(include_logs=True)}
 
 
 @app.get("/api/worlds/catalog")
 def api_worlds_catalog() -> Dict[str, Any]:
-    from studio.scene_catalog import WORLDS
-    return {"models": WORLDS}
+    from studio.catalog_worlds import catalog
+    return {"models": catalog()}
+
+
+@app.post("/api/worlds/generate")
+def api_worlds_generate(req: World3DReq) -> Dict[str, Any]:
+    from studio.engines.scene_jobs import generate, runtime_status
+    if not req.license_accepted: raise HTTPException(status_code=400, detail="Revisa y acepta las licencias del motor y sus dependencias.")
+    images = _scene_images(req.images_rel)
+    if req.engine in ("sharp", "mirror", "mirror2", "world2") and not images: raise HTTPException(status_code=400, detail="Este motor necesita al menos una imagen.")
+    if req.engine in ("sharp", "worldgen", "world1", "world2") and len(images) > 1: raise HTTPException(status_code=400, detail="Este motor acepta como máximo una imagen.")
+    if req.engine in ("worldgen", "world1", "worldsplat") and not images and not req.prompt.strip(): raise HTTPException(status_code=400, detail="Escribe una descripción o selecciona una imagen compatible.")
+    if req.engine == "worldsplat" and (images or not req.prompt.strip()): raise HTTPException(status_code=400, detail="WorldSplat usa solo texto en esta receta.")
+    status = runtime_status(req.engine)
+    if not status['configured'] and (not status.get('auto_setup') or status.get('manual_override')):
+        raise HTTPException(status_code=400, detail="Runtime sin configurar: " + ", ".join(status['missing']) + ". Consulta docs/MUNDOS_3D.md.")
+    def run_world(j):
+        if not status['configured']:
+            from studio.engines.scene_setup import prepare
+            prepare(req.engine, 'base', False, job=j)
+        return generate(req.engine, images, req.prompt, 'base', False, 1024, req.seed, 30,
+                        req.low_vram, req.mesh, 'synthetic', req.fp8, job=j)
+    job = job_manager.submit(kind="world3d", title=f"Mundo 3D · {req.engine}", fn=run_world)
+    return {"job": job.to_dict(include_logs=True)}
 
 
 class Wan22I2VReq(BaseModel):
@@ -2295,6 +2416,8 @@ def api_export_zip() -> StreamingResponse:
             ("videos", VIDEOS_OUT_DIR),
             ("voces_audio", AUDIO_OUT_DIR),
             ("montajes_mp4", MONTAGES_OUT_DIR),
+            ("modelos_3d", MODELS_OUT_DIR),
+            ("mundos_3d", WORLDS_OUT_DIR),
         ):
             if not folder.exists():
                 continue

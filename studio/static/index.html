@@ -143,9 +143,9 @@
       <button class="tab-btn" data-tab="tab-video">
         <span class="step-num">2</span> Vídeo · Clips IA / FFmpeg
       </button>
+      <button class="tab-btn" data-tab="tab-community">🧩 Herramientas de vídeo</button>
       <button class="tab-btn" data-tab="tab-3d">🧊 Modelos 3D</button>
       <button class="tab-btn" data-tab="tab-worlds">🌍 Mundos 3D</button>
-      <button class="tab-btn" data-tab="tab-community">🧩 Herramientas de vídeo</button>
       <button class="tab-btn" data-tab="tab-tts">
         <span class="step-num">3</span> Estudio de Voz
       </button>
@@ -843,16 +843,53 @@
 
       <!-- ==================== PESTAÑA 3: VOCES Y AUDIO (TTS) ==================== -->
       <section id="tab-3d" class="view-panel">
-        <div class="card form-stack"><h2>🧊 Imagen a 3D · catálogo y variantes</h2>
-          <p>Menú informativo: estos modelos aún no están integrados para ejecutar desde este panel. Hablaremos de su incorporación por separado. Revisa sus licencias y restricciones territoriales.</p>
+        <div class="card form-stack">
+          <div class="card-header"><h2>🧊 Imagen a 3D local</h2></div>
+          <p>Convierte una imagen en una malla descargable o, con Idol, un splat PLY. Estas rutas experimentales usan entornos aislados, automáticos o manuales según el motor, no ComfyUI; requieren GPU NVIDIA con medición de VRAM y no se ha validado inferencia con GPU. Configuración: <code>docs/MODELOS_3D.md</code>.</p>
+          <p><strong>Importante:</strong> Las licencias Hunyuan 3D 2.0/2mini y 2.1 excluyen UE, Reino Unido y Corea del Sur. No las uses sin derechos adicionales aplicables; revisa los términos antes de ejecutar.</p>
+          <label class="field-label" for="model3d-image">Imagen de referencia</label>
+          <div class="row-gap"><select id="model3d-image" class="flex-1"></select><label class="btn btn-secondary btn-sm file-btn">Subir imagen<input id="model3d-upload" type="file" accept="image/*" hidden /></label></div>
+          <label class="field-label" for="model3d-engine">Motor experimental</label>
+          <select id="model3d-engine"><option value="sf3d">Stable Fast 3D · GLB texturizado</option><option value="triposr">TripoSR · GLB con color de vértice</option><option value="hunyuan2">Hunyuan3D 2.0</option><option value="hunyuanmini">Hunyuan3D 2mini</option><option value="hunyuan21">Hunyuan3D 2.1</option><option value="trellis2">TRELLIS.2-4B</option><option value="idol">Idol · splat PLY</option></select>
+          <p id="model3d-runtime" class="muted" role="status">Consultando configuración…</p>
+          <label class="field-label" for="model3d-variant">Variante / runtime</label><select id="model3d-variant"><option value="base">Oficial / base</option></select>
+          <label class="check-row"><input type="checkbox" id="model3d-texture" checked /> Hunyuan: ejecutar también Paint (más VRAM y dependencias)</label>
+          <div class="params-grid-2"><div><label class="field-label" for="model3d-steps">Pasos (Hunyuan / Idol)</label><input id="model3d-steps" type="number" min="1" max="100" value="30" /></div><div><label class="field-label" for="model3d-seed">Semilla</label><input id="model3d-seed" type="number" min="0" max="4294967295" value="42" /></div></div>
+          <label class="field-label" for="model3d-idol-mode">Idol: tipo de imagen</label><select id="model3d-idol-mode"><option value="synthetic">Render / imagen generada</option><option value="real">Fotografía</option></select>
+          <label class="field-label" for="model3d-resolution">Resolución de textura (SF3D / TRELLIS.2)</label>
+          <select id="model3d-resolution"><option value="512">512</option><option value="1024" selected>1024</option><option value="2048">2048</option></select>
+          <label class="check-row"><input type="checkbox" id="model3d-license" /> He revisado las licencias y tengo derecho a usar el modelo y sus dependencias.</label>
+          <p class="muted">Si pulsas Generar sin haber preparado un motor compatible, Studio lo preparará primero. Preparar descarga código, dependencias y algunos pesos; puede requerir compilación CUDA y mucho espacio. Pesos gated requieren acceso y token HF; algunos se descargan al generar.</p>
+          <button class="btn" type="button" id="model3d-prepare">Preparar motor seleccionado</button>
+          <button class="btn btn-primary" type="button" id="model3d-run">Generar 3D experimental</button>
+          <p id="model3d-feedback" class="muted" role="status">El progreso y la cancelación aparecen en el monitor. Los resultados se guardan en esta biblioteca y en el ZIP.</p>
+          <h3>Resultados 3D</h3><div id="model3d-results" class="form-stack muted">Aún no hay modelos.</div>
+        </div>
+        <div class="card form-stack"><h2>Catálogo 3D y variantes</h2>
+          <p class="muted">Adaptadores experimentales: la instalación puede ser automática o manual según la variante. Consulta licencias y restricciones territoriales; no se ha validado inferencia GPU.</p>
           <div id="model3d-catalog" class="form-stack">Cargando catálogo…</div>
         </div>
       </section>
+
       <section id="tab-worlds" class="view-panel">
-        <div class="card form-stack"><h2>🌍 Mundos 3D · motores y formatos</h2>
-          <p>Menú informativo: generación y reconstrucción de mundos aún no están integradas en este panel. Hablaremos de su incorporación por separado. Revisa las licencias de cada componente.</p>
-          <div id="world-catalog" class="form-stack">Cargando catálogo…</div>
+        <div class="card form-stack"><h2>🌍 Mundos y escenarios 3D</h2>
+          <p>Rutas experimentales con entornos independientes; SHARP y ambas versiones de WorldMirror admiten preparación automática experimental; los demás requieren instalación manual. HY-World completo requiere un servicio vLLM externo de confianza que recibe datos de la escena. Sin validación de inferencia GPU; la primera ejecución puede descargar varios modelos. Lee <code>docs/MUNDOS_3D.md</code>.</p>
+          <p><strong>Licencias:</strong> Apple SHARP es para investigación no comercial. HunyuanWorld/Mirror y HY-World 2.0 excluyen UE, Reino Unido y Corea del Sur. WorldGen y WorldSplat tienen dependencias con términos propios.</p>
+          <label class="field-label" for="world-engine">Motor</label><select id="world-engine"><option value="sharp">Apple SHARP · foto a splat</option><option value="worldgen">WorldGen · texto/imagen a mundo</option><option value="mirror">HunyuanWorld-Mirror · reconstrucción</option><option value="mirror2">WorldMirror 2.0 · reconstrucción</option><option value="world2">HY-World 2.0 · generación completa desde panorama</option><option value="world1">HunyuanWorld 1.0 · capas</option><option value="worldsplat">WorldSplat · texto a splat</option></select>
+          <p id="world-runtime" class="muted" role="status">Consultando configuración…</p>
+          <label class="field-label" for="world-images">Imágenes de referencia (Ctrl/Cmd para varias; solo Mirror admite varias)</label><select id="world-images" multiple size="4"></select>
+          <button class="btn btn-secondary btn-sm" type="button" id="world-clear">Quitar selección de imágenes</button>
+          <label class="btn btn-secondary btn-sm file-btn">Subir imagen<input id="world-upload" type="file" accept="image/*" hidden /></label>
+          <label class="field-label" for="world-prompt">Descripción de la escena (WorldGen, World 1.0 y WorldSplat)</label><textarea id="world-prompt" rows="3"></textarea>
+          <div class="params-grid-2"><div><label class="field-label" for="world-seed">Semilla (solo motores que la admiten)</label><input id="world-seed" type="number" min="0" max="4294967295" value="42" /></div><div><label class="check-row"><input type="checkbox" id="world-low-vram" checked /> WorldGen low VRAM</label><label class="check-row"><input type="checkbox" id="world-mesh" /> WorldGen: malla en lugar de splat</label><label class="check-row"><input type="checkbox" id="world-fp8" /> World 1.0 FP8</label></div></div>
+          <label class="check-row"><input type="checkbox" id="world-license" /> He revisado y acepto las licencias aplicables y tengo derecho a usar los componentes.</label>
+          <p class="muted">Al generar, Studio preparará primero los motores compatibles si es necesario. Preparar puede descargar y compilar dependencias grandes. SHARP usa Python 3.13 y descarga sus pesos al generar; WorldMirror necesita Python 3.10 y WorldMirror 2.0 Python 3.11; ambas necesitan CUDA compatible. Revisa acceso, licencias y espacio.</p>
+          <button class="btn" type="button" id="world-prepare">Preparar motor seleccionado</button>
+          <button class="btn btn-primary" type="button" id="world-run">Generar o reconstruir mundo experimental</button>
+          <p id="world-feedback" class="muted" role="status">Consulta el monitor para el progreso y cancelación.</p>
+          <h3>Resultados</h3><div id="world-results" class="form-stack muted">Aún no hay mundos.</div>
         </div>
+        <div class="card form-stack"><h2>🌍 Mundos 3D · motores y formatos</h2><p class="muted">Adaptadores experimentales, con preparación automática o manual según el motor. Sin inferencia GPU validada; revisa las licencias antes de elegir.</p><div id="world-catalog" class="form-stack">Cargando catálogo…</div><p>Los pases depth y normales son estimaciones, no garantizan coincidencia exacta en un editor de imagen. Para composición 3D se necesita un editor externo como Blender.</p></div>
       </section>
 
       <section id="tab-community" class="view-panel">

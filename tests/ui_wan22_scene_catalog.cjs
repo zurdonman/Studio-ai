@@ -50,10 +50,10 @@ async function until(test, label) {
   await until(() => $('select-video-model').value === id, 'model ready');
   w.document.querySelector('[data-tab="tab-3d"]').click();
   await until(() => $('model3d-catalog').textContent.includes('Stable Fast 3D'), '3D catalogue');
-  if ($('model3d-run') && !$('tab-3d').querySelector('.card[hidden]')) throw Error('3D generation must be hidden');
+  if (!$('model3d-run') || $('model3d-run').closest('[hidden]')) throw Error('3D generation must be available');
   w.document.querySelector('[data-tab="tab-worlds"]').click();
   await until(() => $('world-catalog').textContent.includes('Apple SHARP'), 'world catalogue');
-  if ($('world-run') && !$('tab-worlds').querySelector('.card[hidden]')) throw Error('world generation must be hidden');
+  if (!$('world-run') || $('world-run').closest('[hidden]')) throw Error('world generation must be available');
   Object.defineProperty($('wan22-upload'), 'files', {configurable:true,value:[new w.File(['x'],'start.png',{type:'image/png'})]});
   $('wan22-upload').dispatchEvent(new w.Event('change'));
   await until(() => $('wan22-image').value === 'uploads/start.png', 'wan upload');
@@ -64,5 +64,5 @@ async function until(test, label) {
   const body=JSON.parse(calls.find(c => c.path === '/api/video/wan22-i2v').body);
   if (body.quant !== 'fp8' || body.image_rel !== 'uploads/start.png' || body.steps !== 40 || body.frames !== 49 || !body.install_accepted) throw Error('bad Wan request');
   if (errors.length) throw Error(errors.join('; '));
-  w.close(); console.log('Wan I2V UI and informational 3D menus: OK');
+  w.close(); console.log('Wan I2V UI and experimental 3D menus: OK');
 })().catch(e => { console.error(e); process.exit(1); });

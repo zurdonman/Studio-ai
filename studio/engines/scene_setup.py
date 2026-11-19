@@ -1,0 +1,245 @@
+"""Per-engine opt-in installers. Runs only pinned, predefined recipes.
+
+Nothing from an HTTP client is interpreted as shell or a package/source path.
+The managed venv is private; an interrupted or failed install is never marked ready.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+import threading
+from pathlib import Path
+
+from studio.config import DATA_ROOT
+from studio.engines import ltx_gguf_backend as common
+
+ROOT = DATA_ROOT / 'runtimes' / 'scene3d'
+WEIGHTS = DATA_ROOT / 'models' / 'scene3d'
+SETUP_VERSION = 2
+_lock = threading.Lock()
+
+# Fixed revisions inspected in the corresponding upstream projects.
+REPOS = {
+ 'sf3d': ('Stability-AI/stable-fast-3d','ff21fc491b4dc5314bf6734c7c0dabd86b5f5bb2'),
+ 'triposr': ('VAST-AI-Research/TripoSR','107cefdc244c39106fa830359024f6a2f1c78871'),
+ 'idol': ('speridlabs/idol-sdk','4702a7f00850e34b6e83a2170cc123c3e9570744'),
+ 'sharp': ('apple-aiml-research/ml-sharp','aed6527499ef91cba3b54c18d49a870f25947190'),
+ 'hunyuan2': ('Tencent-Hunyuan/Hunyuan3D-2','f8db63096c8282cb27354314d896feba5ba6ff8a'),
+ 'hunyuanmini': ('Tencent-Hunyuan/Hunyuan3D-2','f8db63096c8282cb27354314d896feba5ba6ff8a'),
+ 'trellisgguf': ('pwilkin/trellis.cpp','6851891d706e2e26a8bb9dd99f28de851d68b64d'),
+ 'mirror2': ('Tencent-Hunyuan/HY-World-2.0','df9988efb87bfc0f4947eb3889411cf957478b06'),
+ 'mirror': ('Tencent-Hunyuan/HunyuanWorld-Mirror','c61300e47ce06db2f02c8e2551aae68be7ae3a0b'),
+}
+# Some stacks have external services/unresolved native/model dependencies; do not
+# advertise them as automatically prepared until an end-to-end recipe exists.
+AUTOMATED = {'sf3d', 'triposr', 'idol', 'sharp', 'hunyuan2', 'hunyuanmini', 'trellisgguf', 'mirror2', 'mirror'}
+HF_REVISIONS = {
+ 'sf3d': ('stabilityai/stable-fast-3d','f0c9a8ffd62cb1bbc8a7a53c9f87a0be1b6be778'),
+ 'triposr': ('stabilityai/TripoSR','5b521936b01fbe1890f6f9baed0254ab6351c04a'),
+ 'idol': ('speridlabs/idol','2731c2291fc65a797c5cb627a5e5526fc1490902'),
+ 'hunyuan2': ('tencent/Hunyuan3D-2','9cd649ba6913f7a852e3286bad86bfa9a2d83dcf'),
+ 'hunyuanmini': ('tencent/Hunyuan3D-2mini','f90a0f7df7d5e6f71109cf333f6a95a0ae3194a6'),
+ 'trellisgguf': ('ilintar/trellis2-gguf','a57397bd3d351599d9729fc144b3f87c3f87d65b'),
+ 'mirror2': ('tencent/HY-World-2.0','d78a16c91c7a56488894a1c8de4f5c7cc28aa8b0'),
+ 'mirror': ('tencent/HunyuanWorld-Mirror','5574b7b0d5ac9d80e8a92976222370a0d20a57a0'),
+}
+
+
+def runtime_key(engine, variant='base'):
+    return 'trellisgguf' if engine == 'trellis2' and variant in ('q4', 'q8') else engine
+
+
+GGUF_FILES = ('ss_flow.gguf', 'ss_dec.gguf', 'shape_flow_512.gguf', 'shape_flow_1024.gguf', 'shape_dec.gguf', 'tex_flow_512.gguf', 'tex_flow_1024.gguf', 'tex_dec.gguf', 'dinov3.gguf', 'birefnet.gguf')
+
+def _shape_folder(engine, variant):
+    base = 'hunyuan3d-dit-v2-0' if engine == 'hunyuan2' else 'hunyuan3d-dit-v2-mini'
+    return base + {'base':'', 'fast':'-fast', 'turbo':'-turbo'}[variant]
+
+def managed_config(engine, variant='base'):
+    """Read only a matching ready marker. Never trust paths from marker contents."""
+    key = runtime_key(engine, variant)
+    if key not in AUTOMATED: return None
+    root = ROOT / key
+    marker = root / 'ready.json'
+    try:
+        data = json.loads(marker.read_text(encoding='utf8'))
+        if data != {'version': SETUP_VERSION, 'revision': REPOS[key][1]}: return None
+        if root.is_symlink() or marker.is_symlink(): return None
+        if key == 'trellisgguf':
+            exe = root/'source/build/trellis-cli'; weights = WEIGHTS/key/variant
+            if variant not in ('q4','q8') or not exe.is_file() or not all((weights/f).is_file() for f in GGUF_FILES): return None
+            return {'exe':str(exe), 'weights':str(weights)}
+        py = root/'venv/bin/python'; repo = root/'source'
+        source_files = {'sf3d':'run.py','triposr':'run.py','idol':'idol/pipeline.py','sharp':'src/sharp/cli/predict.py', 'hunyuan2':'hy3dgen/shapegen/pipelines.py', 'hunyuanmini':'hy3dgen/shapegen/pipelines.py', 'mirror2':'hyworld2/worldrecon/pipeline.py', 'mirror':'infer.py'}
+        if not py.is_file() or not (repo/source_files[key]).is_file(): return None
+        cfg = {'repo':str(repo), 'python':str(py)}
+        if engine in ('sf3d','triposr'):
+            files = ('config.yaml','model.safetensors' if engine=='sf3d' else 'model.ckpt')
+            path = WEIGHTS/engine
+            if not all((path/f).is_file() for f in files): return None
+            cfg['weights'] = str(path)
+        if engine == 'idol':
+            path = WEIGHTS/engine
+            if not all((path/f).is_file() for f in ('config.json','denoiser.safetensors','decoder.safetensors','decoder_gs.safetensors','birefnet.safetensors')): return None
+            cfg['weights'] = str(path)
+        if key in ('hunyuan2', 'hunyuanmini'):
+            if variant not in ('base','fast','turbo'): return None
+            path = WEIGHTS/key
+            sub = path/_shape_folder(key,variant)
+            paint = WEIGHTS/'hunyuan2-paint'
+            required = [sub/'config.yaml', sub/'model.fp16.safetensors', paint/'hunyuan3d-delight-v2-0/model_index.json', paint/'hunyuan3d-paint-v2-0-turbo/unet/diffusion_pytorch_model.bin']
+            if not all(p.is_file() for p in required): return None
+            cfg.update(weights=str(path), paint_weights=str(paint))
+        if key == 'mirror':
+            path=WEIGHTS/key
+            if not all((path/f).is_file() for f in ('config.json','model.safetensors')): return None
+            cfg['weights']=str(path)
+        if key == 'mirror2':
+            path=WEIGHTS/key
+            if not all((path/'HY-WorldMirror-2.0'/f).is_file() for f in ('config.json','model.safetensors')): return None
+            cfg['weights']=str(path)
+        return cfg
+    except (OSError, ValueError, KeyError, TypeError): return None
+
+
+def _clone(job, dest, repo, revision, recursive=False):
+    if dest.is_symlink(): raise RuntimeError('3D_SETUP_CONFLICT: enlace de repositorio no permitido')
+    if not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        common._command(['git','clone','https://github.com/'+repo+'.git',str(dest)],job,stage='Descargando código '+repo,timeout=1800)
+    if not (dest/'.git').is_dir(): raise RuntimeError('3D_SETUP_CONFLICT: repositorio existente no gestionado; no se modifica')
+    # Refuse changes to prevent checkout from destroying user work.
+    import subprocess
+    check = subprocess.run(['git','-C',str(dest),'status','--porcelain','--untracked-files=no'],capture_output=True,text=True,check=True)
+    if check.stdout.strip(): raise RuntimeError('3D_SETUP_CONFLICT: código modificado; no se sobrescribe')
+    common._command(['git','-C',str(dest),'checkout','--detach',revision],job,stage='Fijando versión '+repo,timeout=300)
+    if recursive:
+        common._command(['git','-C',str(dest),'-c','url.https://github.com/.insteadOf=git@github.com:','submodule','update','--init','--recursive'],job,stage='Preparando submódulos '+repo,timeout=1800)
+
+
+def _pip(job, py, repo, *args, stage='Instalando dependencias 3D', timeout=5400):
+    env = common._setup_env()
+    env['PATH'] = str(py.parent) + os.pathsep + env.get('PATH','')
+    env.setdefault('MAX_JOBS', '2')
+    common._command([str(py),'-m','pip','install','--disable-pip-version-check',*args],job,stage=stage,timeout=timeout,cwd=str(repo),env=env)
+
+
+def _install_env(job, key, root, repo):
+    venv = root/'venv'; py = venv/'bin/python'
+    if venv.is_symlink() or (venv.exists() and not (venv/'pyvenv.cfg').is_file()):
+        raise RuntimeError('3D_SETUP_CONFLICT: entorno existente no gestionado; no se borra')
+    env = common._setup_env()
+    if not py.exists():
+        version = '3.13' if key == 'sharp' else '3.11' if key == 'mirror2' else '3.10' if key == 'mirror' else None
+        executable = shutil.which('python'+version) if version else sys.executable
+        if not executable: raise RuntimeError(f'3D_PYTHON_REQUIRED: este motor requiere python{version}; instálalo antes de preparar el motor.')
+        common._command([executable,'-m','venv',str(venv)],job,stage='Creando entorno Python aislado',timeout=300,env=env)
+    _pip(job,py,repo,'--upgrade','pip','wheel','setuptools==69.5.1','ninja','packaging', stage='Preparando herramientas de compilación')
+    torch = ('torch==2.5.1','torchvision==0.20.1')
+    if key == 'sharp': torch = ('torch==2.8.0','torchvision==0.23.0')
+    elif key == 'mirror2': torch = ('torch==2.7.1','torchvision==0.22.1')
+    elif key == 'mirror': torch = ('torch==2.4.0','torchvision==0.19.0')
+    cuda_wheels = 'cu128' if key in ('mirror2', 'sharp') else 'cu124'
+    _pip(job,py,repo,*torch,'--index-url','https://download.pytorch.org/whl/'+cuda_wheels,stage='Instalando PyTorch en el entorno aislado')
+    if key == 'sf3d':
+        _pip(job,py,repo,'--no-build-isolation','-r','requirements.txt',stage='Dependencias y extensiones de Stable Fast 3D')
+    elif key == 'triposr':
+        # The upstream requirements use a moving torchmcubes git HEAD; pin it instead.
+        _pip(job,py,repo,'--no-build-isolation','git+https://github.com/tatsy/torchmcubes.git@a9ac95aa329957ba646e7bb057f825f5dfa77f38',stage='Compilando torchmcubes')
+        # Remove the moving dependency without altering upstream source.
+        req = root/'requirements-studio.txt'
+        req.write_text('\n'.join(x for x in (repo/'requirements.txt').read_text().splitlines() if 'torchmcubes.git' not in x)+'\n')
+        _pip(job,py,repo,'-r',str(req),stage='Dependencias TripoSR')
+    elif key in ('hunyuan2','hunyuanmini'):
+        _pip(job,py,repo,'-r','requirements.txt','-e','.',stage='Instalando Hunyuan 3D')
+        for sub in ('hy3dgen/texgen/custom_rasterizer','hy3dgen/texgen/differentiable_renderer'):
+            _pip(job,py,repo,'--no-build-isolation',str(repo/sub),stage='Compilando Hunyuan Paint')
+    elif key == 'mirror':
+        _pip(job,py,repo,'-r','requirements.txt','onnxruntime','uniception','gsplat==1.5.3',stage='Instalando WorldMirror')
+    elif key == 'mirror2':
+        _pip(job,py,repo,'-r','requirements.txt',stage='Dependencias de WorldMirror 2.0')
+        _pip(job,py,repo,'--no-build-isolation','-e',str(repo/'hyworld2/worldgen/third_party/gsplat_maskgaussian'),stage='Compilando gsplat')
+        _pip(job,py,repo,'--no-build-isolation','flash-attn',stage='Compilando FlashAttention')
+    elif key == 'idol': _pip(job,py,repo,'-e','.',stage='Instalando Idol SDK')
+    elif key == 'sharp': _pip(job,py,repo,'-r','requirements.txt',stage='Instalando Apple SHARP')
+    return py
+
+
+def scene_env():
+    """Give subprocesses Studio's configured HF token without putting it in argv."""
+    from studio.catalog import catalog_manager
+    env = common._setup_env()
+    token = catalog_manager.get_hf_token()
+    if token:
+        env['HF_TOKEN'] = token
+    return env
+
+
+def _snapshot(job, key, allow_patterns=None, local_dir=None):
+    repo, revision = HF_REVISIONS[key]
+    code = ("from huggingface_hub import snapshot_download; import sys,json; "
+            "snapshot_download(repo_id=sys.argv[1],revision=sys.argv[2],allow_patterns=json.loads(sys.argv[3]),"
+            "local_dir=(sys.argv[4] or None),max_workers=4)")
+    env = scene_env()
+    common._command([sys.executable,'-c',code,repo,revision,json.dumps(allow_patterns),str(local_dir or '')],job,
+                    stage='Descargando pesos '+repo,timeout=14400,env=env)
+
+
+def _get_weights(job, engine, key, variant, texture):
+    if key in ('sf3d','triposr'):
+        _snapshot(job,key,['config.yaml', 'model.safetensors' if key=='sf3d' else 'model.ckpt'],WEIGHTS/key)
+    elif key == 'idol': _snapshot(job,key,['config.json','*.safetensors'],WEIGHTS/key)
+    elif key in ('hunyuan2','hunyuanmini'):
+        sub = _shape_folder(key,variant)
+        _snapshot(job,key,[sub+'/config.yaml',sub+'/model.fp16.safetensors'],WEIGHTS/key)
+        _snapshot(job,'hunyuan2',['hunyuan3d-delight-v2-0/*','hunyuan3d-paint-v2-0-turbo/*'],WEIGHTS/'hunyuan2-paint')
+    elif key == 'trellisgguf': _snapshot(job,key,[variant+'/*.gguf'],WEIGHTS/key)
+    elif key == 'mirror2': _snapshot(job,key,['HY-WorldMirror-2.0/config.json','HY-WorldMirror-2.0/model.safetensors'],WEIGHTS/key)
+    elif key == 'mirror': _snapshot(job,key,['config.json','model.safetensors'],WEIGHTS/key)
+    # SHARP downloads its upstream checkpoint on first execution.
+
+
+def prepare(engine, variant, texture, job):
+    key = runtime_key(engine, variant)
+    if key not in REPOS: raise ValueError('3D_ENGINE_UNKNOWN')
+    if key not in AUTOMATED: raise RuntimeError('3D_SETUP_MANUAL: esta receta todavía requiere preparación externa; consulta la documentación.')
+    valid = ('base','fast','turbo') if engine in ('hunyuan2','hunyuanmini') else ('q4','q8') if key == 'trellisgguf' else ('base',)
+    if variant not in valid: raise ValueError('3D_VARIANT_INVALID')
+    while not _lock.acquire(timeout=1):
+        job.check_cancelled(); job.heartbeat(step='Esperando turno de instalación 3D')
+    try:
+        root = ROOT/key
+        if root.is_symlink(): raise RuntimeError('3D_SETUP_CONFLICT: runtime es un enlace')
+        root.mkdir(parents=True,exist_ok=True); WEIGHTS.mkdir(parents=True,exist_ok=True)
+        if shutil.disk_usage(root).free < 12*1024**3: raise RuntimeError('3D_DISK_LOW: se requieren al menos 12 GiB libres para iniciar; algunos motores necesitan mucho más.')
+        repo = root/'source'; marker=root/'ready.json'
+        wanted = {'version':SETUP_VERSION,'revision':REPOS[key][1]}
+        try: existing=json.loads(marker.read_text())
+        except (OSError,ValueError): existing=None
+        if existing != wanted or not repo.is_dir() or not ((repo/'build/trellis-cli').is_file() if key == 'trellisgguf' else (root/'venv/bin/python').is_file()):
+            marker.unlink(missing_ok=True)
+            job.log('Preparando entorno exclusivo. La descarga y compilación pueden tardar mucho.')
+            _clone(job,repo,*REPOS[key],recursive=key == 'trellisgguf')
+            if key == 'trellisgguf':
+                common._command(['cmake','-S',str(repo),'-B',str(repo/'build'),'-DGGML_CUDA=ON'],job,stage='Configurando trellis.cpp CUDA',timeout=1200)
+                common._command(['cmake','--build',str(repo/'build'),'--target','trellis-cli','--parallel','2'],job,stage='Compilando trellis.cpp CUDA',timeout=7200)
+                if not (repo/'build/trellis-cli').is_file(): raise RuntimeError('3D_SETUP_FAILED: falta trellis-cli')
+            else:
+                py=_install_env(job,key,root,repo)
+                checks={'sf3d':'import sf3d.system', 'triposr':'import tsr.system', 'idol':'import idol.pipeline', 'sharp':'import sharp.cli', 'hunyuan2':'import hy3dgen.shapegen; import hy3dgen.texgen', 'hunyuanmini':'import hy3dgen.shapegen; import hy3dgen.texgen', 'mirror2':'import hyworld2.worldrecon.pipeline', 'mirror':'import infer'}
+                common._command([str(py),'-c',checks[key]],job,stage='Comprobando imports del runtime',timeout=180,cwd=str(repo),env=common._setup_env())
+        _get_weights(job,engine,key,variant,texture)
+        job.check_cancelled()
+        expected = {'sf3d': ('config.yaml', 'model.safetensors'), 'triposr': ('config.yaml', 'model.ckpt'), 'idol': ('config.json','denoiser.safetensors','decoder.safetensors','decoder_gs.safetensors','birefnet.safetensors')}
+        if key in expected and not all((WEIGHTS/key/f).is_file() for f in expected[key]):
+            raise RuntimeError('3D_WEIGHTS_MISSING: faltan archivos de pesos tras la descarga.')
+        tmp=marker.with_suffix('.tmp'); tmp.write_text(json.dumps(wanted),encoding='utf8'); os.replace(tmp,marker)
+        if not managed_config(engine, variant):
+            if existing != wanted: marker.unlink(missing_ok=True)
+            raise RuntimeError('3D_WEIGHTS_MISSING: preparación incompleta; faltan archivos del modelo o runtime.')
+        job.log('Entorno preparado. SHARP y algunas dependencias descargan pesos al generar; inferencia GPU no probada.')
+        return {'prepared':True,'model_id':'scene3d-'+engine,'engine':engine,'variant':variant,'texture':texture}
+    finally:
+        _lock.release()

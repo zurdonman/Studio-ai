@@ -16,7 +16,9 @@
     hfSearching: false,
     modelDiscovery: null,
     hfAuth: { has_token: false, masked_token: null, username: null },
-    assets: { uploads: [], images: [], videos: [], audio: [], montages: [] },
+    assets: { uploads: [], images: [], videos: [], audio: [], montages: [], models3d: [] },
+    catalog3d: [],
+    worldsCatalog: [],
     assetsSignature: "",
     assetsLoading: false,
     voices: [],
@@ -121,18 +123,8 @@
       p.classList.toggle("active", p.id === tabId);
     });
     if (tabId === "tab-catalog" && !state.hfSearchResults.length) runHfLiveSearch();
-    if (tabId === "tab-3d") loadSceneCatalog(false);
-    if (tabId === "tab-worlds") loadSceneCatalog(true);
-  }
-
-  async function loadSceneCatalog(world) {
-    const el = $(world ? "world-catalog" : "model3d-catalog");
-    try {
-      const data = await api(world ? "/api/worlds/catalog" : "/api/3d/catalog");
-      el.innerHTML = data.models.map(m => world
-        ? `<details><summary><strong>${escapeHtml(m.name)}</strong></summary><p>Entrada: ${escapeHtml(m.input)}</p><p>Salida: ${escapeHtml(m.output)}</p><p>${escapeHtml(m.details)}</p><a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">Modelo y licencia</a></details>`
-        : `<details><summary><strong>${escapeHtml(m.name)}</strong> — ${escapeHtml(m.state)}</summary><p>Salida: ${escapeHtml(m.output)}</p><p>Variantes: ${escapeHtml(m.variants)}</p><p>Licencia: ${escapeHtml(m.license)}</p><p>Hardware: ${escapeHtml(m.hardware)}</p><p>Imagen: ${escapeHtml(m.preprocess)}</p><a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">Modelo y licencia</a>${m.variant_url ? ` · <a href="${escapeHtml(m.variant_url)}" target="_blank" rel="noopener noreferrer">Variante comunitaria</a>` : ""}</details>`).join("");
-    } catch (err) { el.textContent = `No se pudo cargar el catálogo: ${err.message}`; }
+    if (tabId === "tab-3d") load3DCatalog();
+    if (tabId === "tab-worlds") loadWorldCatalog();
   }
 
   function showSpaceErrorBanner(spaceDetail) {
@@ -522,6 +514,22 @@
     }
     if (res && res.media_url && state.workspaceMode === "higgsfield") {
       showHiggsfieldStageResult(res);
+    }
+    if (job.kind === "scene_setup" && res.prepared) {
+      const worlds = ["sharp","worldgen","mirror","mirror2","world1","world2","worldsplat"];
+      const box = $(worlds.includes(res.engine) ? "world-feedback" : "model3d-feedback");
+      if (box) box.textContent = "Entorno preparado; algunos pesos se descargan al generar. Inferencia GPU no probada.";
+      if (worlds.includes(res.engine)) await loadWorldCatalog(); else await load3DCatalog();
+    }
+    if (job.kind === "world3d" && res.media_url && $("world-feedback")) {
+      $("world-feedback").textContent = "Resultado guardado en Mundos 3D y disponible en el ZIP.";
+      toast("Mundo 3D listo para descargar.", "success");
+      loadWorldCatalog();
+    }
+    if (job.kind === "model3d" && res.media_url && $("model3d-feedback")) {
+      $("model3d-feedback").textContent = "Resultado guardado en Modelos 3D y disponible en el ZIP.";
+      toast("Modelo 3D listo para descargar.", "success");
+      load3DCatalog();
     }
     if (job.kind === "image" && res.media_url) {
       showImageResult(res);
@@ -2143,9 +2151,72 @@
     renderIdLoraSelects();
     renderCommunityVideoSelect();
     renderMotionAssets();
+    render3DAssets();
+    renderWorldAssets();
     renderHiggsfieldAssetSelects();
     renderMontagePickers();
     renderMontageGallery();
+  }
+
+  function render3DAssets() {
+    const el = $("model3d-image"); if (!el) return;
+    const images = [...state.assets.images, ...state.assets.uploads.filter(a => a.type === "image")];
+    const previous = el.value;
+    el.innerHTML = '<option value="">Selecciona una imagen</option>' + images.map(a => `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
+    if (images.some(a => a.rel_path === previous)) el.value = previous;
+    const list = state.assets.models3d || [];
+    $("model3d-results").innerHTML = list.length ? list.map(a => `<div><a href="${escapeHtml(a.media_url)}" download>${escapeHtml(a.filename)} ⬇ ${escapeHtml(a.filename.split(".").pop().toUpperCase())}</a> · ${escapeHtml(a.description || "Modelo 3D")}</div>`).join("") : "Aún no hay modelos.";
+  }
+  async function load3DCatalog() {
+    try {
+      state.catalog3d = (await api("/api/3d/catalog")).models;
+      $("model3d-catalog").innerHTML = state.catalog3d.map(m => `<details><summary><strong>${escapeHtml(m.name)}</strong> — ${escapeHtml(m.state)}</summary>
+        <p><strong>Salida:</strong> ${escapeHtml(m.output)}</p><p><strong>Variantes:</strong> ${escapeHtml(m.variants)}</p>
+        <p><strong>Licencia:</strong> ${escapeHtml(m.license)}</p><p><strong>Hardware:</strong> ${escapeHtml(m.hardware)}</p><p><strong>Imagen:</strong> ${escapeHtml(m.preprocess)}</p>
+        <a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">Modelo y licencia</a>${m.variant_url ? ` · <a href="${escapeHtml(m.variant_url)}" target="_blank" rel="noopener noreferrer">Variante comunitaria</a>` : ""}</details>`).join("");
+      update3DRuntime();
+    } catch (err) { $("model3d-catalog").textContent = `No se pudo cargar el catálogo: ${err.message}`; }
+  }
+  function update3DRuntime() {
+    const m = state.catalog3d.find(x => x.id === $("model3d-engine")?.value); if (!m) return;
+    const v = $("model3d-variant").value; const status = m.variant_status?.[v] || m;
+    $("model3d-runtime").textContent = status.configured ? (status.managed ? "Entorno preparado; inferencia GPU no verificada." : "Rutas manuales configuradas; dependencias e inferencia no verificadas.") : (status.auto_setup && !status.manual_override ? "Pendiente: puedes preparar este motor automáticamente." : "Preparación automática no disponible. Configuración manual: " + (status.missing || []).join(", ") + ". Consulta docs/MODELOS_3D.md.");
+    if ($("model3d-prepare")) $("model3d-prepare").disabled = !status.auto_setup || !!status.manual_override;
+    $("model3d-resolution").disabled = !["sf3d", "trellis2"].includes(m.id);
+    $("model3d-texture").disabled = !["hunyuan2","hunyuanmini","hunyuan21"].includes(m.id);
+    $("model3d-idol-mode").disabled = m.id !== "idol";
+  }
+
+  function configure3DVariants() {
+    const engine = $("model3d-engine").value;
+    const choices = ["hunyuan2", "hunyuanmini"].includes(engine) ? [["base","FP16 base"],["fast","FP16 fast"],["turbo","FP16 turbo"]] : engine === "trellis2" ? [["base","Oficial BF16/FP16"],["q4","GGUF q4 · trellis.cpp"],["q8","GGUF q8 · trellis.cpp"]] : [["base","Oficial / base"]];
+    $("model3d-variant").innerHTML = choices.map(([v,t]) => `<option value="${v}">${t}</option>`).join("");
+    $("model3d-texture").disabled = !["hunyuan2","hunyuanmini","hunyuan21"].includes(engine);
+    $("model3d-idol-mode").disabled = engine !== "idol";
+    update3DRuntime();
+  }
+  function renderWorldAssets() {
+    const el = $("world-images"); if (!el) return;
+    const selected = Array.from(el.selectedOptions).map(o => o.value);
+    const images = [...state.assets.images, ...state.assets.uploads.filter(a => a.type === "image")];
+    el.innerHTML = images.map(a => `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
+    Array.from(el.options).forEach(o => { o.selected = selected.includes(o.value); });
+    const worlds = state.assets.worlds || [];
+    $("world-results").innerHTML = worlds.length ? worlds.map(a => `<div><a href="${escapeHtml(a.media_url)}" download>${escapeHtml(a.filename)} ⬇</a> · ${escapeHtml(a.description || "Mundo 3D")}</div>`).join("") : "Aún no hay mundos.";
+  }
+  async function loadWorldCatalog() {
+    try {
+      state.worldsCatalog = (await api("/api/worlds/catalog")).models;
+      $("world-catalog").innerHTML = state.worldsCatalog.map(m => `<details><summary><strong>${escapeHtml(m.name)}</strong> · experimental</summary><p><strong>Entrada:</strong> ${escapeHtml(m.input)}</p><p><strong>Salida:</strong> ${escapeHtml(m.output)}</p><p>${escapeHtml(m.details)}</p><a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">Documentación y licencia</a></details>`).join("");
+      updateWorldRuntime();
+    } catch (err) { $("world-catalog").textContent = `No se pudo cargar el catálogo: ${err.message}`; }
+  }
+  function updateWorldRuntime() {
+    const m = state.worldsCatalog.find(x => x.id === $("world-engine")?.value); if (!m) return;
+    $("world-runtime").textContent = m.configured ? (m.managed ? "Entorno preparado; pesos adicionales e inferencia GPU no verificados." : "Rutas manuales configuradas; dependencias e inferencia no verificadas.") : (m.auto_setup && !m.manual_override ? "Pendiente: puedes preparar este motor automáticamente." : "Preparación automática no disponible. Configuración manual: " + (m.missing || []).join(", ") + ". Consulta docs/MUNDOS_3D.md.");
+    if ($("world-prepare")) $("world-prepare").disabled = !m.auto_setup || !!m.manual_override;
+    $("world-low-vram").disabled = m.id !== "worldgen"; $("world-mesh").disabled = m.id !== "worldgen";
+    $("world-fp8").disabled = m.id !== "world1";
   }
 
   function renderMotionAssets() {
@@ -3154,6 +3225,45 @@
         $("community-film-feedback").textContent = "Trabajo en cola: sigue el monitor para progreso, errores o cancelación.";
         watchJob(res.job);
       } catch (err) { toast(err.message, "error"); }
+    });
+    $("model3d-engine")?.addEventListener("change", configure3DVariants);
+    $("model3d-variant")?.addEventListener("change", () => { if (["hunyuan2","hunyuanmini"].includes($("model3d-engine").value)) $("model3d-steps").value = $("model3d-variant").value === "turbo" ? "5" : "30"; update3DRuntime(); });
+    $("model3d-upload")?.addEventListener("change", async e => {
+      const file = e.target.files?.[0]; if (!file) return;
+      try { const uploaded = await uploadFile(file); await loadAssets(); $("model3d-image").value = uploaded.rel_path; }
+      catch (err) { toast(err.message, "error"); } finally { e.target.value = ""; }
+    });
+    async function prepareScene(world) {
+      const prefix = world ? "world" : "model3d";
+      try {
+        const body = {engine:$(prefix+"-engine").value, variant:world ? "base" : $("model3d-variant").value, texture:!world && $("model3d-texture").checked, license_accepted:$(prefix+"-license").checked};
+        const res = await api("/api/3d/prepare", {method:"POST", body:JSON.stringify(body)});
+        $(prefix+"-feedback").textContent = "Preparación en cola: sigue el monitor para progreso, errores y cancelación.";
+        watchJob(res.job);
+      } catch (err) { $(prefix+"-feedback").textContent = err.message; toast(err.message, "error"); }
+    }
+    $("model3d-prepare")?.addEventListener("click", () => prepareScene(false));
+    $("world-prepare")?.addEventListener("click", () => prepareScene(true));
+    $("model3d-run")?.addEventListener("click", async () => {
+      const image_rel = $("model3d-image").value;
+      if (!image_rel) { toast("Selecciona una imagen.", "error"); return; }
+      try {
+        const response = await api("/api/3d/generate", {method:"POST", body: JSON.stringify({engine:$("model3d-engine").value, image_rel, texture_resolution:Number($("model3d-resolution").value), variant:$("model3d-variant").value, texture:$("model3d-texture").checked, steps:Number($("model3d-steps").value), seed:Number($("model3d-seed").value), idol_mode:$("model3d-idol-mode").value, license_accepted:$("model3d-license").checked})});
+        $("model3d-feedback").textContent = "Trabajo en cola: sigue el monitor para progreso, errores o cancelación.";
+        watchJob(response.job);
+      } catch (err) { $("model3d-feedback").textContent = err.message; toast(err.message, "error"); }
+    });
+    $("world-engine")?.addEventListener("change", updateWorldRuntime);
+    $("world-clear")?.addEventListener("click", () => Array.from($("world-images").options).forEach(o => { o.selected = false; }));
+    $("world-upload")?.addEventListener("change", async e => {
+      const file = e.target.files?.[0]; if (!file) return;
+      try { const uploaded = await uploadFile(file); await loadAssets(); const option = Array.from($("world-images").options).find(o => o.value === uploaded.rel_path); if (option) option.selected = true; }
+      catch (err) { toast(err.message, "error"); } finally { e.target.value = ""; }
+    });
+    $("world-run")?.addEventListener("click", async () => {
+      const body = {engine:$("world-engine").value, images_rel:Array.from($("world-images").selectedOptions).map(o=>o.value), prompt:$("world-prompt").value, seed:Number($("world-seed").value), low_vram:$("world-low-vram").checked, mesh:$("world-mesh").checked, fp8:$("world-fp8").checked, license_accepted:$("world-license").checked};
+      try { const res = await api("/api/worlds/generate", {method:"POST",body:JSON.stringify(body)}); $("world-feedback").textContent="Trabajo en cola: consulta el monitor."; watchJob(res.job); }
+      catch (err) { $("world-feedback").textContent=err.message; toast(err.message,"error"); }
     });
     // Pestañas
     document.querySelectorAll(".tab-btn").forEach((btn) => {
