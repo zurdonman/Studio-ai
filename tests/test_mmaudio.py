@@ -41,13 +41,13 @@ def test_api_requires_both_consents_and_restricts_path(temp_studio_env, monkeypa
     assert client.post('/api/community/video-audio', json=body).status_code == 422
 
 
-@pytest.mark.parametrize('audio', [True, False])
-def test_synthetic_mux_preserves_source(temp_studio_env, monkeypatch, audio):
+@pytest.mark.parametrize('audio,duration', [(False, 3), (True, 3), (False, 9), (False, 16.25), (False, .5)])
+def test_synthetic_mux_preserves_source(temp_studio_env, monkeypatch, audio, duration):
     from studio.engines import mmaudio as m
     from studio.engines.ffmpeg_utils import probe_media_info, get_ffmpeg_bin
     from studio.jobs import JobRecord
     _, root = temp_studio_env
-    path = root / 'uploads/clip.mp4'; clip(path, audio=audio)
+    path = root / 'uploads/clip.mp4'; clip(path, audio=audio, duration=duration)
     original = path.read_bytes()
     monkeypatch.setattr(m.common, 'query_gpu_info', lambda: {'has_gpu': True, 'bf16_supported': True})
     monkeypatch.setattr(m.common, '_switch_to_idle', lambda *args: False)
@@ -55,9 +55,13 @@ def test_synthetic_mux_preserves_source(temp_studio_env, monkeypatch, audio):
     monkeypatch.setattr(m, '_prepare', lambda job: 'python')
     monkeypatch.setattr(m.common, '_ComfyMemoryGuard', FakeGuard)
     real_command = m.common._command
+    calls = []
     def fake_worker(args, job, **kwargs):
         if 'mmaudio_worker.py' in args[1]:
-            subprocess.run([get_ffmpeg_bin(), '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=3', args[5]], check=True)
+            input_info = probe_media_info(__import__('pathlib').Path(args[4]))
+            assert input_info['duration_seconds'] >= float(args[6]) - .1
+            calls.append((float(args[6]), int(args[9])))
+            subprocess.run([get_ffmpeg_bin(), '-v', 'error', '-y', '-f', 'lavfi', '-i', f'sine=frequency=880:duration={args[6]}', args[5]], check=True)
         else:
             real_command(args, job, **kwargs)
     monkeypatch.setattr(m.common, '_command', fake_worker)
@@ -65,7 +69,12 @@ def test_synthetic_mux_preserves_source(temp_studio_env, monkeypatch, audio):
     assert path.read_bytes() == original
     output = root / result['rel_path']
     details = probe_media_info(output)
-    assert details['has_video'] and details['has_audio'] and abs(details['duration_seconds'] - 3) < .3
+    import math
+    expected = probe_media_info(path)['duration_seconds']
+    assert details['has_video'] and details['has_audio'] and abs(details['duration_seconds'] - expected) < .3
+    assert len(calls) == math.ceil(expected / 8) == result['segments']
+    assert [s for _, s in calls] == list(range(42, 42 + len(calls)))
+    assert all(2 <= d <= 8 for d, _ in calls)
     assert result['original_audio_replaced'] is audio
     assert json.loads(output.with_suffix('.json').read_text())['model_id'] == m.MODEL_ID
 
@@ -75,11 +84,11 @@ def test_input_limits_no_download(temp_studio_env, monkeypatch):
     from studio.jobs import JobRecord
     _, root = temp_studio_env
     path = root / 'uploads/clip.mp4'; clip(path, duration=9)
-    with pytest.raises(ValueError, match='MMAUDIO_INPUT_LIMIT'): m.validate_input(path)
+    assert m.validate_input(path)['duration_seconds'] == 9
     clip(path)
     monkeypatch.setattr(m.common, 'query_gpu_info', lambda: {'has_gpu': False, 'bf16_supported': False})
     monkeypatch.setattr(m, '_prepare', lambda job: pytest.fail('must not download on CPU'))
-    with pytest.raises(RuntimeError, match='MMAUDIO_GPU_UNSUPPORTED'):
+    with pytest.raises(RuntimeError, match='V2A_GPU_UNSUPPORTED'):
         m.generate(path, prompt='', negative='', seed=42, steps=25, replace_audio=False, job=JobRecord('video', 'test'))
 
 

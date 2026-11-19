@@ -1640,6 +1640,7 @@ def api_community_motion(req: MotionTransferReq) -> Dict[str, Any]:
 
 
 class MMAudioReq(BaseModel):
+    engine: Literal['mmaudio', 'controlfoley'] = 'mmaudio'
     video_rel: str = Field(min_length=1, max_length=1024)
     prompt: str = Field(default="", max_length=1000)
     negative: str = Field(default="", max_length=1000)
@@ -1654,7 +1655,7 @@ class MMAudioReq(BaseModel):
 def api_community_video_audio(req: MMAudioReq) -> Dict[str, Any]:
     from studio.engines.mmaudio import generate, validate_input
     if not req.research_license_accepted:
-        raise HTTPException(status_code=400, detail="MMAudio usa CLIP de Apple limitado a investigación científica no comercial; confirma que cumples y aceptas las licencias.")
+        raise HTTPException(status_code=400, detail="Este motor usa CLIP de Apple limitado a investigación científica no comercial; confirma que cumples y aceptas las licencias.")
     if not req.install_accepted:
         raise HTTPException(status_code=400, detail="Autoriza la preparación automática y descarga de los componentes locales.")
     path = _resolve_media_rel(req.video_rel)
@@ -1665,9 +1666,9 @@ def api_community_video_audio(req: MMAudioReq) -> Dict[str, Any]:
         validate_input(path, req.replace_audio)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    job = job_manager.submit(kind="video", title="MMAudio V2 · Foley local experimental",
+    job = job_manager.submit(kind="video", title=f"{req.engine} · Foley local experimental",
                              fn=lambda j: generate(path, prompt=req.prompt, negative=req.negative,
-                                                   seed=req.seed, steps=req.steps, replace_audio=req.replace_audio, job=j))
+                                                   seed=req.seed, steps=req.steps, replace_audio=req.replace_audio, engine=req.engine, job=j))
     return {"job": job.to_dict(include_logs=True)}
 
 

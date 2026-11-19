@@ -520,7 +520,7 @@
         $("motion-result").hidden = false; $("motion-result").src = res.media_url;
         $("motion-feedback").textContent = "Resultado guardado en la biblioteca de Vídeo.";
       }
-      if (res.model_id === "mmaudio-v2-experimental" && $("v2a-result")) {
+      if (["mmaudio-v2-experimental", "controlfoley-v2a-experimental"].includes(res.model_id) && $("v2a-result")) {
         $("v2a-result").hidden = false; $("v2a-result").src = res.media_url;
         $("v2a-feedback").textContent = "Copia con sonido guardada en la biblioteca de Vídeo.";
       }
@@ -3096,7 +3096,7 @@
       const video_rel = $("v2a-input").value;
       if (!video_rel) { toast("Selecciona un vídeo.", "error"); return; }
       if (!$("v2a-license").checked || !$("v2a-install").checked) { toast("Confirma las licencias y autoriza la preparación local.", "error"); return; }
-      const body = {video_rel, prompt: $("v2a-prompt").value, negative: $("v2a-negative").value,
+      const body = {engine: $("v2a-engine").value, video_rel, prompt: $("v2a-prompt").value, negative: $("v2a-negative").value,
         seed: Number($("v2a-seed").value), steps: Number($("v2a-steps").value), replace_audio: $("v2a-replace").checked,
         research_license_accepted: true, install_accepted: true};
       try { const res = await api("/api/community/video-audio", {method: "POST", body: JSON.stringify(body)});
