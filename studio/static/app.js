@@ -121,6 +121,18 @@
       p.classList.toggle("active", p.id === tabId);
     });
     if (tabId === "tab-catalog" && !state.hfSearchResults.length) runHfLiveSearch();
+    if (tabId === "tab-3d") loadSceneCatalog(false);
+    if (tabId === "tab-worlds") loadSceneCatalog(true);
+  }
+
+  async function loadSceneCatalog(world) {
+    const el = $(world ? "world-catalog" : "model3d-catalog");
+    try {
+      const data = await api(world ? "/api/worlds/catalog" : "/api/3d/catalog");
+      el.innerHTML = data.models.map(m => world
+        ? `<details><summary><strong>${escapeHtml(m.name)}</strong></summary><p>Entrada: ${escapeHtml(m.input)}</p><p>Salida: ${escapeHtml(m.output)}</p><p>${escapeHtml(m.details)}</p><a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">Modelo y licencia</a></details>`
+        : `<details><summary><strong>${escapeHtml(m.name)}</strong> — ${escapeHtml(m.state)}</summary><p>Salida: ${escapeHtml(m.output)}</p><p>Variantes: ${escapeHtml(m.variants)}</p><p>Licencia: ${escapeHtml(m.license)}</p><p>Hardware: ${escapeHtml(m.hardware)}</p><p>Imagen: ${escapeHtml(m.preprocess)}</p><a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">Modelo y licencia</a>${m.variant_url ? ` · <a href="${escapeHtml(m.variant_url)}" target="_blank" rel="noopener noreferrer">Variante comunitaria</a>` : ""}</details>`).join("");
+    } catch (err) { el.textContent = `No se pudo cargar el catálogo: ${err.message}`; }
   }
 
   function showSpaceErrorBanner(spaceDetail) {
@@ -2536,7 +2548,7 @@
 
   function renderH3Images() {
     const images = [...state.assets.images, ...state.assets.uploads.filter(a => a.type === "image")];
-    for (const [id, placeholder] of [["h3-start", "— Solo texto —"], ["h3-end", "— Sin fotograma final —"]]) {
+    for (const [id, placeholder] of [["h3-start", "— Solo texto —"], ["h3-end", "— Sin fotograma final —"], ["wan22-image", "Selecciona una imagen"]]) {
       const select = $(id); if (!select) continue;
       const previous = select.value;
       select.innerHTML = `<option value="">${placeholder}</option>` + images.map(a =>
@@ -3056,6 +3068,23 @@
   // ==================== EVENTOS DE UI ====================
   function bindEvents() {
     bindH3();
+    $("wan22-upload")?.addEventListener("change", async ev => {
+      const file = ev.target.files?.[0]; if (!file) return;
+      try { const asset = await uploadFile(file); $("wan22-image").value = asset.rel_path; }
+      catch (e) { toast(e.message, "error"); } finally { ev.target.value = ""; }
+    });
+    $("wan22-run")?.addEventListener("click", async () => {
+      const feedback = $("wan22-feedback");
+      if (!$("wan22-install").checked) { feedback.textContent = "Autoriza la preparación local."; return; }
+      const body = {quant:$("wan22-quant").value, image_rel:$("wan22-image").value, prompt:$("wan22-prompt").value,
+        negative:$("wan22-negative").value, width:Number($("wan22-width").value), height:Number($("wan22-height").value),
+        frames:Number($("wan22-frames").value), steps:Number($("wan22-steps").value), cfg:Number($("wan22-cfg").value),
+        seed:Number($("wan22-seed").value), install_accepted:true};
+      if (!body.image_rel || !body.prompt.trim()) { feedback.textContent = "Selecciona una imagen y escribe una descripción."; return; }
+      try { const result = await api("/api/video/wan22-i2v", {method:"POST",body:JSON.stringify(body)});
+        feedback.textContent = "Trabajo en cola. Sigue la descarga y generación en el monitor; el vídeo aparecerá en la biblioteca."; watchJob(result.job);
+      } catch (e) { feedback.textContent = e.message; toast(e.message, "error"); }
+    });
     configureMotion();
     $("motion-engine")?.addEventListener("change", configureMotion);
     document.querySelectorAll('input[name="motion-aspect"]').forEach(el => el.addEventListener("change", configureMotionAspect));

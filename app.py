@@ -1623,6 +1623,55 @@ def api_mix_master(req: AudioMixMasterReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict()}
 
 
+@app.get("/api/3d/catalog")
+def api_3d_catalog() -> Dict[str, Any]:
+    from studio.scene_catalog import CATALOG_3D
+    return {"models": CATALOG_3D}
+
+
+@app.get("/api/worlds/catalog")
+def api_worlds_catalog() -> Dict[str, Any]:
+    from studio.scene_catalog import WORLDS
+    return {"models": WORLDS}
+
+
+class Wan22I2VReq(BaseModel):
+    quant: Literal['q2', 'q3s', 'q3', 'q4s', 'q4', 'q5s', 'q5_0', 'q5', 'q5_1', 'q6', 'q8', 'fp8', 'nvfp4'] = 'q4'
+    image_rel: str = Field(min_length=1, max_length=1024)
+    prompt: str = Field(min_length=1, max_length=2000)
+    negative: str = Field(default='', max_length=2000)
+    width: int = Field(default=512, ge=256, le=1280)
+    height: int = Field(default=320, ge=256, le=1280)
+    frames: int = Field(default=49, ge=5, le=81)
+    steps: int = Field(default=40, ge=4, le=60)
+    cfg: float = Field(default=3.5, ge=1, le=10, allow_inf_nan=False)
+    seed: int = Field(default=42, ge=0, le=4294967295)
+    install_accepted: bool = False
+    comfy_vram_mode: Literal['auto', 'lowvram', 'novram', 'highvram'] = 'auto'
+    comfy_evict_models: bool = False
+
+
+@app.post('/api/video/wan22-i2v')
+def api_wan22_i2v(req: Wan22I2VReq) -> Dict[str, Any]:
+    from studio.comfy_options import options
+    from studio.engines.wan22_i2v import generate, make_graph
+    if not req.install_accepted:
+        raise HTTPException(status_code=400, detail='Autoriza la descarga y preparación de Wan y sus componentes.')
+    image = _resolve_media_rel(req.image_rel)
+    if not image or not image.is_file() or image.parent not in (UPLOADS_DIR.resolve(), IMAGES_OUT_DIR.resolve()) or image.suffix.lower() not in ('.png','.jpg','.jpeg','.webp','.bmp'):
+        raise HTTPException(status_code=400, detail='Selecciona una imagen subida o de la biblioteca.')
+    try:
+        make_graph(quant=req.quant, names={k:'placeholder' for k in ('high','low','umt5','vae')}, image_name='reference.png',
+                   prompt=req.prompt,negative=req.negative,width=req.width,height=req.height,frames=req.frames,seed=req.seed,steps=req.steps,cfg=req.cfg)
+        config = options(req.comfy_vram_mode,req.comfy_evict_models)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    fn = lambda j: generate(quant=req.quant,image_path=image,prompt=req.prompt,negative=req.negative,width=req.width,height=req.height,
+                            frames=req.frames,steps=req.steps,cfg=req.cfg,seed=req.seed,job=j)
+    job = job_manager.submit(kind='video',title=f'Wan 2.2 I2V A14B · {req.quant.upper()} experimental',fn=_comfy_job_function(fn,config))
+    return {'ok':True,'job':job.to_dict(include_logs=True)}
+
+
 class MotionTransferReq(BaseModel):
     engine: Literal["wan", "scail", "ltx"]
     quant: str = Field(default="q4", max_length=12)
