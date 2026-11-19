@@ -42,7 +42,7 @@ async function until(test, label) {
       memory:{loaded_slots:[]}, jobs:job ? [{...job, status:completed?'completed':'running',result:completed?output:null}] : [], active_jobs_count:job&&!completed?1:0, hf_auth:{},runtime:{}};
     else if (u.pathname === '/api/3d/catalog') data = {models:[{id:'sf3d',name:'Stable Fast 3D',state:'Experimental',output:'GLB',variants:'F32',license:'licencia',hardware:'6 GB',preprocess:'rembg',url:'https://example.com',configured:false,missing:['STUDIO_SF3D_REPO']},{id:'triposr',name:'TripoSR',state:'Experimental',output:'GLB',variants:'checkpoint',license:'MIT',hardware:'6 GB',preprocess:'rembg',url:'https://example.com',configured:true}]};
     else if (u.pathname === '/api/3d/generate') { job = {id:'j3',kind:'model3d',title:'3D',status:'running',progress:1,current_step:'Generando',logs:[]}; data={job}; }
-    else if (u.pathname === '/api/worlds/catalog') data = {models:[{id:'sharp',name:'SHARP',input:'foto',output:'PLY',details:'research',url:'https://example.com',configured:false,auto_setup:true,missing:['SHARP_REPO']},{id:'worldgen',name:'WorldGen',input:'texto',output:'PLY',details:'experimental',url:'https://example.com',configured:true}]};
+    else if (u.pathname === '/api/worlds/catalog') data = {models:[{id:'sharp',name:'SHARP',input:'foto',output:'PLY',details:'research',url:'https://example.com',configured:false,auto_setup:true,missing:['SHARP_REPO']},{id:'worldgen',name:'WorldGen',input:'texto',output:'PLY',details:'experimental',url:'https://example.com',configured:true},{id:'worldsplat',name:'WorldSplat',input:'texto',output:'PLY',details:'experimental',url:'https://example.com',variant_status:{base:{configured:true},fast:{configured:false,auto_setup:true}}}]};
     else if (u.pathname === '/api/3d/prepare') {job={id:'prep',kind:'scene_setup',status:'running',title:'Preparar',logs:[]};data={job};}
     else if (u.pathname === '/api/worlds/generate') {job={id:'j4',kind:'world3d',title:'World',status:'running',progress:1,current_step:'Generando',logs:[]};data={job};}
     else if (u.pathname === '/api/tts/voices') data = {voices:[]};
@@ -68,5 +68,11 @@ async function until(test, label) {
   const body=JSON.parse(calls.find(x=>x.path==='/api/worlds/generate').body);
   if(body.engine!=='worldgen' || body.prompt!=='A forest' || !body.mesh || !body.low_vram || !body.license_accepted) throw Error('bad world payload');
   await until(() => $('world-feedback').textContent.includes('cola'), 'job feedback');
+  $('world-engine').value='worldsplat'; $('world-engine').dispatchEvent(new w.Event('change'));
+  $('world-variant').value='fast'; $('world-variant').dispatchEvent(new w.Event('change'));
+  if ($('world-prepare').disabled || !$('world-variant').textContent.includes('no mundo navegable')) throw Error('DiffSplat variant state');
+  $('world-run').click();
+  await until(() => calls.filter(x=>x.path==='/api/worlds/generate').length === 2, 'fast submit');
+  if (JSON.parse(calls.filter(x=>x.path==='/api/worlds/generate')[1].body).variant!=='fast') throw Error('bad fast payload');
   if(errors.length) throw Error(errors.join('; ')); w.close(); console.log('World 3D UI catalog, options and submission: OK');
 })().catch(e => { console.error(e); process.exit(1); });

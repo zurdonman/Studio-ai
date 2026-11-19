@@ -59,13 +59,13 @@ def test_api_validation(temp_studio_env, monkeypatch):
     client, _ = temp_studio_env
     body={'engine':'sf3d','license_accepted':True}
     assert client.post('/api/3d/prepare',json={**body,'license_accepted':False}).status_code == 400
-    assert client.post('/api/3d/prepare',json={**body,'engine':'world2'}).status_code == 400
     assert client.post('/api/3d/prepare',json={**body,'variant':'q4'}).status_code == 400
     assert client.post('/api/3d/prepare',json={**body,'engine':'../../x'}).status_code == 422
     jobs=[]
     monkeypatch.setattr(app.job_manager,'submit',lambda **kwargs: jobs.append(kwargs) or SimpleNamespace(to_dict=lambda **kw:{'id':'setup'}))
     assert client.post('/api/3d/prepare',json=body).status_code == 200
     assert jobs[0]['kind'] == 'scene_setup'
+    assert client.post('/api/3d/prepare',json={**body,'engine':'world2'}).status_code == 200
 
 def test_managed_runtime_used_by_generation(setup, monkeypatch, tmp_path):
     from PIL import Image

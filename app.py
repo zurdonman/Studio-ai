@@ -1633,7 +1633,7 @@ class Model3DReq(BaseModel):
     engine: Literal["sf3d", "triposr", "hunyuan2", "hunyuanmini", "hunyuan21", "trellis2", "idol"]
     image_rel: str = Field(min_length=1, max_length=1024)
     texture_resolution: Literal[512, 1024, 2048] = 1024
-    variant: Literal["base", "fast", "turbo", "q4", "q8"] = "base"
+    variant: Literal["base", "fast", "turbo", "q4", "q8", "onnx"] = "base"
     texture: bool = True
     steps: int = Field(default=30, ge=1, le=100)
     seed: int = Field(default=42, ge=0, le=4294967295)
@@ -1649,12 +1649,13 @@ class World3DReq(BaseModel):
     low_vram: bool = True
     mesh: bool = False
     fp8: bool = False
+    variant: Literal["base", "fast"] = "base"
     license_accepted: bool = False
 
 
 class SceneSetupReq(BaseModel):
     engine: Literal["sf3d", "triposr", "hunyuan2", "hunyuanmini", "hunyuan21", "trellis2", "idol", "sharp", "worldgen", "mirror", "mirror2", "world1", "world2", "worldsplat"]
-    variant: Literal["base", "fast", "turbo", "q4", "q8"] = "base"
+    variant: Literal["base", "fast", "turbo", "q4", "q8", "onnx"] = "base"
     texture: bool = False
     license_accepted: bool = False
 
@@ -1667,7 +1668,7 @@ def api_scene_prepare(req: SceneSetupReq) -> Dict[str, Any]:
     key = runtime_key(req.engine, req.variant)
     if key not in AUTOMATED:
         raise HTTPException(status_code=400, detail="La preparación automática de este motor o variante todavía no está disponible; consulta la configuración manual en la documentación.")
-    variants = ("base", "fast", "turbo") if req.engine in ("hunyuan2", "hunyuanmini") else ("q4", "q8") if key == "trellisgguf" else ("base",)
+    variants = ("fast",) if key == "diffsplat" else ("onnx",) if req.variant == "onnx" and req.engine in ("sf3d", "hunyuanmini") else ("base", "fast", "turbo") if req.engine in ("hunyuan2", "hunyuanmini") else ("q4", "q8") if key == "trellisgguf" else ("base",)
     if req.variant not in variants:
         raise HTTPException(status_code=400, detail="Variante incompatible con este motor.")
     job = job_manager.submit(kind="scene_setup", title=f"Preparar 3D · {req.engine}",
@@ -1692,8 +1693,8 @@ def api_3d_catalog() -> Dict[str, Any]:
     from studio.engines.scene_jobs import runtime_status
     models = catalog()
     for model in models:
-        if model['id'] in ('trellis2', 'hunyuan2', 'hunyuanmini'):
-            variants = ('base', 'q4', 'q8') if model['id'] == 'trellis2' else ('base', 'fast', 'turbo')
+        if model['id'] in ('sf3d', 'trellis2', 'hunyuan2', 'hunyuanmini'):
+            variants = ('onnx',) if model['id'] == 'sf3d' else ('base', 'q4', 'q8') if model['id'] == 'trellis2' else ('base', 'fast', 'turbo', 'onnx') if model['id'] == 'hunyuanmini' else ('base', 'fast', 'turbo')
             model['variant_status'] = {v: runtime_status(model['id'], v) for v in variants}
     return {"models": models}
 
@@ -1705,12 +1706,12 @@ def api_3d_generate(req: Model3DReq) -> Dict[str, Any]:
     if not req.license_accepted:
         raise HTTPException(status_code=400, detail="Revisa y acepta las licencias aplicables al modelo y dependencias.")
     path = _scene_images([req.image_rel])[0]
-    if req.engine in ("sf3d", "triposr"):
+    if req.engine in ("sf3d", "triposr") and req.variant != "onnx":
         if req.variant != "base": raise HTTPException(status_code=400, detail="Variante no disponible para este adaptador.")
         status = runtime_status(req.engine)
         fn = lambda j: generate(req.engine, path, req.texture_resolution, job=j)
     else:
-        allowed = {"hunyuan2": ("base", "fast", "turbo"), "hunyuanmini": ("base", "fast", "turbo"),
+        allowed = {"sf3d": ("onnx",), "triposr": (), "hunyuan2": ("base", "fast", "turbo"), "hunyuanmini": ("base", "fast", "turbo", "onnx"),
                    "hunyuan21": ("base",), "trellis2": ("base", "q4", "q8"), "idol": ("base",)}
         if req.variant not in allowed[req.engine]: raise HTTPException(status_code=400, detail="Variante incompatible con este motor.")
         status = scene_status(req.engine, req.variant)
@@ -1731,7 +1732,11 @@ def api_3d_generate(req: Model3DReq) -> Dict[str, Any]:
 @app.get("/api/worlds/catalog")
 def api_worlds_catalog() -> Dict[str, Any]:
     from studio.catalog_worlds import catalog
-    return {"models": catalog()}
+    from studio.engines.scene_jobs import runtime_status
+    models = catalog()
+    for model in models:
+        if model['id'] == 'worldsplat': model['variant_status'] = {v:runtime_status('worldsplat',v) for v in ('base','fast')}
+    return {'models': models}
 
 
 @app.post("/api/worlds/generate")
@@ -1743,14 +1748,17 @@ def api_worlds_generate(req: World3DReq) -> Dict[str, Any]:
     if req.engine in ("sharp", "worldgen", "world1", "world2") and len(images) > 1: raise HTTPException(status_code=400, detail="Este motor acepta como máximo una imagen.")
     if req.engine in ("worldgen", "world1", "worldsplat") and not images and not req.prompt.strip(): raise HTTPException(status_code=400, detail="Escribe una descripción o selecciona una imagen compatible.")
     if req.engine == "worldsplat" and (images or not req.prompt.strip()): raise HTTPException(status_code=400, detail="WorldSplat usa solo texto en esta receta.")
-    status = runtime_status(req.engine)
+    if req.engine != 'worldsplat' and req.variant != 'base': raise HTTPException(status_code=400, detail='Variante incompatible con el motor.')
+    status = runtime_status(req.engine, req.variant)
+    if req.engine == 'world2' and any(x.startswith('STUDIO_WORLD2_VLM') or x.startswith('STUDIO_WORLD2_GPUS') for x in status['missing']):
+        raise HTTPException(status_code=400, detail='HY-World completo necesita un servicio vLLM y número de GPU configurados. Consulta docs/MUNDOS_3D.md.')
     if not status['configured'] and (not status.get('auto_setup') or status.get('manual_override')):
         raise HTTPException(status_code=400, detail="Runtime sin configurar: " + ", ".join(status['missing']) + ". Consulta docs/MUNDOS_3D.md.")
     def run_world(j):
         if not status['configured']:
             from studio.engines.scene_setup import prepare
-            prepare(req.engine, 'base', False, job=j)
-        return generate(req.engine, images, req.prompt, 'base', False, 1024, req.seed, 30,
+            prepare(req.engine, req.variant, False, job=j)
+        return generate(req.engine, images, req.prompt, req.variant, False, 1024, req.seed, 30,
                         req.low_vram, req.mesh, 'synthetic', req.fp8, job=j)
     job = job_manager.submit(kind="world3d", title=f"Mundo 3D · {req.engine}", fn=run_world)
     return {"job": job.to_dict(include_logs=True)}

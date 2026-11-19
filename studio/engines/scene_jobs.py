@@ -18,6 +18,7 @@ from studio.memory_manager import memory_manager, serialized_gpu_operation
 WORLDS_OUT_DIR = OUTPUTS_DIR / 'worlds'
 # Environment configuration is server-side only, never received from a client.
 SPECS = {
+    'sf3d': ('STUDIO_SF3D', 'Stable Fast 3D ONNX', 'run.py', ''),
     'hunyuan2': ('STUDIO_HUNYUAN2', 'Hunyuan3D 2.0', 'hy3dgen/shapegen/pipelines.py', 'tencent/Hunyuan3D-2'),
     'hunyuanmini': ('STUDIO_HUNYUANMINI', 'Hunyuan3D 2mini', 'hy3dgen/shapegen/pipelines.py', 'tencent/Hunyuan3D-2mini'),
     'hunyuan21': ('STUDIO_HUNYUAN21', 'Hunyuan3D 2.1', 'hy3dshape/hy3dshape/pipelines.py', 'tencent/Hunyuan3D-2.1'),
@@ -31,19 +32,21 @@ SPECS = {
     'world1': ('STUDIO_WORLD1', 'HunyuanWorld 1.0', 'hunyuan_world_node.py', ''),
     'worldsplat': ('STUDIO_WORLDSPLAT', 'WorldSplat', 'worldsplat/pipeline.py', ''),
 }
-OBJECTS = {'hunyuan2', 'hunyuanmini', 'hunyuan21', 'trellis2', 'idol'}
+OBJECTS = {'sf3d', 'hunyuan2', 'hunyuanmini', 'hunyuan21', 'trellis2', 'idol'}
 WORLDS = set(SPECS) - OBJECTS
 
 
 def runtime_status(engine, variant='base'):
     prefix, _, marker, _ = SPECS[engine]
     from studio.engines.scene_setup import managed_config, AUTOMATED, runtime_key
-    if engine == 'trellis2' and variant in ('q4','q8'):
+    if (variant == 'onnx' and engine in ('sf3d','hunyuanmini')) or (engine == 'worldsplat' and variant == 'fast'):
+        manual = False
+    elif engine == 'trellis2' and variant in ('q4','q8'):
         manual = any(os.environ.get(k, '').strip() for k in ('STUDIO_TRELLIS_GGUF_EXE', 'STUDIO_TRELLIS_GGUF_'+variant.upper()+'_WEIGHTS'))
     else:
         manual = any(os.environ.get(prefix+s, '').strip() for s in ('_REPO', '_PYTHON'))
     managed = managed_config(engine, variant) if not manual else None
-    if managed: return {'configured': True, 'missing': [], 'managed': True, 'auto_setup': runtime_key(engine, variant) in AUTOMATED, 'manual_override': False}
+    if managed and engine != 'world2': return {'configured': True, 'missing': [], 'managed': True, 'auto_setup': runtime_key(engine, variant) in AUTOMATED, 'manual_override': False}
     if engine == 'trellis2' and variant in ('q4', 'q8'):
         exe = os.environ.get('STUDIO_TRELLIS_GGUF_EXE', '').strip()
         weights = os.environ.get('STUDIO_TRELLIS_GGUF_' + variant.upper() + '_WEIGHTS', '').strip()
@@ -54,8 +57,9 @@ def runtime_status(engine, variant='base'):
     repo = os.environ.get(prefix + '_REPO', '').strip()
     python = os.environ.get(prefix + '_PYTHON', '').strip()
     missing = []
-    if not repo or not (Path(repo).expanduser() / marker).is_file(): missing.append(prefix + '_REPO (' + marker + ')')
-    if not python or not Path(python).expanduser().is_file(): missing.append(prefix + '_PYTHON')
+    if not managed:
+        if not repo or not (Path(repo).expanduser() / marker).is_file(): missing.append(prefix + '_REPO (' + marker + ')')
+        if not python or not Path(python).expanduser().is_file(): missing.append(prefix + '_PYTHON')
     if engine == 'world2':
         for name in ('STUDIO_WORLD2_VLM_HOST', 'STUDIO_WORLD2_VLM_PORT', 'STUDIO_WORLD2_VLM_MODEL'):
             if not os.environ.get(name, '').strip(): missing.append(name)
@@ -63,7 +67,7 @@ def runtime_status(engine, variant='base'):
         if port and (not port.isdigit() or not 1 <= int(port) <= 65535): missing.append('STUDIO_WORLD2_VLM_PORT válido')
         count = os.environ.get('STUDIO_WORLD2_GPUS', '1')
         if not count.isdigit() or not 1 <= int(count) <= 8: missing.append('STUDIO_WORLD2_GPUS (1–8)')
-    return {'configured': not missing, 'missing': missing, 'managed': False, 'auto_setup': runtime_key(engine, variant) in AUTOMATED, 'manual_override': manual}
+    return {'configured': not missing, 'missing': missing, 'managed': bool(managed), 'auto_setup': runtime_key(engine, variant) in AUTOMATED, 'manual_override': manual}
 
 
 def validate_ply(path):
@@ -103,9 +107,12 @@ def _bundle(out, target, engine, job):
 @serialized_gpu_operation(slots=(), managed=True)
 def generate(engine, images, prompt, variant, texture, texture_resolution, seed, steps, low_vram, mesh, idol_mode, fp8, job):
     if engine not in SPECS: raise ValueError('3D_MODEL_UNSUPPORTED')
-    if variant not in ('base', 'fast', 'turbo', 'q4', 'q8'): raise ValueError('3D_VARIANT_INVALID')
-    if (variant in ('q4', 'q8') and engine != 'trellis2') or (engine in ('hunyuan21', 'idol', *WORLDS) and variant != 'base'):
+    if variant not in ('base', 'fast', 'turbo', 'q4', 'q8', 'onnx'): raise ValueError('3D_VARIANT_INVALID')
+    if variant == 'onnx' and engine not in ('sf3d','hunyuanmini'): raise ValueError('3D_VARIANT_INVALID')
+    if engine == 'sf3d' and variant != 'onnx': raise ValueError('3D_VARIANT_INVALID')
+    if (variant in ('q4', 'q8') and engine != 'trellis2') or (engine in ('hunyuan21', 'idol', *(WORLDS - {'worldsplat'})) and variant != 'base'):
         raise ValueError('3D_VARIANT_INVALID')
+    if engine == 'worldsplat' and variant not in ('base','fast'): raise ValueError('3D_VARIANT_INVALID')
     if engine == 'trellis2' and variant not in ('base', 'q4', 'q8'): raise ValueError('3D_VARIANT_INVALID')
     if texture_resolution not in (512, 1024, 2048) or not 1 <= steps <= 100 or not 0 <= seed <= 2**32-1:
         raise ValueError('3D_CONFIG_INVALID')
@@ -139,12 +146,12 @@ def generate(engine, images, prompt, variant, texture, texture_resolution, seed,
             cwd = str(Path(exe).parent)
         else:
             from studio.engines.scene_setup import managed_config
-            manual = any(os.environ.get(prefix+s, '').strip() for s in ('_REPO', '_PYTHON'))
+            manual = variant != 'onnx' and not (engine == 'worldsplat' and variant == 'fast') and any(os.environ.get(prefix+s, '').strip() for s in ('_REPO', '_PYTHON'))
             config = None if manual else managed_config(engine, variant)
             repo = str(Path(os.environ[prefix+'_REPO'] if manual else config['repo']).expanduser().resolve())
             # Preserve the venv entrypoint symlink, which selects pyvenv.cfg.
             py = os.path.abspath(os.path.expanduser(os.environ[prefix+'_PYTHON'] if manual else config['python']))
-            weights = os.environ.get(prefix+'_WEIGHTS', '').strip() or (config.get('weights', default_weights) if config else default_weights)
+            weights = (os.environ.get(prefix+'_WEIGHTS', '').strip() if variant != 'onnx' and not (engine == 'worldsplat' and variant == 'fast') else '') or (config.get('weights', default_weights) if config else default_weights)
             if Path(weights).expanduser().exists(): weights = str(Path(weights).expanduser().resolve())
             if engine == 'mirror' and not config:
                 args = [py, str(Path(repo)/'infer.py'), '--input_path', str(inp), '--output_path', str(out)]
@@ -160,6 +167,8 @@ def generate(engine, images, prompt, variant, texture, texture_resolution, seed,
                 if Path(paint).expanduser().exists(): paint = str(Path(paint).expanduser().resolve())
                 cfg = {'engine':engine,'repo':repo,'output':str(out),'image':first,'weights':weights,'paint_weights':paint,
                        'variant':variant,'texture':texture,'texture_resolution':texture_resolution,'steps':steps,'seed':seed,
+                       'hunyuanworld_dir': (config.get('hunyuanworld', '') if config else '') if engine == 'world1' else '',
+                       'realesrgan_path': (config.get('realesrgan', '') if config else '') if engine == 'hunyuan21' else '',
                        'mast3r_dir': (os.environ.get('STUDIO_WORLDSPLAT_MAST3R', '') if manual else config.get('mast3r', '')) if engine == 'worldsplat' else '',
                        'prompt':prompt,'low_vram':low_vram,'mesh':mesh,'idol_mode':idol_mode,'fp8':fp8,
                        'vlm_host':os.environ.get('STUDIO_WORLD2_VLM_HOST', ''), 'vlm_port':os.environ.get('STUDIO_WORLD2_VLM_PORT', ''),
@@ -176,7 +185,7 @@ def generate(engine, images, prompt, variant, texture, texture_resolution, seed,
             ext = 'glb' if engine in OBJECTS - {'idol'} else 'ply'; result = out / f'result.{ext}'
             if ext == 'glb': validate_glb(result)
             else: validate_ply(result)
-            description = ('Malla PLY' if engine == 'worldgen' and mesh else 'Gaussian splat PLY') if ext == 'ply' else ('Malla GLB con textura solicitada' if texture or engine == 'trellis2' else 'Malla GLB sin textura')
+            description = ('Malla PLY' if engine == 'worldgen' and mesh else 'Gaussian splat de objeto (DiffSplat), no mundo navegable' if engine == 'worldsplat' and variant == 'fast' else 'Gaussian splat PLY') if ext == 'ply' else ('Malla aproximada ONNX sin textura' if variant == 'onnx' else 'Malla GLB con textura solicitada' if texture or engine == 'trellis2' else 'Malla GLB sin textura')
         job.check_cancelled()
         folder = MODELS_OUT_DIR if engine in OBJECTS else WORLDS_OUT_DIR
         folder.mkdir(parents=True, exist_ok=True)

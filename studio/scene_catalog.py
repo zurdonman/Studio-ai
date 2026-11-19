@@ -3,8 +3,7 @@
 CATALOG_3D = [{'id': 'sf3d',
   'name': 'Stable Fast 3D',
   'output': 'GLB con UV, textura y parámetros de material',
-  'variants': 'Oficial F32 safetensors (4,02 GB); backbone FP16 ONNX comunitario para WebGPU (no compatible '
-              'con este adaptador).',
+  'variants': 'Oficial F32 safetensors (4,02 GB); ONNX comunitario experimental con ONNX Runtime CUDA: malla aproximada sin textura.',
   'license': 'Stability AI Community: acceso gated y condiciones de uso/comercio; revisar licencia.',
   'hardware': 'Referencia oficial ~6 GB VRAM; velocidad y memoria dependen del equipo.',
   'preprocess': 'El CLI elimina fondo con rembg salvo que la imagen ya tenga transparencia; puede descargar '
@@ -34,7 +33,7 @@ CATALOG_3D = [{'id': 'sf3d',
   'name': 'Hunyuan3D 2mini / Turbo',
   'output': 'Malla; textura requiere Paint independiente',
   'variants': 'DiT FP16 oficial mini, fast y turbo (3,82 GB cada uno); ONNX comunitario con DINOv2 INT8 para '
-              'runtime WebGPU.',
+              'ONNX Runtime CUDA: forma sin textura.',
   'license': 'Tencent Hunyuan 3D 2.0 Community: excluye UE, Reino Unido y Corea del Sur.',
   'hardware': 'Referencia ~5 GB VRAM para forma; depende del runtime.',
   'preprocess': 'Objeto centrado y fondo eliminado.',
@@ -120,6 +119,5 @@ WORLDS = [{'id': 'sharp',
   'name': 'WorldSplat',
   'input': 'Texto',
   'output': 'Gaussian splat PLY mediante vídeo, MASt3R y gsplat.',
-  'details': 'La ruta --fast no está implementada upstream. Esta receta usa solo el pipeline de vídeo, puede '
-             'producir un diorama plano; MASt3R tiene licencia no comercial.',
+  'details': 'Normal: vídeo, MASt3R y gsplat; puede producir un diorama plano. Alternativa rápida DiffSplat: genera un objeto, no un mundo navegable. La ruta --fast original no está implementada upstream. MASt3R tiene licencia no comercial.',
   'url': 'https://github.com/timscheuerai/worldsplat'}]

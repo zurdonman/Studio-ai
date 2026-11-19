@@ -845,7 +845,7 @@
       <section id="tab-3d" class="view-panel">
         <div class="card form-stack">
           <div class="card-header"><h2>🧊 Imagen a 3D local</h2></div>
-          <p>Convierte una imagen en una malla descargable o, con Idol, un splat PLY. Estas rutas experimentales usan entornos aislados, automáticos o manuales según el motor, no ComfyUI; requieren GPU NVIDIA con medición de VRAM y no se ha validado inferencia con GPU. Configuración: <code>docs/MODELOS_3D.md</code>.</p>
+          <p>Convierte una imagen en una malla descargable o, con Idol, un splat PLY. Estas rutas experimentales usan entornos aislados, automáticos o manuales según el motor, no ComfyUI; requieren GPU NVIDIA con medición de VRAM y no se ha validado inferencia con GPU. Las variantes ONNX usan CUDA del servidor, no WebGPU del navegador; producen mallas aproximadas sin textura y no han sido probadas con pesos reales. Configuración: <code>docs/MODELOS_3D.md</code>.</p>
           <p><strong>Importante:</strong> Las licencias Hunyuan 3D 2.0/2mini y 2.1 excluyen UE, Reino Unido y Corea del Sur. No las uses sin derechos adicionales aplicables; revisa los términos antes de ejecutar.</p>
           <label class="field-label" for="model3d-image">Imagen de referencia</label>
           <div class="row-gap"><select id="model3d-image" class="flex-1"></select><label class="btn btn-secondary btn-sm file-btn">Subir imagen<input id="model3d-upload" type="file" accept="image/*" hidden /></label></div>
@@ -876,6 +876,7 @@
           <p>Rutas experimentales con entornos independientes; SHARP, WorldMirror, WorldGen y WorldSplat admiten preparación automática experimental; los demás requieren instalación manual. HY-World completo requiere un servicio vLLM externo de confianza que recibe datos de la escena. Sin validación de inferencia GPU; la primera ejecución puede descargar varios modelos. Lee <code>docs/MUNDOS_3D.md</code>.</p>
           <p><strong>Licencias:</strong> Apple SHARP es para investigación no comercial. HunyuanWorld/Mirror y HY-World 2.0 excluyen UE, Reino Unido y Corea del Sur. WorldGen y WorldSplat tienen dependencias con términos propios.</p>
           <label class="field-label" for="world-engine">Motor</label><select id="world-engine"><option value="sharp">Apple SHARP · foto a splat</option><option value="worldgen">WorldGen · texto/imagen a mundo</option><option value="mirror">HunyuanWorld-Mirror · reconstrucción</option><option value="mirror2">WorldMirror 2.0 · reconstrucción</option><option value="world2">HY-World 2.0 · generación completa desde panorama</option><option value="world1">HunyuanWorld 1.0 · capas</option><option value="worldsplat">WorldSplat · texto a splat</option></select>
+          <label for="world-variant">Variante de WorldSplat</label><select id="world-variant"><option value="base">Normal · vídeo a mundo</option><option value="fast">DiffSplat · objeto rápido, no mundo navegable</option></select>
           <p id="world-runtime" class="muted" role="status">Consultando configuración…</p>
           <label class="field-label" for="world-images">Imágenes de referencia (Ctrl/Cmd para varias; solo Mirror admite varias)</label><select id="world-images" multiple size="4"></select>
           <button class="btn btn-secondary btn-sm" type="button" id="world-clear">Quitar selección de imágenes</button>

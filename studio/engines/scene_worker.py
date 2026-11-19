@@ -17,7 +17,10 @@ def main(cfg):
     repo = cfg['repo']
     sys.path.insert(0, repo)
     image_path = cfg.get('image')
-    if engine in ('hunyuan2', 'hunyuanmini', 'hunyuan21'):
+    if cfg.get('variant') == 'onnx':
+        from scene_onnx_worker import run
+        run(cfg)
+    elif engine in ('hunyuan2', 'hunyuanmini', 'hunyuan21'):
         import torch
         from PIL import Image
         image = Image.open(image_path).convert('RGBA')
@@ -48,7 +51,7 @@ def main(cfg):
                 from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
                 conf = Hunyuan3DPaintConfig(6, 512)
                 conf.multiview_pretrained_path = cfg['paint_weights']
-                conf.realesrgan_ckpt_path = str(Path(repo) / 'hy3dpaint/ckpt/RealESRGAN_x4plus.pth')
+                conf.realesrgan_ckpt_path = cfg.get('realesrgan_path') or str(Path(repo) / 'hy3dpaint/ckpt/RealESRGAN_x4plus.pth')
                 conf.multiview_cfg_path = str(Path(repo) / 'hy3dpaint/cfgs/hunyuan-paint-pbr.yaml')
                 conf.custom_pipeline = str(Path(repo) / 'hy3dpaint/hunyuanpaintpbr')
                 painter = Hunyuan3DPaintPipeline(conf)
@@ -106,6 +109,25 @@ def main(cfg):
             if not o3d.io.write_triangle_mesh(str(out / 'result.ply'), result): raise RuntimeError('No se pudo guardar la malla PLY')
         else:
             result.save(str(out / 'result.ply'))
+    elif engine == 'worldsplat' and cfg.get('variant') == 'fast':
+        # DiffSplat is an object generator, not WorldSplat's navigable world.
+        import shutil
+        import subprocess
+        run_dir=out/'diffsplat'; run_dir.mkdir()
+        for name in ('gsrecon_gobj265k_cnp_even4','gsvae_gobj265k_sd','gsdiff_gobj83k_sd15__render'):
+            dest=run_dir/name; dest.mkdir()
+            (dest/'checkpoints').symlink_to(Path(cfg['weights'])/name/'checkpoints',target_is_directory=True)
+        prompt_file=out/'prompt.txt'
+        prompt_file.write_text(' '.join(cfg['prompt'].split())+'\n',encoding='utf8')
+        args=[sys.executable,str(Path(repo)/'src/infer_gsdiff_sd.py'),'--config_file',str(Path(repo)/'configs/gsdiff_sd15.yaml'),
+              '--tag','gsdiff_gobj83k_sd15__render','--output_dir',str(run_dir),'--prompt_file',str(prompt_file),
+              '--name_by_id','--save_ply','--half_precision','--seed',str(cfg['seed'])]
+        env=os.environ.copy()
+        env['PYTHONPATH']=repo + os.pathsep + env.get('PYTHONPATH','')
+        subprocess.run(args,cwd=repo,env=env,check=True)
+        generated=list((run_dir/'gsdiff_gobj83k_sd15__render/inference').glob('*.ply'))
+        if len(generated)!=1: raise RuntimeError('DIFFSPLAT_OUTPUT_MISSING: se esperaba un PLY.')
+        shutil.copyfile(generated[0],out/'result.ply')
     elif engine == 'worldsplat':
         if cfg.get('mast3r_dir'):
             sys.path[:0] = [cfg['mast3r_dir'], str(Path(cfg['mast3r_dir'])/'dust3r')]
@@ -148,6 +170,9 @@ def main(cfg):
             print(f'HY-World 2.0: etapa {index}/5', flush=True)
             subprocess.run(args, cwd=str(world_dir), check=True)
     elif engine == 'world1':
+        if cfg.get('hunyuanworld_dir'):
+            sys.path.insert(0, cfg['hunyuanworld_dir'])
+            os.chdir(cfg['hunyuanworld_dir'])
         import numpy as np
         import torch
         from PIL import Image

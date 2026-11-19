@@ -2183,13 +2183,13 @@
     $("model3d-runtime").textContent = status.configured ? (status.managed ? "Entorno preparado; inferencia GPU no verificada." : "Rutas manuales configuradas; dependencias e inferencia no verificadas.") : (status.auto_setup && !status.manual_override ? "Pendiente: puedes preparar este motor automáticamente." : "Preparación automática no disponible. Configuración manual: " + (status.missing || []).join(", ") + ". Consulta docs/MODELOS_3D.md.");
     if ($("model3d-prepare")) $("model3d-prepare").disabled = !status.auto_setup || !!status.manual_override;
     $("model3d-resolution").disabled = !["sf3d", "trellis2"].includes(m.id);
-    $("model3d-texture").disabled = !["hunyuan2","hunyuanmini","hunyuan21"].includes(m.id);
+    $("model3d-texture").disabled = v === "onnx" || !["hunyuan2","hunyuanmini","hunyuan21"].includes(m.id);
     $("model3d-idol-mode").disabled = m.id !== "idol";
   }
 
   function configure3DVariants() {
     const engine = $("model3d-engine").value;
-    const choices = ["hunyuan2", "hunyuanmini"].includes(engine) ? [["base","FP16 base"],["fast","FP16 fast"],["turbo","FP16 turbo"]] : engine === "trellis2" ? [["base","Oficial BF16/FP16"],["q4","GGUF q4 · trellis.cpp"],["q8","GGUF q8 · trellis.cpp"]] : [["base","Oficial / base"]];
+    const choices = engine === "sf3d" ? [["base","Oficial"],["onnx","ONNX CUDA · malla aproximada sin textura"]] : ["hunyuan2", "hunyuanmini"].includes(engine) ? [["base","FP16 base"],["fast","FP16 fast"],["turbo","FP16 turbo"], ...(engine === "hunyuanmini" ? [["onnx","ONNX CUDA INT8 · forma sin textura"]] : [])] : engine === "trellis2" ? [["base","Oficial BF16/FP16"],["q4","GGUF q4 · trellis.cpp"],["q8","GGUF q8 · trellis.cpp"]] : [["base","Oficial / base"]];
     $("model3d-variant").innerHTML = choices.map(([v,t]) => `<option value="${v}">${t}</option>`).join("");
     $("model3d-texture").disabled = !["hunyuan2","hunyuanmini","hunyuan21"].includes(engine);
     $("model3d-idol-mode").disabled = engine !== "idol";
@@ -2213,8 +2213,11 @@
   }
   function updateWorldRuntime() {
     const m = state.worldsCatalog.find(x => x.id === $("world-engine")?.value); if (!m) return;
-    $("world-runtime").textContent = m.configured ? (m.managed ? "Entorno preparado; pesos adicionales e inferencia GPU no verificados." : "Rutas manuales configuradas; dependencias e inferencia no verificadas.") : (m.auto_setup && !m.manual_override ? "Pendiente: puedes preparar este motor automáticamente." : "Preparación automática no disponible. Configuración manual: " + (m.missing || []).join(", ") + ". Consulta docs/MUNDOS_3D.md.");
-    if ($("world-prepare")) $("world-prepare").disabled = !m.auto_setup || !!m.manual_override;
+    const variant = m.id === "worldsplat" ? $("world-variant").value : "base";
+    const status = m.variant_status?.[variant] || m;
+    $("world-variant").disabled = m.id !== "worldsplat";
+    $("world-runtime").textContent = status.configured ? (status.managed ? "Entorno preparado; pesos adicionales e inferencia GPU no verificados." : "Rutas manuales configuradas; dependencias e inferencia no verificadas.") : (status.auto_setup && !status.manual_override ? "Pendiente: puedes preparar este motor automáticamente." : "Preparación automática no disponible. Configuración manual: " + (status.missing || []).join(", ") + ". Consulta docs/MUNDOS_3D.md.");
+    if ($("world-prepare")) $("world-prepare").disabled = !status.auto_setup || !!status.manual_override;
     $("world-low-vram").disabled = m.id !== "worldgen"; $("world-mesh").disabled = m.id !== "worldgen";
     $("world-fp8").disabled = m.id !== "world1";
   }
@@ -3227,6 +3230,7 @@
       } catch (err) { toast(err.message, "error"); }
     });
     $("model3d-engine")?.addEventListener("change", configure3DVariants);
+    if ($("model3d-engine")) configure3DVariants();
     $("model3d-variant")?.addEventListener("change", () => { if (["hunyuan2","hunyuanmini"].includes($("model3d-engine").value)) $("model3d-steps").value = $("model3d-variant").value === "turbo" ? "5" : "30"; update3DRuntime(); });
     $("model3d-upload")?.addEventListener("change", async e => {
       const file = e.target.files?.[0]; if (!file) return;
@@ -3236,7 +3240,7 @@
     async function prepareScene(world) {
       const prefix = world ? "world" : "model3d";
       try {
-        const body = {engine:$(prefix+"-engine").value, variant:world ? "base" : $("model3d-variant").value, texture:!world && $("model3d-texture").checked, license_accepted:$(prefix+"-license").checked};
+        const body = {engine:$(prefix+"-engine").value, variant:world ? ($("world-engine").value === "worldsplat" ? $("world-variant").value : "base") : $("model3d-variant").value, texture:!world && $("model3d-texture").checked, license_accepted:$(prefix+"-license").checked};
         const res = await api("/api/3d/prepare", {method:"POST", body:JSON.stringify(body)});
         $(prefix+"-feedback").textContent = "Preparación en cola: sigue el monitor para progreso, errores y cancelación.";
         watchJob(res.job);
@@ -3254,6 +3258,7 @@
       } catch (err) { $("model3d-feedback").textContent = err.message; toast(err.message, "error"); }
     });
     $("world-engine")?.addEventListener("change", updateWorldRuntime);
+    $("world-variant")?.addEventListener("change", updateWorldRuntime);
     $("world-clear")?.addEventListener("click", () => Array.from($("world-images").options).forEach(o => { o.selected = false; }));
     $("world-upload")?.addEventListener("change", async e => {
       const file = e.target.files?.[0]; if (!file) return;
@@ -3261,7 +3266,7 @@
       catch (err) { toast(err.message, "error"); } finally { e.target.value = ""; }
     });
     $("world-run")?.addEventListener("click", async () => {
-      const body = {engine:$("world-engine").value, images_rel:Array.from($("world-images").selectedOptions).map(o=>o.value), prompt:$("world-prompt").value, seed:Number($("world-seed").value), low_vram:$("world-low-vram").checked, mesh:$("world-mesh").checked, fp8:$("world-fp8").checked, license_accepted:$("world-license").checked};
+      const body = {engine:$("world-engine").value, variant:$("world-engine").value === "worldsplat" ? $("world-variant").value : "base", images_rel:Array.from($("world-images").selectedOptions).map(o=>o.value), prompt:$("world-prompt").value, seed:Number($("world-seed").value), low_vram:$("world-low-vram").checked, mesh:$("world-mesh").checked, fp8:$("world-fp8").checked, license_accepted:$("world-license").checked};
       try { const res = await api("/api/worlds/generate", {method:"POST",body:JSON.stringify(body)}); $("world-feedback").textContent="Trabajo en cola: consulta el monitor."; watchJob(res.job); }
       catch (err) { $("world-feedback").textContent=err.message; toast(err.message,"error"); }
     });

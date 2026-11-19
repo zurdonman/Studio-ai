@@ -54,10 +54,12 @@ async function until(test, label) {
   await until(() => $('model3d-catalog').textContent.includes('Stable Fast 3D') && $('model3d-image').options.length > 1, '3D ready');
   if (!$('tab-3d').classList.contains('active') || !$('model3d-runtime').textContent.includes('automáticamente')) throw Error('missing runtime status');
   if ($('model3d-prepare').disabled) throw Error('preparation should be enabled');
+  if (!Array.from($('model3d-variant').options).some(o=>o.value==='onnx')) throw Error('SF3D ONNX missing');
+  $('model3d-variant').value='onnx'; $('model3d-variant').dispatchEvent(new w.Event('change'));
   $('model3d-license').checked=true; $('model3d-prepare').click();
   await until(() => calls.some(x => x.path === '/api/3d/prepare'), 'prepare submit');
   const prep=JSON.parse(calls.find(x=>x.path==='/api/3d/prepare').body);
-  if(prep.engine!=='sf3d' || !prep.license_accepted) throw Error('bad prepare payload');
+  if(prep.engine!=='sf3d' || prep.variant!=='onnx' || !prep.license_accepted) throw Error('bad prepare payload');
   $('model3d-engine').value = 'triposr'; $('model3d-engine').dispatchEvent(new w.Event('change'));
   if (!$('model3d-resolution').disabled || !$('model3d-runtime').textContent.includes('configuradas')) throw Error('TripoSR state');
   $('model3d-image').value='outputs/images/ref.png'; $('model3d-license').checked=true;
