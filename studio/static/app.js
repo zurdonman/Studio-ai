@@ -2694,7 +2694,7 @@
 
   function renderH3Images() {
     const images = [...state.assets.images, ...state.assets.uploads.filter(a => a.type === "image")];
-    for (const [id, placeholder] of [["h3-start", "— Solo texto —"], ["h3-end", "— Sin fotograma final —"], ["wan22-image", "Selecciona una imagen"]]) {
+    for (const [id, placeholder] of [["h3-start", "— Solo texto —"], ["h3-end", "— Sin fotograma final —"], ["wan22-image", "Selecciona una imagen"], ["wan22-end", "Selecciona la imagen final"]]) {
       const select = $(id); if (!select) continue;
       const previous = select.value;
       select.innerHTML = `<option value="">${placeholder}</option>` + images.map(a =>
@@ -3214,19 +3214,40 @@
   // ==================== EVENTOS DE UI ====================
   function bindEvents() {
     bindH3();
-    $("wan22-upload")?.addEventListener("change", async ev => {
-      const file = ev.target.files?.[0]; if (!file) return;
-      try { const asset = await uploadFile(file); $("wan22-image").value = asset.rel_path; }
-      catch (e) { toast(e.message, "error"); } finally { ev.target.value = ""; }
-    });
+    function configureWan22() {
+      const recipe = $("wan22-recipe").value, mode = $("wan22-mode");
+      for (const opt of mode.options) opt.disabled = recipe === "i2v" && opt.value !== "i2v";
+      if (recipe === "i2v" && mode.value !== "i2v") mode.value = "i2v";
+      for (const opt of $("wan22-quant").options) opt.disabled = recipe === "fun" ? opt.value === "nvfp4" : ["q4_0","q4_1"].includes(opt.value);
+      if ($("wan22-quant").selectedOptions[0]?.disabled) $("wan22-quant").value = "q4";
+      $("wan22-image").disabled = mode.value === "t2v";
+      $("wan22-upload").disabled = mode.value === "t2v";
+      $("wan22-end").disabled = mode.value !== "flf2v";
+      $("wan22-end-upload").disabled = mode.value !== "flf2v";
+    }
+    $("wan22-recipe")?.addEventListener("change", configureWan22);
+    $("wan22-mode")?.addEventListener("change", configureWan22);
+    configureWan22();
+    for (const [upload, select] of [["wan22-upload","wan22-image"],["wan22-end-upload","wan22-end"]]) {
+      $(upload)?.addEventListener("change", async ev => {
+        const file = ev.target.files?.[0]; if (!file) return;
+        try { const asset = await uploadFile(file); $(select).value = asset.rel_path; }
+        catch (e) { toast(e.message, "error"); } finally { ev.target.value = ""; }
+      });
+    }
     $("wan22-run")?.addEventListener("click", async () => {
       const feedback = $("wan22-feedback");
       if (!$("wan22-install").checked) { feedback.textContent = "Autoriza la preparación local."; return; }
-      const body = {quant:$("wan22-quant").value, image_rel:$("wan22-image").value, prompt:$("wan22-prompt").value,
+      const mode = $("wan22-mode").value;
+      const body = {recipe:$("wan22-recipe").value, mode, quant:$("wan22-quant").value,
+        image_rel:mode === "t2v" ? null : $("wan22-image").value || null,
+        end_image_rel:mode === "flf2v" ? $("wan22-end").value || null : null, prompt:$("wan22-prompt").value,
         negative:$("wan22-negative").value, width:Number($("wan22-width").value), height:Number($("wan22-height").value),
         frames:Number($("wan22-frames").value), steps:Number($("wan22-steps").value), cfg:Number($("wan22-cfg").value),
         seed:Number($("wan22-seed").value), install_accepted:true};
-      if (!body.image_rel || !body.prompt.trim()) { feedback.textContent = "Selecciona una imagen y escribe una descripción."; return; }
+      if (!body.prompt.trim() || (mode !== "t2v" && !body.image_rel) || (mode === "flf2v" && !body.end_image_rel)) {
+        feedback.textContent = "Escribe una descripción y selecciona las imágenes requeridas para la modalidad."; return;
+      }
       try { const result = await api("/api/video/wan22-i2v", {method:"POST",body:JSON.stringify(body)});
         feedback.textContent = "Trabajo en cola. Sigue la descarga y generación en el monitor; el vídeo aparecerá en la biblioteca."; watchJob(result.job);
       } catch (e) { feedback.textContent = e.message; toast(e.message, "error"); }

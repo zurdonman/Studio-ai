@@ -23,3 +23,17 @@ La primera ejecución, tras autorización, instala el runtime Comfy aislado si f
 Los tamaños de archivos no equivalen a VRAM/RAM ni incluyen entorno y temporales. FP4 y GGUF Q4 son formatos distintos. NVIDIA L4 no tiene cómputo FP4 nativo: NVFP4 puede necesitar conversión/emulación, ser lento o fallar. **Ninguna variante, combinación de pesos, resolución ni rendimiento ha sido validada en GPU o L4 en esta integración**; se ha comprobado la aceptación del grafo por el Comfy fijado usando archivos ficticios, no inferencia. No se promete que A14B sea mejor para todas las entradas: compara misma imagen, prompt, semilla y ajustes, y evalúa visualmente.
 
 Fuentes y términos: [Wan-AI](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) (Apache 2.0), [GGUF QuantStack](https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF), [FP8 Comfy-Org](https://huggingface.co/Comfy-Org/Wan-2.2) y [NVFP4 mixto GitMylo](https://huggingface.co/GitMylo/Wan_2.2_nvfp4). Revisa también las licencias de todos los componentes. El gráfico sigue la estructura de la [plantilla oficial I2V](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/video_wan2_2_14B_i2v.json), sin las LoRA de aceleración de esa plantilla.
+
+## Wan 2.2 Fun A14B InP: texto, imagen e inicio–final
+
+En la pestaña **Vídeo**, abre **Wan 2.2 A14B**, elige el modelo **Fun InP A14B**, la modalidad y la cuantización. La misma pareja de expertos de Fun sirve para:
+
+- **Texto a vídeo:** solo prompt; no se usan imágenes.
+- **Imagen a vídeo:** prompt y fotograma inicial.
+- **Inicio → final:** prompt y dos imágenes explícitas; el modelo intenta generar la transición, pero no garantiza reproducir fielmente ambos fotogramas.
+
+El grafo usa el nodo Comfy `WanFunInpaintToVideo`, que prepara latentes y máscaras para cero, una o dos imágenes. Las imágenes se encajan sin recortar y pueden aparecer márgenes; la salida es muda a 16 fps. La receta original **I2V A14B** sigue separada y solo admite imagen inicial. No son pesos intercambiables: se descargan high y low de Fun para cada cuantización, más UMT5 y VAE compartidos. No se descarga ni cambia de modelo automáticamente entre modos.
+
+Fun admite **FP8 scaled** de Comfy-Org y **GGUF QuantStack** Q2_K, Q3_K_S/M, Q4_0/1, Q4_K_S/M, Q5_0/1, Q5_K_S/M, Q6_K y Q8_0. FP8 son aproximadamente 35,6 GB y Q4_K_M 26,3 GB en archivos (GB decimales), sin incluir entorno, temporales ni cachés; no son requisitos de VRAM. NVFP4 de la receta I2V **no está disponible para Fun**. Los archivos se descargan con revisión fijada, tamaño y SHA-256; no se incluyen en Studio. La selección requiere autorizar descarga.
+
+**Experimental**: se ha validado el esquema del grafo con Comfy y archivos ficticios, además de tests simulados, pero **no instalación/inferencia con pesos reales ni GPU/L4**. Puede fallar o superar la memoria disponible; los tiempos y estimaciones no son garantía. Se recomiendan primero 512×320 y clips cortos. Consultar [Wan2.2-Fun-A14B-InP y licencia Apache 2.0](https://huggingface.co/alibaba-pai/Wan2.2-Fun-A14B-InP), [GGUF QuantStack](https://huggingface.co/QuantStack/Wan2.2-Fun-A14B-InP-GGUF), [FP8 Comfy](https://huggingface.co/Comfy-Org/Wan-2.2) y licencias de dependencias.

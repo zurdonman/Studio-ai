@@ -29,16 +29,42 @@ SAFE = {
 }
 
 
-def files_for(quant):
-    if quant in GGUF:
-        suffix, size, high, low = GGUF[quant]
-        experts = tuple((stage.lower(), GGUF_REPO, GGUF_REV, f'{stage}Noise/Wan2.2-I2V-A14B-{stage}Noise-{suffix}.gguf', size, digest)
-                        for stage, digest in (('High', high), ('Low', low)))
-    elif quant in SAFE:
-        repo, revision, template, size, high, low = SAFE[quant]
-        experts = tuple((stage, repo, revision, template.format(stage=stage), size, digest)
-                        for stage, digest in (('high', high), ('low', low)))
-    else:
-        raise ValueError('WAN22_QUANT_INVALID')
-    # Wan 2.1 VAE and UMT5 as used in the official Comfy I2V template.
+# Wan2.2-Fun-A14B-InP: a distinct 14B-per-expert model supporting text,
+# image, and first/last frames. QuantStack exports are NOT I2V-A14B weights.
+FUN_REPO = 'QuantStack/Wan2.2-Fun-A14B-InP-GGUF'
+FUN_REV = '6a24c79dc08b02363a67239c7091fffb365efd0d'
+FUN_GGUF = {
+ 'q2': ('Q2_K',5310798464,'828b1e659f3e46beb4388984e58d824f0a7aaca1f71b995c5cc1ded409d4a6f5','7c1aa823290dbd6378fe7dfc5a94bf37838b899021ecaabe8eb1e2501086f236'),
+ 'q3s': ('Q3_K_S',6524852864,'96b2a936a5d2abd5ca894b0f82e3300133762359e9cd43c64cadd9e8e5157f17','dbac606a191ef4841883aa0ea01860fbd28d2ea44f6ceed394f4cdeccf2de8ec'),
+ 'q3': ('Q3_K_M',7185947264,'348e499a7b189543850e6ba0fa8c346b0ebf268acd2bc207ad0b370ec608bc89','f310d4a872b4a503e858cbd97268947d0d4ab63597305a5e2357e95175737c11'),
+ 'q4_0': ('Q4_0',8567937664,'46f197ef83d9e5d33b26ae49a6dfc369081629e1d4a94d25d162bb81f207824a','fb424345830b5d045e43261bc15f53b1a72e6a6b8e0d1cc22476b296cd9767e8'),
+ 'q4_1': ('Q4_1',9269172864,'d683748908ca5d7ee1e1ce5ba13aed5fee558ddc1876a659f6c7386b06da6703','e9d5938aedeb30463ac5640e03c614c667df7672a0d7f1d3c94237a16297a064'),
+ 'q4s': ('Q4_K_S',8757992064,'6e0703a4ef02cba81677ac7d6cde1d229ddd77b32f338714d30640e6f102c429','181f6a8684d763403a5cdb04a7704ae6b6b94e2db92d201d46cb7d2da0da9dca'),
+ 'q4': ('Q4_K_M',9661569664,'a7f1a6a377d37d9453efcae7de03f720067bf3e25f52081818d0526cd60d9d46','5354d1e4655647064ac86c6fcdecd032254c2c59a87ccda63ce1cf20834aebd1'),
+ 'q5_0': ('Q5_0',10324302464,'3cd3f50b5cc9bf997beec65ec7c370fcd22edbb20d7cc6d8934f3f3eea6515fc','dde40d406450f464db87c3371db3d7c2fc0d98327a2f79c03a5ac43b6400c9b6'),
+ 'q5_1': ('Q5_1',11025537664,'1f3cc77bbbb541b18ed51de3e97b24d4d7579f3e0a15b92d44e58e44110b0a3d','7910eb494f3155ab132203721d5c7a4586c8290046d59c323f7cfdef78d2ffaa'),
+ 'q5s': ('Q5_K_S',10147355264,'2c92e5433a90d4874c1d73934b5f098469b60c99bdaac067c004dcf96d3807fe','e16aae643a561551a68fe4bac2ec9691d00e5d2286ac2775c1d05d0e6eb5c1e1'),
+ 'q5': ('Q5_K_M',10801896064,'04417746fab36d72fe7fe025b11aca8404c9c52bc045181be58147d60f5cb8ab','3e2cfdc87fc170a87fb43be0b7554b4e644225bdd84a2a37d93ecd6fa39f6885'),
+ 'q6': ('Q6_K',12013492864,'07274b920e7b0610f911c45ea860572a44616552768a7518682419f2d2633e6d','28b1e179f5237549c5eab03ab0e460879298e76480570c0ce40a5e92a8209468'),
+ 'q8': ('Q8_0',15416449664,'83a8f323170067afbe03cde982d3cfbf89aa2ab03846b96e7786294d98ed9b6a','64cd19132b76acfa6e5afcd4a0dceb9c43e9f33a2757a7791030090788b3e077'),
+}
+FUN_FP8 = (COMFY_REPO, COMFY_REV, 'split_files/diffusion_models/wan2.2_fun_inpaint_{stage}_noise_14B_fp8_scaled.safetensors',14294743520,
+           '6106c137d8a921bc17d579c3e9deaa4fc4fadbc77fbe733f43ff19bb33ec3995','a3981f3e0f79c59fb3cffe1240ee34656bbc57e599101fac2b7140461037ab9c')
+
+
+def files_for(quant, recipe='i2v'):
+    if recipe not in ('i2v', 'fun'): raise ValueError('WAN22_RECIPE_INVALID')
+    gguf = FUN_GGUF if recipe == 'fun' else GGUF
+    safe = {'fp8': FUN_FP8} if recipe == 'fun' else SAFE
+    if quant in gguf:
+        suffix, size, high, low = gguf[quant]
+        repo, rev = (FUN_REPO, FUN_REV) if recipe == 'fun' else (GGUF_REPO, GGUF_REV)
+        template = '{stage}Noise/Wan2.2-Fun-A14B-InP_{stage}Noise-{suffix}.gguf' if recipe == 'fun' else '{stage}Noise/Wan2.2-I2V-A14B-{stage}Noise-{suffix}.gguf'
+        experts = tuple((stage.lower(),repo,rev,template.format(stage=stage,suffix=suffix),size,digest)
+                        for stage,digest in (('High',high),('Low',low)))
+    elif quant in safe:
+        repo,revision,template,size,high,low = safe[quant]
+        experts = tuple((stage,repo,revision,template.format(stage=stage),size,digest)
+                        for stage,digest in (('high',high),('low',low)))
+    else: raise ValueError('WAN22_QUANT_INVALID: variante no disponible para esta receta')
     return (*experts, MOTION_COMMON[0], MOTION_COMMON[2])

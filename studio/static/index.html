@@ -439,20 +439,25 @@
           </div>
 
           <details class="ltx-gguf-callout" id="wan22-panel">
-            <summary><strong>🧪 Wan 2.2 I2V A14B · dos expertos (experimental)</strong></summary>
+            <summary><strong>🧪 Wan 2.2 A14B · imagen / texto / inicio-fin (experimental)</strong></summary>
             <div class="form-stack">
-              <p>Imagen a vídeo sin audio: usa dos expertos, high-noise y low-noise. Es un motor distinto de Wan Animate para transferir movimiento. Sin validación real en L4/GPU; puede fallar por memoria y no garantiza mejor calidad.</p>
+              <p>Dos recetas con dos expertos high-noise y low-noise: I2V original para imagen a vídeo; Fun InP para texto, imagen o fotograma inicial y final. Vídeo sin audio. Es un motor distinto de Wan Animate para transferir movimiento. Sin validación real en L4/GPU; puede fallar por memoria y no garantiza mejor calidad.</p>
               <p>La primera ejecución descarga ambos expertos más UMT5 y VAE: Q2 ~17,6 GB, Q4 ~26,3 GB, FP8 ~35,6 GB (GB decimales), más entorno y espacio temporal. FP4 es NVFP4 mixto comunitario; la L4 no tiene FP4 nativo, su compatibilidad aquí no está probada. <a href="https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B" target="_blank" rel="noopener noreferrer">Modelo y licencia</a> · <a href="https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF" target="_blank" rel="noopener noreferrer">GGUF</a> · <a href="https://huggingface.co/GitMylo/Wan_2.2_nvfp4" target="_blank" rel="noopener noreferrer">NVFP4 mixto</a>.</p>
-              <label>Variante<select id="wan22-quant"><option value="q2">GGUF Q2_K</option><option value="q3s">GGUF Q3_K_S</option><option value="q3">GGUF Q3_K_M</option><option value="q4s">GGUF Q4_K_S</option><option value="q4" selected>GGUF Q4_K_M</option><option value="q5s">GGUF Q5_K_S</option><option value="q5_0">GGUF Q5_0</option><option value="q5">GGUF Q5_K_M</option><option value="q5_1">GGUF Q5_1</option><option value="q6">GGUF Q6_K</option><option value="q8">GGUF Q8_0</option><option value="fp8">FP8 scaled Comfy</option><option value="nvfp4">NVFP4 mixto comunitario</option></select></label>
+              <label>Modelo<select id="wan22-recipe"><option value="i2v">Wan 2.2 I2V A14B</option><option value="fun">Wan 2.2 Fun InP A14B · texto / imagen / inicio-fin</option></select></label>
+              <label>Modalidad<select id="wan22-mode"><option value="i2v">Imagen a vídeo</option><option value="t2v">Texto a vídeo · Fun InP</option><option value="flf2v">Inicio → final · Fun InP</option></select></label>
+              <label>Cuantización<select id="wan22-quant"><option value="q2">GGUF Q2_K</option><option value="q3s">GGUF Q3_K_S</option><option value="q3">GGUF Q3_K_M</option><option value="q4_0">GGUF Q4_0 · Fun</option><option value="q4_1">GGUF Q4_1 · Fun</option><option value="q4s">GGUF Q4_K_S</option><option value="q4" selected>GGUF Q4_K_M</option><option value="q5s">GGUF Q5_K_S</option><option value="q5_0">GGUF Q5_0</option><option value="q5">GGUF Q5_K_M</option><option value="q5_1">GGUF Q5_1</option><option value="q6">GGUF Q6_K</option><option value="q8">GGUF Q8_0</option><option value="fp8">FP8 scaled Comfy</option><option value="nvfp4">NVFP4 mixto comunitario</option></select></label>
               <label>Imagen inicial<select id="wan22-image"><option value="">Selecciona una imagen</option></select></label>
-              <label class="btn btn-secondary btn-sm file-btn">Subir imagen<input type="file" id="wan22-upload" accept="image/*" hidden /></label>
+              <label class="btn btn-secondary btn-sm file-btn">Subir imagen inicial<input type="file" id="wan22-upload" accept="image/*" hidden /></label>
+              <label>Imagen final (solo inicio → final)<select id="wan22-end"><option value="">Selecciona la imagen final</option></select></label>
+              <label class="btn btn-secondary btn-sm file-btn">Subir imagen final<input type="file" id="wan22-end-upload" accept="image/*" hidden /></label>
               <label>Descripción<textarea id="wan22-prompt" rows="3" maxlength="2000"></textarea></label>
               <label>Negativo (opcional)<textarea id="wan22-negative" rows="2" maxlength="2000"></textarea></label>
               <div class="params-grid-4"><label>Ancho<input id="wan22-width" type="number" min="256" max="1280" step="32" value="512" /></label><label>Alto<input id="wan22-height" type="number" min="256" max="1280" step="32" value="320" /></label><label>Fotogramas (4n+1)<input id="wan22-frames" type="number" min="5" max="81" step="4" value="49" /></label><label>Pasos<input id="wan22-steps" type="number" min="4" max="60" value="40" /></label></div>
               <div class="params-grid-2"><label>CFG<input id="wan22-cfg" type="number" min="1" max="10" step="0.1" value="3.5" /></label><label>Semilla<input id="wan22-seed" type="number" min="0" max="4294967295" value="42" /></label></div>
               <p class="muted">16 fps, máximo 81 fotogramas (~5 s); imagen ajustada sin recortar con posibles márgenes. Más pasos y resolución requieren mucho tiempo y memoria. La política Comfy es automática; el proceso se cierra al terminar.</p>
               <label class="check-row"><input id="wan22-install" type="checkbox" /> Autorizo la preparación y descarga local de la variante seleccionada y sus componentes.</label>
-              <button type="button" class="btn btn-primary" id="wan22-run">Generar con Wan 2.2 I2V</button><p id="wan22-feedback" role="status" class="muted"></p>
+              <p class="muted">Fun InP es un modelo distinto del I2V original, con pesos propios: <a href="https://huggingface.co/alibaba-pai/Wan2.2-Fun-A14B-InP" target="_blank" rel="noopener noreferrer">modelo y licencia</a> · <a href="https://huggingface.co/QuantStack/Wan2.2-Fun-A14B-InP-GGUF" target="_blank" rel="noopener noreferrer">GGUF</a>. Sin pruebas reales GPU.</p>
+              <button type="button" class="btn btn-primary" id="wan22-run">Generar con Wan 2.2 A14B</button><p id="wan22-feedback" role="status" class="muted"></p>
             </div>
           </details>
 

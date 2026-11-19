@@ -22,28 +22,30 @@ from studio.memory_manager import memory_manager, serialized_gpu_operation
 WEIGHTS = DATA_ROOT/'models'/'wan22-i2v-a14b'
 
 
-def make_graph(*, quant, names, image_name, prompt, negative, width, height, frames, seed, steps, cfg):
-    files_for(quant)
+def make_graph(*, quant, names, image_name, prompt, negative, width, height, frames, seed, steps, cfg, recipe='i2v', mode='i2v', end_image_name=None):
+    files_for(quant, recipe)
+    if mode not in ('t2v','i2v','flf2v') or (recipe == 'i2v' and mode != 'i2v'): raise ValueError('WAN22_MODE_INVALID')
+    if (mode in ('i2v','flf2v') and not image_name) or (mode == 'flf2v' and not end_image_name): raise ValueError('WAN22_IMAGE_REQUIRED')
+    if (mode == 't2v' and (image_name or end_image_name)) or (mode == 'i2v' and end_image_name): raise ValueError('WAN22_IMAGE_MODE_MISMATCH')
     if not prompt.strip() or len(prompt) > 2000 or len(negative) > 2000: raise ValueError('WAN22_PROMPT_INVALID')
     if width < 256 or height < 256 or width % 32 or height % 32 or width * height > 1280*720 or max(width,height)>1280:
         raise ValueError('WAN22_SIZE_INVALID: múltiplos de 32, área máxima 1280×720.')
     if frames < 5 or frames > 81 or (frames-1)%4 or not 4 <= steps <= 60 or not math.isfinite(cfg) or not 1 <= cfg <= 10 or not 0 <= seed < 2**32:
         raise ValueError('WAN22_CONFIG_INVALID: frames 4n+1 entre 5 y 81; pasos 4–60.')
-    for value in [image_name, *(names.get(k, '') for k in ('high','low','umt5','vae'))]:
-        if not isinstance(value, str) or not value or '/' in value or '\\' in value or value in ('.','..'): raise ValueError('WAN22_FILENAME_INVALID')
+    for value in [*(v for v in (image_name,end_image_name) if v), *(names.get(k, '') for k in ('high','low','umt5','vae'))]:
+        if not isinstance(value, str) or not value or '/' in value or chr(92) in value or value in ('.','..'): raise ValueError('WAN22_FILENAME_INVALID')
     def n(kind, **inputs): return {'class_type':kind,'inputs':inputs}
     loader = 'UnetLoaderGGUF' if quant.startswith('q') else 'UNETLoader'
     def load(name): return n(loader, unet_name=name, **({} if quant.startswith('q') else {'weight_dtype':'default'}))
     split = steps // 2
     sampler = {'steps':steps, 'cfg':cfg, 'sampler_name':'euler', 'scheduler':'simple', 'positive':['8',0], 'negative':['8',1], 'noise_seed':seed}
-    return {
+    graph = {
         '1':load(names['high']), '2':load(names['low']),
         '3':n('CLIPLoader', clip_name=names['umt5'], type='wan', device='default'),
         '4':n('VAELoader', vae_name=names['vae']),
-        '5':n('LoadImage', image=image_name),
         '6':n('CLIPTextEncode', clip=['3',0], text=prompt),
         '7':n('CLIPTextEncode', clip=['3',0], text=negative),
-        '8':n('WanImageToVideo', positive=['6',0], negative=['7',0], vae=['4',0], start_image=['5',0], width=width, height=height, length=frames, batch_size=1),
+        '8':n('WanFunInpaintToVideo' if recipe == 'fun' else 'WanImageToVideo', positive=['6',0], negative=['7',0], vae=['4',0], width=width, height=height, length=frames, batch_size=1),
         '9':n('ModelSamplingSD3', model=['1',0], shift=5.0),
         '10':n('ModelSamplingSD3', model=['2',0], shift=5.0),
         '11':n('KSamplerAdvanced', model=['9',0], add_noise='enable', start_at_step=0, end_at_step=split, return_with_leftover_noise='enable', latent_image=['8',2], **sampler),
@@ -52,10 +54,17 @@ def make_graph(*, quant, names, image_name, prompt, negative, width, height, fra
         '14':n('CreateVideo', images=['13',0], fps=16.0),
         '15':n('SaveVideo', video=['14',0], filename_prefix='studio_wan22_i2v', format='auto', **{'format.codec':'auto'}),
     }
+    if image_name:
+        graph['5'] = n('LoadImage', image=image_name)
+        graph['8']['inputs']['start_image'] = ['5',0]
+    if end_image_name:
+        graph['16'] = n('LoadImage', image=end_image_name)
+        graph['8']['inputs']['end_image'] = ['16',0]
+    return graph
 
 
-def _prepare(quant, job):
-    files = files_for(quant); WEIGHTS.mkdir(parents=True, exist_ok=True)
+def _prepare(quant, job, recipe='i2v'):
+    files = files_for(quant, recipe); WEIGHTS.mkdir(parents=True, exist_ok=True)
     for _, _, _, filename, _, _ in files:
         if (WEIGHTS/'ltx'/filename).is_symlink(): raise RuntimeError('WAN22_FILE_CONFLICT: archivo de modelo es un enlace.')
     missing = sum(size for _, _, _, name, size, _ in files if not (WEIGHTS/'ltx'/name).is_file())
@@ -67,7 +76,7 @@ def _prepare(quant, job):
     from studio.catalog import catalog_manager
     token = catalog_manager.get_hf_token()
     if token: env['HF_TOKEN'] = token
-    common._command([sys.executable,'-m','studio.engines.wan22_i2v_download',str(WEIGHTS),quant],job,
+    common._command([sys.executable,'-m','studio.engines.wan22_i2v_download',str(WEIGHTS),quant,recipe],job,
                     stage='Descargando y verificando los dos expertos Wan, UMT5 y VAE',timeout=28800,env=env)
     names = {}
     for role, _, _, filename, _, _ in files:
@@ -83,30 +92,35 @@ def _prepare(quant, job):
 
 
 @serialized_gpu_operation(slots=('video',), managed=True)
-def generate(*, quant, image_path: Path, prompt: str, negative: str, width: int, height: int,
-             frames: int, steps: int, cfg: float, seed: int, job: Any):
-    started = time.monotonic(); files = files_for(quant)
-    make_graph(quant=quant,names={x[0]:'placeholder' for x in files},image_name='reference.png',prompt=prompt,negative=negative,
+def generate(*, quant, image_path: Path | None, prompt: str, negative: str, width: int, height: int,
+             frames: int, steps: int, cfg: float, seed: int, job: Any, recipe='i2v', mode='i2v', end_image_path: Path | None=None):
+    started = time.monotonic(); files = files_for(quant, recipe)
+    make_graph(quant=quant,names={x[0]:'placeholder' for x in files},image_name='reference.png' if image_path else None,
+               end_image_name='end.png' if end_image_path else None, recipe=recipe, mode=mode, prompt=prompt,negative=negative,
                width=width,height=height,frames=frames,seed=seed,steps=steps,cfg=cfg)
-    if not image_path.is_file() or image_path.stat().st_size > 50*1024**2: raise ValueError('WAN22_IMAGE_INVALID')
-    w,h = verify_image_file(image_path)
-    if w*h > 32_000_000: raise ValueError('WAN22_IMAGE_TOO_LARGE')
+    for path in (image_path, end_image_path):
+        if path is None: continue
+        if not path.is_file() or path.stat().st_size > 50*1024**2: raise ValueError('WAN22_IMAGE_INVALID')
+        w,h = verify_image_file(path)
+        if w*h > 32_000_000: raise ValueError('WAN22_IMAGE_TOO_LARGE')
     gpu = common.query_gpu_info()
     if not gpu.get('has_gpu') or not gpu.get('bf16_supported'): raise RuntimeError('WAN22_GPU_UNSUPPORTED: GPU NVIDIA CUDA BF16 requerida.')
-    job.log('Wan 2.2 I2V A14B experimental: dos expertos, sin audio, no probado con pesos/GPU. Más resolución y pasos aumentan coste y memoria.',level='warning')
+    job.log(f'Wan 2.2 {recipe} A14B · {mode}: dos expertos, sin audio; no probado con pesos/GPU. Más resolución y pasos aumentan coste y memoria.',level='warning')
     if quant == 'nvfp4': job.log('NVFP4 mixto comunitario: sin FP4 nativo en L4; compatibilidad y velocidad no comprobadas.',level='warning')
     job.comfy_keep_loaded = False
     common._switch_to_idle(job)
-    ram = {'q2':18,'q3s':21,'q3':22,'q4s':25,'q4':27,'q5s':28,'q5_0':28,'q5':29,'q5_1':30,'q6':32,'q8':39,'fp8':38,'nvfp4':29}[quant]
-    memory_manager.ensure_capacity(ram_gb=ram,vram_gb=12,stage='Wan I2V: presupuesto preventivo no medido',job=job)
-    names = _prepare(quant, job)
-    memory_manager.ensure_capacity(ram_gb=ram,vram_gb=12,stage='Wan I2V: antes de cargar',job=job)
-    common._comfy_start_admission(job,stage='Inicio Wan I2V',planned_ram=6,planned_vram=3)
-    session = common._open_resident(job,names,f'wan22-i2v-{quant}')
+    ram = {'q2':18,'q3s':21,'q3':22,'q4s':25,'q4_0':25,'q4_1':26,'q4':27,'q5s':28,'q5_0':28,'q5':29,'q5_1':30,'q6':32,'q8':39,'fp8':38,'nvfp4':29}[quant]
+    memory_manager.ensure_capacity(ram_gb=ram,vram_gb=12,stage='Wan A14B: presupuesto preventivo no medido',job=job)
+    names = _prepare(quant, job) if recipe == 'i2v' else _prepare(quant, job, recipe)
+    memory_manager.ensure_capacity(ram_gb=ram,vram_gb=12,stage='Wan A14B: antes de cargar',job=job)
+    common._comfy_start_admission(job,stage='Inicio Wan A14B',planned_ram=6,planned_vram=3)
+    session = common._open_resident(job,names,f'wan22-{recipe}-{quant}')
     success = False
     try:
-        fit_reference_image(image_path,session.input_dir/'reference.png',width,height)
-        graph = make_graph(quant=quant,names=names,image_name='reference.png',prompt=prompt,negative=negative,
+        if image_path: fit_reference_image(image_path,session.input_dir/'reference.png',width,height)
+        if end_image_path: fit_reference_image(end_image_path,session.input_dir/'end.png',width,height)
+        graph = make_graph(quant=quant,names=names,image_name='reference.png' if image_path else None,
+                           end_image_name='end.png' if end_image_path else None,recipe=recipe,mode=mode,prompt=prompt,negative=negative,
                            width=width,height=height,frames=frames,steps=steps,cfg=cfg,seed=seed)
         result = _infer(session,graph,job,prefix='studio_wan22_i2v')
         info = probe_media_info(result)
@@ -116,7 +130,7 @@ def generate(*, quant, image_path: Path, prompt: str, negative: str, width: int,
         name = f'wan22_i2v_{quant}_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}.mp4'
         dest = VIDEOS_OUT_DIR/name; meta_path=dest.with_suffix('.json'); created=False
         meta={'id':dest.stem,'filename':name,'rel_path':f'outputs/videos/{name}','media_url':f'/media/outputs/videos/{name}',
-              'type':'video','model_id':f'wan22-i2v-a14b-{quant}-experimental','model_name':f'Wan 2.2 I2V A14B · {quant.upper()} experimental',
+              'type':'video','model_id':f'wan22-{recipe}-a14b-{quant}-experimental','model_name':f'Wan 2.2 {"Fun InP" if recipe == "fun" else "I2V"} A14B · {quant.upper()} experimental', 'video_submode':mode,
               'width':width,'height':height,'fps':16,'duration_seconds':info['duration_seconds'],'steps':steps,'guidance_scale':cfg,'seed':seed,
               'has_audio':False,'elapsed_seconds':round(time.monotonic()-started,1)}
         try:
