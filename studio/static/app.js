@@ -719,13 +719,83 @@
     }
   }
 
+  // Families describe model architectures/versions, never hardware capability.
+  // Unknown/custom recipes remain independently selectable rather than being
+  // silently merged or advertised as having a precision we cannot establish.
+  function modelFamily(m) {
+    const id = (m.id || "").toLowerCase();
+    let match;
+    if ((match = id.match(/^ltx-(2\.[35])-(full|distilled)/))) return `LTX ${match[1]} · ${match[2] === "full" ? "completo" : "destilado"}`;
+    if (id.startsWith("ltx-2.3") && id.includes("gguf")) return "LTX 2.3 · destilado";
+    if (id.startsWith("wan21-flf2v-14b")) return "Wan 2.1 FLF2V 14B";
+    if (id.startsWith("wan21-fun-inp-14b")) return "Wan 2.1 Fun-InP 14B";
+    if (id.startsWith("wan21-vace-14b")) return "Wan 2.1 VACE 14B";
+    if (id.startsWith("wan22-ti2v-5b")) return "Wan 2.2 TI2V 5B";
+    // Models with no explicit family mapping keep their name; avoid guessing
+    // that differently sized checkpoints or tasks are interchangeable.
+    return m.family || (m.name || m.id || "Modelo sin nombre").split("(")[0].trim();
+  }
+
+  function modelPrecision(m) {
+    const text = `${m.id || ""} ${m.name || ""}`.toLowerCase();
+    if (/nvfp4/.test(text)) return /gguf/.test(text) ? "NVFP4 + GGUF" : "NVFP4";
+    if (/fp8/.test(text)) return /gguf/.test(text) ? "FP8 + GGUF" : "FP8";
+    if (/gguf/.test(text)) {
+      const quant = text.match(/gguf[- _]*(?:ud[- _]*)?(q[2-8])/) || text.match(/\b(q[2-8])(?:[_-]|\b)/);
+      return quant ? `GGUF ${quant[1].toUpperCase()}` : "GGUF";
+    }
+    if (/4[- ]?bit/.test(text)) return "4 bits";
+    if (/8[- ]?bit/.test(text)) return "8 bits";
+    // Component precision can be mixed; do not pretend all weights use one dtype.
+    const dtypes = ["bf16", "fp16", "fp32"].filter(p => text.includes(p));
+    if (dtypes.length > 1) return "Precisión mixta";
+    if (dtypes.length) return dtypes[0].toUpperCase();
+    if (/\bf32\b/.test(text)) return "FP32";
+    return "Precisión no especificada / otra";
+  }
+
+  const modelAlphabetical = (a, b) => (a || "").localeCompare(b || "", "es", {numeric:true, sensitivity:"base"});
+  function updateModelFamilySelect(kind, models) {
+    const el = $(`select-${kind}-family`); if (!el) return "";
+    const previous = el.value;
+    const families = [...new Set(models.map(modelFamily))].sort(modelAlphabetical);
+    el.innerHTML = `<option value="">Todas las familias</option>` + families.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+    if (families.includes(previous)) el.value = previous;
+    return el.value;
+  }
+  function modelOptions(models, optionLabel) {
+    const sorted = [...models].sort((a,b) => modelAlphabetical(modelFamily(a),modelFamily(b)) ||
+      modelAlphabetical(modelPrecision(a),modelPrecision(b)) || modelAlphabetical(a.name,b.name) || modelAlphabetical(a.id,b.id));
+    const groups = new Map();
+    for (const m of sorted) {
+      const label = `${modelFamily(m)} · ${modelPrecision(m)}`;
+      if (!groups.has(label)) groups.set(label, []);
+      groups.get(label).push(`<option value="${escapeHtml(m.id)}">${optionLabel(m)}</option>`);
+    }
+    return [...groups].map(([label,opts]) => `<optgroup label="${escapeHtml(label)}">${opts.join("")}</optgroup>`).join("");
+  }
+  function revealModelOption(kind, id) {
+    const sel = $(`select-${kind}-model`);
+    if (sel && !Array.from(sel.options).some(o => o.value === id)) {
+      const family = $(`select-${kind}-family`);
+      if (family && family.value) {
+        family.value = "";
+        if (kind === "video") populateVideoModelSelect(); else populateImageModelSelect();
+      }
+    }
+    return !!sel && Array.from(sel.options).some(o => o.value === id);
+  }
+
   function populateImageModelSelect() {
     const select = $("select-image-model");
     if (!select) return;
     const previous = select.value || state.selectedImageModel;
-    const models = state.catalog.filter((m) => m.category === "image" && m.validation_state !== "candidate");
-    select.innerHTML = models.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}</option>`).join("");
+    const allModels = state.catalog.filter((m) => m.category === "image" && m.validation_state !== "candidate");
+    const family = updateModelFamilySelect("image", allModels);
+    const models = allModels.filter(m => !family || modelFamily(m) === family);
+    select.innerHTML = modelOptions(models, m => escapeHtml(m.name));
     if (models.some((m) => m.id === previous)) select.value = previous;
+    else if (models.length) select.value = models[0].id;
     state.selectedImageModel = select.value;
   }
 
@@ -782,7 +852,7 @@
             m.video_modes.includes(submode) &&
             (!m.compatibility || m.compatibility.compatible)
         );
-        if (bestCompat && sel) {
+        if (bestCompat && sel && revealModelOption("video", bestCompat.id)) {
           sel.value = bestCompat.id;
           applyVideoModelDefaults(bestCompat.id);
           populateVideoModelSelect();
@@ -1532,8 +1602,11 @@
       vModels = vModels.filter((m) => m.compatibility && m.compatibility.compatible === true);
     }
 
-    sel.innerHTML = vModels
-      .map((m) => {
+    const family = updateModelFamilySelect("video", vModels);
+    vModels = vModels.filter(m => !family || modelFamily(m) === family);
+    const fallback = vModels[0];
+    vModels.sort((a,b) => modelAlphabetical(a.name,b.name) || modelAlphabetical(a.id,b.id));
+    sel.innerHTML = modelOptions(vModels, (m) => {
         const st = m.loaded_in_memory
           ? (isGgufModel(m.id) ? "🟢 Motor activo · caché" : "🟢 En VRAM")
           : m.builtin_no_download
@@ -1543,14 +1616,13 @@
           : `⬇ ${m.estimated_gb} GB`;
         const stk = (m.compatibility && m.compatibility.sticker) || "";
         const tested = m.execution_validation?.status === "observed" ? "✅ Probado en L4 · " : "";
-        return `<option value="${escapeHtml(m.id)}">${tested}${stk} · ${escapeHtml(m.name)} [${st}]</option>`;
-      })
-      .join("");
+        return `${tested}${escapeHtml(stk)} · ${escapeHtml(m.name)} [${st}]`;
+      });
 
     if (prev && vModels.some((m) => m.id === prev)) {
       sel.value = prev;
-    } else if (vModels.length > 0) {
-      sel.value = vModels[0].id;
+    } else if (fallback) {
+      sel.value = fallback.id;
     }
 
     const activeId = sel.value;
@@ -1558,8 +1630,7 @@
     if (cardsBox) {
       cardsBox.innerHTML = vModels.length === 0
         ? `<div class="muted" style="padding:14px;">No hay modelos de vídeo con encaje estimado para este filtro. Revisa RAM y disco o desmarca el filtro para ver todos.</div>`
-        : [...vModels].sort((a, b) => Number(isGgufModel(b.id)) - Number(isGgufModel(a.id)))
-        .map((m) => {
+        : vModels.map((m) => {
           const comp = m.compatibility || {};
           const tier = comp.tier || "good";
           const modes = formatVideoModes(m.video_modes)
@@ -1651,7 +1722,7 @@
       return;
     }
 
-    grid.innerHTML = filtered
+    grid.innerHTML = [...filtered].sort((a,b) => modelAlphabetical(a.name,b.name) || modelAlphabetical(a.id,b.id))
       .map((m) => {
         const comp = m.hardware_assessment || m.compatibility || {};
         const tier = comp.tier || "good";
@@ -1836,14 +1907,15 @@
     const model = state.catalog.find((m) => m.id === modelId);
     if (!model || model.validation_state === "candidate") return;
     if (model.category === "image") {
+      revealModelOption("image", modelId);
       $("select-image-model").value = modelId;
       applyImageModelDefaults(modelId);
       renderImageLoraRack();
       switchTab("tab-image");
     } else if (model.category === "video") {
       const sel = $("select-video-model");
-      // Selection is NOT preparation. A hidden-by-filter recipe is not loaded.
-      if (!Array.from(sel.options).some((option) => option.value === modelId)) {
+      // A family filter may hide it; the hardware filter remains authoritative.
+      if (!revealModelOption("video", modelId)) {
         toast("Este modelo está oculto por el filtro de compatibilidad. Desmárcalo para seleccionarlo y revisa el diagnóstico.", "error");
         return;
       }
@@ -3345,6 +3417,12 @@
     });
 
     // Pestaña 1: Imagen
+    $("select-image-family")?.addEventListener("change", () => {
+      populateImageModelSelect();
+      if ($("select-image-model").value) applyImageModelDefaults($("select-image-model").value);
+      renderImageLoraRack();
+    });
+    $("select-video-family")?.addEventListener("change", () => populateVideoModelSelect());
     if ($("select-image-model")) {
       $("select-image-model").addEventListener("change", () => {
         const mid = $("select-image-model").value;
@@ -3498,6 +3576,7 @@
       state.vidOnlyCompat = false;
       syncGpuPillsUI();
       populateVideoModelSelect();
+      revealModelOption("video", GGUF_MODEL_ID);
       $("select-video-model").value = GGUF_MODEL_ID;
       $("select-video-model").dispatchEvent(new Event("change"));
       toast("Seleccionado LTX 2.3 GGUF Q4. El filtro de encaje se ha desactivado; aún se comprobará la memoria al generar.", "success");

@@ -177,7 +177,9 @@
           <div class="engine-bar-info">
             <span class="status-dot" id="img-engine-dot"></span>
             <div class="row-gap" style="flex-wrap:wrap;">
-              <strong>Modelo de Imagen:</strong>
+              <strong>Familia de imagen:</strong>
+              <select id="select-image-family" class="inline-select" aria-label="Familia de modelos de imagen"><option value="">Todas las familias</option></select>
+              <label for="select-image-model">Modelo / cuantización:</label>
               <select id="select-image-model" class="inline-select">
                 <option value="qwen-image-edit-2511-pack" selected>★ Qwen-Image-Edit 2511 (4-bit · Edición + Refs + T2I)</option>
                 <option value="qwen-image-2512-pack">Qwen-Image 2512 (4-bit · Texto→Imagen Puro)</option>
@@ -416,7 +418,9 @@
             <div class="engine-bar-info">
               <span class="status-dot" id="vid-engine-dot"></span>
               <div class="row-gap" style="flex-wrap:wrap;">
-                <strong>Modelo de Vídeo:</strong>
+                <strong>Familia de vídeo:</strong>
+                <select id="select-video-family" class="inline-select" aria-label="Familia de modelos de vídeo"><option value="">Todas las familias</option></select>
+                <label for="select-video-model">Modelo / cuantización:</label>
                 <select id="select-video-model" class="inline-select"></select>
                 <span class="muted-inline" id="vid-engine-state">Sin cargar en VRAM</span>
               </div>

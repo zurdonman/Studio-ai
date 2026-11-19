@@ -866,11 +866,20 @@ def _load_wan_fp8_single_file_transformer(
         )
     raw_sd = guarded_model_load(safetensors.torch.load_file, str(sf_path), device="cpu")
 
-    # Extraer `img_emb.emb_pos` antes de `from_single_file` para inyectarlo intacto en FLF2V-14B (`pos_embed_seq_len=514`)
+    # El modelo FLF2V tiene un parámetro posicional real de 514 tokens. El
+    # convertidor de Diffusers no traduce img_emb.emb_pos: si lo retiramos y
+    # esperamos a inyectarlo después, from_single_file llama model.to() con ese
+    # parámetro todavía en meta y falla antes de devolver el transformer.
+    # Introducir la clave Diffusers ANTES de la conversión/carga evita ese hueco
+    # sin inicializar pesos aleatorios ni expandir el transformer completo.
     emb_pos_tensor = None
     for emb_k in ("img_emb.emb_pos", "model.diffusion_model.img_emb.emb_pos"):
         if emb_k in raw_sd:
             emb_pos_tensor = raw_sd.pop(emb_k)
+            pos_key = "condition_embedder.image_embedder.pos_embed"
+            if pos_key in raw_sd:
+                raise RuntimeError("WAN_FP8_DUPLICATE_POS_EMBED: el checkpoint contiene dos embeddings posicionales.")
+            raw_sd[pos_key] = emb_pos_tensor
             break
 
     # Soportar opcionalmente checkpoints fp8_scaled aplicando el escalar y descartando claves auxiliares de escala
@@ -906,15 +915,27 @@ def _load_wan_fp8_single_file_transformer(
         restore_sd = convert_wan_transformer_to_diffusers(restore_sd)
 
     try:
-        transformer = guarded_model_load(transformer_cls.from_single_file,
-            raw_sd,
-            config=str(base_dir),
-            subfolder="transformer",
-            torch_dtype=storage_dtype,
-            low_cpu_mem_usage=True,
-            device="cpu",
-            local_files_only=True,
-        )
+        try:
+            transformer = guarded_model_load(transformer_cls.from_single_file,
+                raw_sd,
+                config=str(base_dir),
+                subfolder="transformer",
+                torch_dtype=storage_dtype,
+                low_cpu_mem_usage=True,
+                device="cpu",
+                local_files_only=True,
+            )
+        except NotImplementedError as exc:
+            if "meta tensor" not in str(exc).lower():
+                raise
+            raise RuntimeError(
+                "WAN_FP8_META_TENSOR: el checkpoint no completa los parámetros de la configuración Diffusers; "
+                "comprueba compatibilidad y versiones de Diffusers/Torch. No se inicializan pesos faltantes al azar."
+            ) from exc
+        missing = [name for name, p in list(transformer.named_parameters()) + list(transformer.named_buffers())
+                   if getattr(p, "is_meta", False)]
+        if missing:
+            raise RuntimeError("WAN_FP8_META_TENSOR: parámetros sin pesos: " + ", ".join(missing[:12]))
         transformer = _enable_fp8_layerwise_casting_safe(transformer)
         if restore_sd:
             for name, param in list(transformer.named_parameters()) + list(transformer.named_buffers()):
@@ -926,8 +947,9 @@ def _load_wan_fp8_single_file_transformer(
         if emb_pos_tensor is not None:
             img_emb_mod = getattr(getattr(transformer, "condition_embedder", None), "image_embedder", None)
             pos_param = getattr(img_emb_mod, "pos_embed", None)
-            if pos_param is not None and tuple(pos_param.shape) == tuple(emb_pos_tensor.shape):
-                pos_param.data.copy_(emb_pos_tensor.to(device=pos_param.device, dtype=pos_param.dtype))
+            if pos_param is None or tuple(pos_param.shape) != tuple(emb_pos_tensor.shape):
+                raise RuntimeError("WAN_FP8_POS_EMBED_MISMATCH: el embedding posicional no coincide con la configuración del transformer.")
+            pos_param.data.copy_(emb_pos_tensor.to(device=pos_param.device, dtype=pos_param.dtype))
         return transformer
     finally:
         raw_sd.clear()

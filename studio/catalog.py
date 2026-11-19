@@ -1665,7 +1665,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "wan21-flf2v-14b-fp8",
-        "name": "Wan 2.1 FLF2V 14B 720P Quantized FP8 (★ 14B Dedicado Frame a Frame HD · Cabe en L4)",
+        "name": "Wan 2.1 FLF2V 14B 720P FP8 (Frame a Frame · experimental en L4)",
         "category": "video",
         "is_default": False,
         "badge": "★ 14B FLF2V Nativo FP8 · Doble CLIP 514 + LoRA 6p",
@@ -1690,16 +1690,16 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "default_cfg": 5.0,
             "flow_shift": 5.0,
             "prompt_lang": "es_en",
-            "official_note": "★ 14B FLF2V Puro Cuantizado Comfy-Org FP8 (30.7 GB vs 88 GB) · Doble CLIP 514 tokens · Con LoRA FusionX/LightX2V 14B tarda ~1.8 min en L4",
+            "official_note": "14B FLF2V FP8 Comfy-Org · 514 tokens de posición. Carga e inferencia en L4 no verificadas; memoria y tiempo estimados.",
         },
         "description": (
             "Versión cuantizada FP8 oficial de Comfy-Org del especialista puro Wan 2.1 FLF2V 14B 720P (36 canales + embedding posicional dual de 514 tokens "
-            "para Fotograma Inicial y Final). Baja de 88 GB a 30.7 GB en disco, entra en L4 (22.5 GB VRAM) y admite LoRAs rápidos FusionX y LightX2V de 6–8 pasos."
+            "para Fotograma Inicial y Final). La carga e inferencia en L4 no están verificadas; el encaje depende de la memoria y los ajustes. Admite LoRAs FusionX y LightX2V compatibles."
         ),
         "estimated_gb": 30.7,
         "min_vram_gb": 16.2,
         "recommended_vram_gb": 21.0,
-        "l4_seconds_hint": "~1.8 min con LoRA 6–8p · ~7.5 min base",
+        "l4_seconds_hint": "Sin validación real en L4; tiempo y memoria no garantizados",
         "engine": "wan_i2v_14b_fp8",
         "artifacts": [
             {

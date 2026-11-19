@@ -1275,6 +1275,12 @@ def test_quantized_14b_distilled_13b_models_and_fp8_loader(monkeypatch, tmp_path
                 def modules(self):
                     return self._mods
 
+                def named_parameters(self):
+                    return [("condition_embedder.image_embedder.pos_embed", pos_p)]
+
+                def named_buffers(self):
+                    return []
+
                 def parameters(self, recurse=False):
                     return [pos_p]
 
@@ -1291,6 +1297,7 @@ def test_quantized_14b_distilled_13b_models_and_fp8_loader(monkeypatch, tmp_path
     # `.scale_weight` multiplicado: [[2.0, 4.0]] * 0.5 == [[1.0, 2.0]]
     assert np.allclose(saved_captured["sd"]["blocks.0.self_attn.q.weight"].arr, [[1.0, 2.0]])
     assert "img_emb.emb_pos" not in saved_captured["sd"]
+    assert np.allclose(saved_captured["sd"]["condition_embedder.image_embedder.pos_embed"].arr, 7.5)
     # `pos_embed` recibió los 514 tokens de `img_emb.emb_pos` en bfloat16
     assert np.allclose(tr.condition_embedder.image_embedder.pos_embed.arr, 7.5)
     assert tr.condition_embedder.image_embedder.pos_embed.dtype == "bfloat16"

@@ -466,3 +466,51 @@ def test_failed_tunnel_download_does_not_leave_binary_for_next_retry(monkeypatch
     assert launcher.start_cloudflared_tunnel(7860) == (None, None)
     assert not (tmp_path / 'cloudflared').exists()
     assert not (tmp_path / 'cloudflared.download').exists()
+
+
+@pytest.mark.parametrize("original_format", [False, True])
+def test_wan_flf2v_fp8_real_tiny_meta_loader(tmp_path, original_format):
+    """Real Diffusers meta loading with synthetic tiny weights; no GPU/checkpoint download."""
+    torch = pytest.importorskip('torch')
+    pytest.importorskip('diffusers')
+    from diffusers import WanTransformer3DModel
+    from safetensors.torch import save_file
+    from studio.engines.video_engine import _load_wan_fp8_single_file_transformer
+    model = WanTransformer3DModel(patch_size=(1,2,2), num_attention_heads=2,
+        attention_head_dim=8, in_channels=4, out_channels=4, text_dim=16,
+        freq_dim=8, ffn_dim=32, num_layers=1, image_dim=16, added_kv_proj_dim=16,
+        pos_embed_seq_len=514)
+    base=tmp_path/'base'; (base/'transformer').mkdir(parents=True)
+    model.save_config(str(base/'transformer'))
+    state={k: v.detach().clone().to(torch.float8_e4m3fn) for k,v in model.state_dict().items()}
+    pos=state.pop('condition_embedder.image_embedder.pos_embed')
+    if original_format:
+        # Synthetic original-Wan checkpoint, including the actual conversion
+        # path instead of only the already-Diffusers-formatted state dict.
+        rename={
+          'condition_embedder.time_embedder.linear_1':'time_embedding.0',
+          'condition_embedder.time_embedder.linear_2':'time_embedding.2',
+          'condition_embedder.text_embedder.linear_1':'text_embedding.0',
+          'condition_embedder.text_embedder.linear_2':'text_embedding.2',
+          'condition_embedder.time_proj':'time_projection.1',
+          'condition_embedder.image_embedder.norm1':'img_emb.proj.0',
+          'condition_embedder.image_embedder.ff.net.0.proj':'img_emb.proj.1',
+          'condition_embedder.image_embedder.ff.net.2':'img_emb.proj.3',
+          'condition_embedder.image_embedder.norm2':'img_emb.proj.4',
+          '.attn1.':'.self_attn.', '.attn2.':'.cross_attn.', '.to_out.0.':'.o.',
+          '.to_q.':'.q.', '.to_k.':'.k.', '.to_v.':'.v.',
+          '.add_k_proj.':'.k_img.', '.add_v_proj.':'.v_img.', '.norm_added_k.':'.norm_k_img.',
+          'ffn.net.0.proj':'ffn.0', 'ffn.net.2':'ffn.2'}
+        def original(k):
+            if k=='scale_shift_table': return 'head.modulation'
+            if k.startswith('proj_out.'): return k.replace('proj_out.','head.head.')
+            if k.startswith('blocks.') and 'scale_shift_table' in k: return k.replace('scale_shift_table','modulation')
+            if k.startswith('blocks.'): k=k.replace('.norm2.','.norm3.')
+            for a,b in rename.items(): k=k.replace(a,b)
+            return k
+        state={original(k):v for k,v in state.items()}
+    state['img_emb.emb_pos']=pos
+    sf=tmp_path/'synthetic.safetensors'; save_file(state,str(sf))
+    result=_load_wan_fp8_single_file_transformer(WanTransformer3DModel,sf,base)
+    assert not any(p.is_meta for p in result.parameters())
+    assert torch.equal(result.condition_embedder.image_embedder.pos_embed.detach().float(),pos.float())
