@@ -440,10 +440,11 @@ def _switch_pipeline_class(
 def _attach_dual_image_flf2v_fix(pipe: Any) -> None:
     """
     Corrige el bug upstream de Diffusers en `WanImageToVideoPipeline` y `SkyReelsV2ImageToVideoPipeline`
-    cuando se pasa `last_image` y `transformer.config.pos_embed_seq_len` es `None`
-    (ej. `Wan2.1-Fun-1.3B-InP-Diffusers`, `SkyReels-V2-I2V-1.3B-540P-Diffusers`, `Wan2.1-I2V-14B`):
-    `encode_image([first_img, last_img])` devolvía shape `(2, 257, D)` con batch=2 en vez de concatenar
-    los tokens visuales de inicio y fin en `(1, 514, D)`, provocando un RuntimeError en `torch.concat(..., dim=1)`.
+    Las variantes sin pos_embed necesitan dos imágenes concatenadas en tokens.
+    FLF2V con pos_embed de 514 tokens necesita dos lotes visuales de 257. Si
+    solo hay una imagen, se duplica su representación CLIP (no el fotograma
+    final del vídeo): es una adaptación experimental, no un condicionamiento
+    final real. Con dos imágenes se conservan ambas representaciones distintas.
     """
     orig_encode = getattr(pipe, "encode_image", None)
     if orig_encode is None or getattr(pipe, "_studio_dual_clip_patched", False):
@@ -452,6 +453,16 @@ def _attach_dual_image_flf2v_fix(pipe: Any) -> None:
     def _encode_image_flf2v_safe(image: Any, device: Any = None) -> Any:
         out = orig_encode(image, device=device)
         pos_len = getattr(getattr(getattr(pipe, "transformer", None), "config", None), "pos_embed_seq_len", None)
+        if pos_len == 514:
+            image_count = len(image) if isinstance(image, (list, tuple)) else 1
+            shape = tuple(out.shape) if hasattr(out, "shape") else ()
+            if image_count not in (1, 2) or len(shape) != 3 or shape[:2] != (image_count, 257):
+                raise ValueError(f"Wan FLF2V necesita 257 tokens CLIP por imagen (1 o 2 imágenes); forma recibida: {shape}.")
+            if image_count == 1:
+                # WanImageEmbedding.forward views (2,257,D) as (1,514,D).
+                # The VAE receives no last_image, so no last frame is anchored.
+                import torch  # type: ignore
+                out = torch.cat((out, out), dim=0)
         if (
             isinstance(image, (list, tuple))
             and len(image) == 2
@@ -1523,8 +1534,8 @@ def compute_official_video_params(
             ar = max(9.0 / 16.0, min(16.0 / 9.0, ar))
             height = max(mod_val * 8, (int(round(math.sqrt(max_area * ar))) // mod_val) * mod_val)
             width = max(mod_val * 8, (int(round(math.sqrt(max_area / ar))) // mod_val) * mod_val)
-        if abs(width * height - req_width * req_height) > 65536:
-            adjusted_notes.append(f"resolución nativa óptima {width}×{height} conservando proporción")
+        if (width, height) != (req_width, req_height):
+            adjusted_notes.append(f"resolución adaptada a la proporción de la imagen: {width}×{height} (solicitada {req_width}×{req_height})")
     else:
         width = max(256, min(1280, (int(req_width) // mod_val) * mod_val))
         height = max(256, min(1280, (int(req_height) // mod_val) * mod_val))
@@ -1538,6 +1549,8 @@ def compute_official_video_params(
             elif isinstance(spec.get("square"), list):
                 width, height = int(spec["square"][0]), int(spec["square"][1])
             adjusted_notes.append(f"escalado al bucket oficial 720P ({width}×{height})")
+        elif (width, height) != (req_width, req_height):
+            adjusted_notes.append(f"resolución ajustada a límites y múltiplos: {width}×{height} (solicitada {req_width}×{req_height})")
 
     # 2) FPS y número de fotogramas exacto por familia
     if frame_rule == "cogvideo49":
@@ -2636,6 +2649,9 @@ def generate_video_clip(
 
     if job:
         lora_tag = f" + LoRA «{active_lora_defn['name'].split('(')[0].strip()}»" if active_lora_defn else ""
+        pos_len = getattr(getattr(getattr(pipe, "transformer", None), "config", None), "pos_embed_seq_len", None)
+        if submode == "i2v" and pos_len == 514:
+            job.log("FLF2V con una imagen: se reutiliza su representación visual para completar 514 tokens; no se fija un fotograma final. Adaptación experimental.")
         if submode == "flf2v" and image_path is not None and end_image_path is not None:
             job.log(
                 f"🎞️ Frame a Frame activo: Inicio=«{image_path.name}» → Final=«{end_image_path.name}» (ambos fotogramas anclados en t=0).",

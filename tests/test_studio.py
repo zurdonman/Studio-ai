@@ -1088,6 +1088,47 @@ def test_flf2v_dual_clip_fix_and_causal_lora_guardrails():
     assert p_514.encode_image(["img1", "img2"]).shape == (2, 257, 1280)
 
 
+def test_wan_flf_single_image_uses_two_clip_embeddings_without_anchoring_last_frame():
+    import types
+    import pytest
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("diffusers")
+    from diffusers.models.transformers.transformer_wan import WanImageEmbedding
+    from studio.engines.video_engine import _attach_dual_image_flf2v_fix
+
+    class Pipe:
+        transformer = types.SimpleNamespace(config=types.SimpleNamespace(pos_embed_seq_len=514))
+        def encode_image(self, image, device=None):
+            n = len(image) if isinstance(image, list) else 1
+            return torch.arange(n * 257 * 8, dtype=torch.float32).reshape(n, 257, 8)
+
+    p = Pipe()
+    _attach_dual_image_flf2v_fix(p)
+    _attach_dual_image_flf2v_fix(p)  # idempotent
+    one = p.encode_image("start")
+    assert one.shape == (2, 257, 8)
+    assert torch.equal(one[0], one[1])
+    two = p.encode_image(["start", "end"])
+    assert not torch.equal(two[0], two[1])
+    projection = WanImageEmbedding(in_features=8, out_features=8, pos_embed_seq_len=514)
+    assert projection(one).shape == (1, 514, 8)
+    assert projection(two).shape == (1, 514, 8)
+    # Pipeline repeats visual batch for prompts, then calls projection for CFG branches.
+    assert projection(one.repeat(2, 1, 1)).shape == (2, 514, 8)
+    with pytest.raises(ValueError, match="257 tokens"):
+        p.encode_image(["one", "two", "three"])
+
+
+def test_video_resolution_adaptation_is_always_logged():
+    from studio.engines.video_engine import compute_official_video_params
+    result = compute_official_video_params(
+        {"official_spec": {"max_area": 960 * 544, "landscape": [960, 544], "portrait": [544, 960]}},
+        960, 544, 4, 20, 20, 5, img_size=(544, 960),
+    )
+    assert (result["width"], result["height"]) == (544, 960)
+    assert "solicitada 960×544" in result["adjusted_notes"][0]
+
+
 def test_quantized_14b_distilled_13b_models_and_fp8_loader(monkeypatch, tmp_path):
     import sys
     import types

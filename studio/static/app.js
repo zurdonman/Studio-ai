@@ -27,6 +27,7 @@
     watchedJobs: new Set(),
     completedHandled: new Set(),
     baseImage: null, // { rel_path, media_url, filename, width, height }
+    imageSizeManual: false,
     refs: [null, null, null],
     lastImageResult: null,
     lastVideoResult: null,
@@ -805,6 +806,16 @@
     state.selectedImageModel = modelId;
     const isQwen = ["qwen_image_edit", "qwen_image_t2i"].includes(model.engine);
     const defaults = model.image_defaults || {};
+    const spec = model.official_spec || {};
+    // Only called on model selection, not on an asset or status refresh.
+    state.imageSizeManual = false;
+    const hasDefaultSize = spec.default_width && spec.default_height;
+    $("img-width").value = hasDefaultSize ? spec.default_width : 1024;
+    $("img-height").value = hasDefaultSize ? spec.default_height : 1024;
+    const info = $("img-resolution-note");
+    if (info) info.textContent = hasDefaultSize
+      ? `Resolución inicial de la receta: ${spec.default_width}×${spec.default_height}. Puedes cambiarla.`
+      : "Resolución inicial de Studio: 1024×1024 (no se indica una específica para este modelo). Puedes cambiarla.";
     $("img-steps").value = isQwen && !$("chk-lightning").checked ? 28 : (defaults.steps == null ? 4 : defaults.steps);
     $("img-cfg").value = defaults.guidance_scale == null ? 4.0 : defaults.guidance_scale;
     $("chk-lightning").disabled = !isQwen;
@@ -2425,11 +2436,15 @@
       state.mask.history = [];
       state.mask.dirty = false;
 
-      // Ajustar automáticamente Ancho × Alto a la proporción real de la foto subida (múltiplos de 64, máx 1024)
-      const scale = 1024 / Math.max(nw, nh);
-      const snap64 = (v) => Math.max(512, Math.min(1280, Math.round((v * scale) / 64) * 64));
-      $("img-width").value = snap64(nw);
-      $("img-height").value = snap64(nh);
+      // Match the source aspect ratio unless the user chose a size manually.
+      if (!state.imageSizeManual) {
+        const scale = 1024 / Math.max(nw, nh);
+        const snap64 = (v) => Math.max(512, Math.min(1280, Math.round((v * scale) / 64) * 64));
+        $("img-width").value = snap64(nw);
+        $("img-height").value = snap64(nh);
+        const info = $("img-resolution-note");
+        if (info) info.textContent = "Resolución adaptada a la imagen base. Puedes modificarla.";
+      }
     };
     imgEl.src = asset.media_url;
     $("canvas-empty-hint").hidden = true;
@@ -3438,9 +3453,12 @@
     });
 
     // Pestaña 1: Imagen
+    ["img-width", "img-height"].forEach(id => $(id)?.addEventListener("input", () => { state.imageSizeManual = true; }));
+    document.querySelectorAll(".chip-preset[data-w][data-h]").forEach(chip => chip.addEventListener("click", () => { state.imageSizeManual = true; }));
     $("select-image-family")?.addEventListener("change", () => {
+      const previous = $("select-image-model").value;
       populateImageModelSelect();
-      if ($("select-image-model").value) applyImageModelDefaults($("select-image-model").value);
+      if ($("select-image-model").value && $("select-image-model").value !== previous) applyImageModelDefaults($("select-image-model").value);
       renderImageLoraRack();
     });
     $("select-video-family")?.addEventListener("change", () => populateVideoModelSelect());

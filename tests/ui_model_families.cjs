@@ -26,7 +26,7 @@ async function until(test, label) {
     {id:'wan21-flf2v-14b-fp8', name:'Wan 2.1 FLF2V 14B FP8', category:'video', engine:'wan_i2v_14b_fp8', video_modes:['i2v','flf2v'], compatibility:{compatible:true}, estimated_gb:27},
     {id:'ltx-2.5-distilled-gguf-q4km-gemma-q5-experimental', name:'LTX GGUF Q4', category:'video', engine:'ltx_gguf', video_modes:['i2v'], compatibility:{compatible:true}, estimated_gb:24},
     {id:'image-z', name:'Zeta FP16', category:'image', engine:'z_image_turbo'},
-    {id:'image-a', name:'Alfa 4-bit', category:'image', engine:'qwen_image_edit'});
+    {id:'image-a', name:'Alfa 4-bit', category:'image', engine:'qwen_image_edit', official_spec:{default_width:768,default_height:512}});
   let job = null, completed = false;
   const output = {id:'clip', filename:'clip.mp4', rel_path:'outputs/videos/clip.mp4', media_url:'/media/outputs/videos/clip.mp4', type:'video', width:768, height:512, fps:24, steps:8};
   w.fetch = async (url, opts={}) => {
@@ -64,6 +64,18 @@ async function until(test, label) {
   if (!Array.from($('select-image-model').querySelectorAll('optgroup')).some(g=>g.label.includes('4 bits'))) throw Error('Image 4-bit group missing');
   $('select-image-family').value='Alfa 4-bit'; $('select-image-family').dispatchEvent(new w.Event('change'));
   if (options($('select-image-model')).join(',') !== 'image-a') throw Error('Image family filter');
+  if ($('img-width').value !== '768' || $('img-height').value !== '512') throw Error('Image model size not applied');
+  $('img-width').value='832'; $('img-width').dispatchEvent(new w.Event('input'));
+  $('select-image-family').dispatchEvent(new w.Event('change'));
+  if ($('img-width').value !== '832') throw Error('Family refresh overwrote manual size');
+  $('select-image-family').value=''; $('select-image-family').dispatchEvent(new w.Event('change'));
+  $('select-image-model').value='image-z'; $('select-image-model').dispatchEvent(new w.Event('change'));
+  if ($('img-width').value !== '1024' || $('img-height').value !== '1024' || !$('img-resolution-note').textContent.includes('Studio')) throw Error('Image fallback not identified');
+  $('select-video-model').value='wan-flf'; $('select-video-model').dispatchEvent(new w.Event('change'));
+  if ($('vid-width').value !== '640' || $('vid-height').value !== '384') throw Error('Video model size not applied');
+  $('vid-width').value='704'; $('vid-height').value='512';
+  $('select-video-family').value=''; $('select-video-family').dispatchEvent(new w.Event('change'));
+  if ($('vid-width').value !== '704' || $('vid-height').value !== '512') throw Error('Video refresh overwrote manual size');
   $('select-video-family').value='Wan 2.1 FLF2V 14B'; $('select-video-family').dispatchEvent(new w.Event('change'));
   const videoOptions=options($('select-video-model'));
   if (videoOptions.length!==2 || !videoOptions.includes('wan21-flf2v-14b-fp8') || !videoOptions.includes('wan21-flf2v-14b-720p')) throw Error('Wan family filter');
