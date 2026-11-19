@@ -107,6 +107,8 @@ def main(cfg):
         else:
             result.save(str(out / 'result.ply'))
     elif engine == 'worldsplat':
+        if cfg.get('mast3r_dir'):
+            sys.path[:0] = [cfg['mast3r_dir'], str(Path(cfg['mast3r_dir'])/'dust3r')]
         from worldsplat.video_gen import generate_video
         from worldsplat.pose_estimation import estimate_poses
         from worldsplat.splat_builder import build_splats

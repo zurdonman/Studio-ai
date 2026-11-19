@@ -152,7 +152,7 @@ def test_new_variants_api(temp_studio_env, monkeypatch):
     for engine,variant in [('trellis2','q4'),('trellis2','q8'),('hunyuanmini','turbo'),('mirror2','base')]:
         assert client.post('/api/3d/prepare',json={'engine':engine,'variant':variant,'license_accepted':True}).status_code==200
     assert len(jobs)==4
-    assert client.post('/api/3d/prepare',json={'engine':'trellis2','variant':'base','license_accepted':True}).status_code==400
+    assert client.post('/api/3d/prepare',json={'engine':'trellis2','variant':'base','license_accepted':True}).status_code==200
 
 def test_generate_prepares_first_and_respects_override(temp_studio_env, monkeypatch):
     import app
@@ -234,3 +234,66 @@ def test_hf_token_passed_privately_to_snapshot_and_worker(temp_studio_env, monke
         result.parent.mkdir(parents=True); result.write_bytes(fake_glb())
     monkeypatch.setattr(scene_setup.common, '_command', run)
     models_3d.generate.__wrapped__('sf3d',image,1024,job=Job())
+
+
+def test_worldsplat_automatic_setup_uses_pinned_mast3r_sources(setup, monkeypatch):
+    from studio.engines import scene_jobs
+    from pathlib import Path
+    for name in ('STUDIO_WORLDSPLAT_REPO', 'STUDIO_WORLDSPLAT_PYTHON'):
+        monkeypatch.delenv(name, raising=False)
+    calls=[]
+    def clone(job, repo, name, rev, **kw):
+        calls.append((name, rev, kw)); (repo/'worldsplat').mkdir(parents=True); (repo/'worldsplat/pipeline.py').write_text('')
+    def install(job, key, root, repo):
+        py=root/'venv/bin/python'; py.parent.mkdir(parents=True); py.write_text('')
+        for filename in ('mast3r/mast3r/model.py', 'mast3r/dust3r/dust3r/model.py'):
+            f=root/filename; f.parent.mkdir(parents=True, exist_ok=True); f.write_text('')
+        return py
+    monkeypatch.setattr(setup, '_clone', clone)
+    monkeypatch.setattr(setup, '_install_env', install)
+    monkeypatch.setattr(setup, '_get_weights', lambda *a: None)
+    monkeypatch.setattr(setup.common, '_command', lambda *a, **kw: None)
+    assert setup.prepare('worldsplat','base',False,Job())['prepared']
+    cfg=setup.managed_config('worldsplat')
+    assert cfg['mast3r'] == str(setup.ROOT/'worldsplat/mast3r')
+    assert scene_jobs.runtime_status('worldsplat')['configured']
+    assert calls[0][:2] == setup.REPOS['worldsplat']
+    Path(cfg['mast3r'], 'dust3r/dust3r/model.py').unlink()
+    assert not scene_jobs.runtime_status('worldsplat')['configured']
+
+
+def test_worldgen_setup_and_fixed_dependencies(temp_studio_env, monkeypatch, tmp_path):
+    from studio.engines import scene_setup as setup
+    calls=[]
+    monkeypatch.setattr(setup.shutil,'which',lambda n:'/usr/bin/python3.11')
+    monkeypatch.setattr(setup.common,'_command',lambda args, job, **kw: calls.append(args))
+    root=tmp_path/'worldgen'; root.mkdir(parents=True)
+    repo=root/'source'; repo.mkdir()
+    setup._install_env(Job(),'worldgen',root,repo)
+    rendered=' '.join(' '.join(x) for x in calls)
+    assert 'torch==2.7.1' in rendered and 'xformers==0.0.31.post1' in rendered
+    assert 'DA-2.git@d659838585f2bc9967c7e9367af573795271dbbb' in rendered
+    assert 'pytorch3d.git@ddfc55127fed1a74514cd24db08a7c2e62e76b08' in rendered
+    assert 'worldgen' in setup.AUTOMATED
+
+
+def test_trellis2_official_preparation_requires_complete_files(setup, monkeypatch):
+    from studio.engines import scene_jobs
+    for name in ('STUDIO_TRELLIS2_REPO', 'STUDIO_TRELLIS2_PYTHON'):
+        monkeypatch.delenv(name, raising=False)
+    def clone(job, repo, *args, **kw):
+        p=repo/'trellis2/pipelines/trellis2_image_to_3d.py'; p.parent.mkdir(parents=True); p.write_text('')
+    def weights(job, engine, key, variant, texture):
+        p=setup.WEIGHTS/key; p.mkdir(parents=True,exist_ok=True); (p/'pipeline.json').write_text('{}')
+        (p/'ckpts').mkdir()
+        for name in setup.TRELLIS_MODELS:
+            for ext in ('json','safetensors'):
+                (p/'ckpts'/f'{name}.{ext}').write_text('fake')
+    monkeypatch.setattr(setup,'_clone',clone)
+    monkeypatch.setattr(setup,'_get_weights',weights)
+    assert setup.prepare('trellis2','base',False,Job())['prepared']
+    cfg=setup.managed_config('trellis2')
+    assert scene_jobs.runtime_status('trellis2')['managed']
+    from pathlib import Path
+    Path(cfg['weights'],'ckpts',setup.TRELLIS_MODELS[-1]+'.json').unlink()
+    assert not scene_jobs.runtime_status('trellis2')['configured']

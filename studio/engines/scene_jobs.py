@@ -160,6 +160,7 @@ def generate(engine, images, prompt, variant, texture, texture_resolution, seed,
                 if Path(paint).expanduser().exists(): paint = str(Path(paint).expanduser().resolve())
                 cfg = {'engine':engine,'repo':repo,'output':str(out),'image':first,'weights':weights,'paint_weights':paint,
                        'variant':variant,'texture':texture,'texture_resolution':texture_resolution,'steps':steps,'seed':seed,
+                       'mast3r_dir': (os.environ.get('STUDIO_WORLDSPLAT_MAST3R', '') if manual else config.get('mast3r', '')) if engine == 'worldsplat' else '',
                        'prompt':prompt,'low_vram':low_vram,'mesh':mesh,'idol_mode':idol_mode,'fp8':fp8,
                        'vlm_host':os.environ.get('STUDIO_WORLD2_VLM_HOST', ''), 'vlm_port':os.environ.get('STUDIO_WORLD2_VLM_PORT', ''),
                        'vlm_model':os.environ.get('STUDIO_WORLD2_VLM_MODEL', ''), 'gpus':int(os.environ.get('STUDIO_WORLD2_GPUS', '1')) if engine == 'world2' else 1}
