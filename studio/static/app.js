@@ -520,7 +520,7 @@
         $("motion-result").hidden = false; $("motion-result").src = res.media_url;
         $("motion-feedback").textContent = "Resultado guardado en la biblioteca de Vídeo.";
       }
-      if (["mmaudio-v2-experimental", "controlfoley-v2a-experimental"].includes(res.model_id) && $("v2a-result")) {
+      if (["mmaudio-v2-experimental", "controlfoley-v2a-experimental", "thinksound-light-v2a-experimental", "prismaudio-v2a-experimental"].includes(res.model_id) && $("v2a-result")) {
         $("v2a-result").hidden = false; $("v2a-result").src = res.media_url;
         $("v2a-feedback").textContent = "Copia con sonido guardada en la biblioteca de Vídeo.";
       }
@@ -531,7 +531,7 @@
       }
       toast(res.duration_warning || "Clip de vídeo MP4 listo.", res.duration_warning ? "error" : "success");
     } else if (job.kind === "tts" && res.media_url) {
-      if (res.model_id === "qwen3-tts-0.6b-base") {
+      if (["qwen3-tts-0.6b-base", "fish-s2-pro-experimental"].includes(res.model_id)) {
         state.lastCloneResult = res;
         $("clone-feedback").hidden = false;
         $("clone-feedback").className = "vid-steps-note ok";
@@ -3092,13 +3092,18 @@
       try { const uploaded = await uploadFile(file); $("v2a-input").value = uploaded.rel_path; }
       catch (err) { toast(err.message, "error"); } finally { e.target.value = ""; }
     });
+    $("v2a-engine")?.addEventListener("change", () => {
+      const engine = $("v2a-engine").value, think = engine === "thinksound", prism = engine === "prismaudio";
+      $("v2a-research-label").hidden = think || prism; $("v2a-think-label").hidden = !think; $("v2a-prism-label").hidden = !prism;
+      $("v2a-steps").disabled = think || prism; $("v2a-negative").disabled = think || prism;
+    });
     $("v2a-run")?.addEventListener("click", async () => {
-      const video_rel = $("v2a-input").value;
+      const video_rel = $("v2a-input").value, engine = $("v2a-engine").value, think = engine === "thinksound", prism = engine === "prismaudio";
       if (!video_rel) { toast("Selecciona un vídeo.", "error"); return; }
-      if (!$("v2a-license").checked || !$("v2a-install").checked) { toast("Confirma las licencias y autoriza la preparación local.", "error"); return; }
-      const body = {engine: $("v2a-engine").value, video_rel, prompt: $("v2a-prompt").value, negative: $("v2a-negative").value,
+      if (!(prism ? $("v2a-prism-license").checked : think ? $("v2a-think-license").checked : $("v2a-license").checked) || !$("v2a-install").checked) { toast("Confirma las licencias y autoriza la preparación local.", "error"); return; }
+      const body = {engine, video_rel, prompt: $("v2a-prompt").value, negative: (think || prism) ? "" : $("v2a-negative").value,
         seed: Number($("v2a-seed").value), steps: Number($("v2a-steps").value), replace_audio: $("v2a-replace").checked,
-        research_license_accepted: true, install_accepted: true};
+        research_license_accepted: !think && !prism, model_license_accepted: think, prism_license_accepted: prism, install_accepted: true};
       try { const res = await api("/api/community/video-audio", {method: "POST", body: JSON.stringify(body)});
         $("v2a-feedback").textContent = "Trabajo en cola. Sigue la preparación y generación en el monitor."; watchJob(res.job);
       } catch (err) { toast(err.message, "error"); }
@@ -3826,6 +3831,21 @@
         toast(e.message, "error");
       }
     });
+    async function runFish(withReference) {
+      const text = $("clone-text").value.trim();
+      const reference_rel = withReference ? $("clone-reference").value : "";
+      const reference_text = withReference ? $("clone-transcript").value.trim() : "";
+      if (!text || (withReference && (!reference_rel || !reference_text || !$("clone-authorized").checked))) return toast("Escribe la frase; para clonar selecciona muestra, transcripción y permiso.", "error");
+      if (!$("fish-license").checked || !$("fish-install").checked) return toast("Acepta las licencias y autoriza la preparación local de Fish.", "error");
+      try {
+        const res = await api("/api/tts/fish", {method:"POST", body:JSON.stringify({text, reference_rel, reference_text, authorized:withReference, license_accepted:true, install_accepted:true})});
+        $("clone-feedback").hidden = false; $("clone-feedback").className = "vid-steps-note";
+        $("clone-feedback").textContent = "Tarea Fish enviada; sigue la preparación y generación en el monitor.";
+        watchJob(res.job);
+      } catch (e) { $("clone-feedback").hidden = false; $("clone-feedback").className = "vid-steps-note warn"; $("clone-feedback").textContent = `Error de Fish: ${e.message}`; toast(e.message, "error"); }
+    }
+    $("btn-fish-clone").addEventListener("click", () => runFish(true));
+    $("btn-fish-tts").addEventListener("click", () => runFish(false));
     $("clone-result-video").addEventListener("click", async () => {
       const result = state.lastCloneResult;
       if (!result) return;

@@ -46,7 +46,7 @@ def test_api_selects_controlfoley_and_rejects_unknown(temp_studio_env, monkeypat
     body = dict(video_rel='uploads/a.mp4', engine='controlfoley', research_license_accepted=True, install_accepted=True)
     assert client.post('/api/community/video-audio', json=body).status_code == 200
     assert 'controlfoley' in submitted[0]['title']
-    body['engine'] = 'prismaudio'
+    body['engine'] = 'unknown-engine'
     assert client.post('/api/community/video-audio', json=body).status_code == 422
 
 

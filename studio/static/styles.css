@@ -830,6 +830,8 @@ select:focus {
   cursor: pointer;
 }
 
+#v2a-research-label[hidden], #v2a-think-label[hidden], #v2a-prism-label[hidden] { display: none; }
+
 .compact-details {
   background: var(--bg-input);
   border: 1px solid var(--border);

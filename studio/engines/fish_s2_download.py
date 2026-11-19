@@ -1,8 +1,4 @@
-"""Preparatory Fish S2-Pro manifest; this is NOT a complete or usable runtime.
-
-Not wired to the UI or a job. A future integration must obtain explicit download
-and license consent, check resources and verify the isolated engine as well.
-"""
+"""Pinned Fish S2-Pro files, downloaded and verified by the isolated runtime."""
 import sys
 from pathlib import Path
 from huggingface_hub import hf_hub_download

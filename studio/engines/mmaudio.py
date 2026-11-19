@@ -125,9 +125,17 @@ def _prepare(job: Any) -> Path:
 @serialized_gpu_operation(slots=('video',), managed=True)
 def generate(path: Path, *, prompt: str, negative: str, seed: int, steps: int, replace_audio: bool, job: Any, engine: str = 'mmaudio') -> dict:
     started = time.monotonic()
-    if engine not in ('mmaudio', 'controlfoley'):
+    if engine not in ('mmaudio', 'controlfoley', 'thinksound', 'prismaudio'):
         raise ValueError('V2A_ENGINE_INVALID: motor no integrado.')
-    if engine == 'controlfoley':
+    if engine == 'prismaudio':
+        from studio.engines import prismaudio as selected
+        label, model_id, prepare = 'PrismAudio', selected.MODEL_ID, selected.prepare
+        root, weights, worker = selected.ROOT, selected.WEIGHTS, 'prismaudio_worker.py'
+    elif engine == 'thinksound':
+        from studio.engines import thinksound as selected
+        label, model_id, prepare = 'ThinkSound light', selected.MODEL_ID, selected.prepare
+        root, weights, worker = selected.ROOT, selected.WEIGHTS, 'thinksound_worker.py'
+    elif engine == 'controlfoley':
         from studio.engines import controlfoley as selected
         label, model_id, prepare = 'ControlFoley', selected.MODEL_ID, selected.prepare
         root, weights, worker = selected.ROOT, selected.WEIGHTS, 'controlfoley_worker.py'
@@ -142,13 +150,17 @@ def generate(path: Path, *, prompt: str, negative: str, seed: int, steps: int, r
     # Release any Comfy model tensors first; the compatible neutral process may survive.
     job.comfy_keep_loaded = True
     common._switch_to_idle(job)
-    ram, vram = (12, 12) if engine == 'controlfoley' else (8, 8)
+    ram, vram = {'prismaudio': (24, 32), 'thinksound': (18, 14), 'controlfoley': (12, 12), 'mmaudio': (8, 8)}[engine]
     memory_manager.ensure_capacity(ram_gb=ram, vram_gb=vram, stage=f'{label}: margen preventivo no medido', job=job)
     py = prepare(job)
     memory_manager.ensure_capacity(ram_gb=ram, vram_gb=vram, stage=f'{label}: carga de inferencia', job=job)
     TEMP_DIR.mkdir(parents=True, exist_ok=True); VIDEOS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='mmaudio-', dir=TEMP_DIR) as tmp:
         work = Path(tmp); video = work / 'input.mp4'; audio = work / 'audio.flac'; final = work / 'final.mp4'
+        if engine in ('thinksound', 'prismaudio'):
+            (work/'videos').mkdir()
+            video = work/'videos/demo.mp4'
+            job.log(f'{label} utiliza 24 pasos fijos y no emplea el texto negativo. Cada tramo se rellena a 8 s y luego se recorta.', level='warning')
         env = common._runtime_env(); env['HF_HUB_OFFLINE'] = '1'; env['TRANSFORMERS_OFFLINE'] = '1'
         duration = info['duration_seconds']
         count = math.ceil(duration / 8)
@@ -158,18 +170,28 @@ def generate(path: Path, *, prompt: str, negative: str, seed: int, steps: int, r
             for i, (start, length) in enumerate(plan_segments(duration)):
                 job.check_cancelled()
                 segment_label = f'tramo {i + 1}/{count}'
-                model_duration = max(2.0, length)
+                model_duration = 8.0 if engine in ('thinksound', 'prismaudio') else max(2.0, length)
                 # Bound decoded frames per segment. A short final segment is extended
                 # with its last frame for inference, then its generated audio is trimmed.
                 common._command([get_ffmpeg_bin(), '-v', 'error', '-y', '-ss', f'{start:.9f}', '-t', f'{length:.9f}',
                                  '-i', str(path), '-map', '0:v:0', '-vf',
-                                 'setpts=PTS-STARTPTS,fps=25,scale=384:384:force_original_aspect_ratio=decrease,pad=384:384:(ow-iw)/2:(oh-ih)/2,tpad=stop_mode=clone:stop_duration=2',
+                                 f'setpts=PTS-STARTPTS,fps=25,scale=384:384:force_original_aspect_ratio=decrease,pad=384:384:(ow-iw)/2:(oh-ih)/2,tpad=stop_mode=clone:stop_duration={8 if engine in ("thinksound", "prismaudio") else 2}',
                                  '-t', f'{model_duration:.9f}', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(video)], job,
                                 stage=f'Preparando vídeo · {segment_label}', timeout=300, guard_label='MMAudio vídeo')
                 audio.unlink(missing_ok=True)
-                common._command([str(py), str(Path(__file__).with_name(worker)), str(root/'source'), str(weights),
-                                 str(video), str(audio), str(model_duration), prompt, negative, str((seed+i) % 2**32), str(steps)], job,
-                                stage=f'{label}: generando audio · {segment_label}', timeout=3600, env=env, guard_label='V2A inferencia')
+                if engine in ('thinksound', 'prismaudio'):
+                    features = work/'features'
+                    if features.exists(): shutil.rmtree(features)
+                    request = work/'request.json'
+                    request.write_text(json.dumps({'prompt': prompt, 'seed': (seed+i) % 2**32, 'output': str(audio)}, ensure_ascii=False), encoding='utf8')
+                    request.chmod(0o600)
+                    for mode, description in (('extract', 'extrayendo características'), ('infer', 'generando audio')):
+                        common._command([str(py), str(Path(__file__).with_name(worker)), mode, str(root/'source'), str(weights), str(request)], job,
+                                        stage=f'{label}: {description} · {segment_label}', timeout=3600, env=env, guard_label=label)
+                else:
+                    common._command([str(py), str(Path(__file__).with_name(worker)), str(root/'source'), str(weights),
+                                     str(video), str(audio), str(model_duration), prompt, negative, str((seed+i) % 2**32), str(steps)], job,
+                                    stage=f'{label}: generando audio · {segment_label}', timeout=3600, env=env, guard_label='V2A inferencia')
                 ainfo = probe_media_info(audio)
                 if not ainfo['has_audio'] or ainfo['duration_seconds'] < model_duration - .5:
                     raise RuntimeError(f'V2A_OUTPUT_INVALID: falta audio suficiente en {segment_label}.')
@@ -205,9 +227,10 @@ def generate(path: Path, *, prompt: str, negative: str, seed: int, steps: int, r
     meta = {'id': dest.stem, 'filename': name, 'rel_path': f'outputs/videos/{name}',
             'media_url': f'/media/outputs/videos/{name}', 'type': 'video', 'model_id': model_id,
             'model_name': f'{label} · Foley experimental', 'duration_seconds': outinfo['duration_seconds'],
-            'has_audio': True, 'original_audio_replaced': info['has_audio'], 'prompt': prompt, 'seed': seed, 'steps': steps,
+            'has_audio': True, 'original_audio_replaced': info['has_audio'], 'prompt': prompt, 'seed': seed, 'steps': 24 if engine in ('thinksound', 'prismaudio') else steps,
             'segments': count, 'segment_seconds_max': 8,
-            'license_note': f'{label}: pesos CC BY-NC 4.0; Apple CLIP solo investigación científica no comercial.',
+            'license_note': {'thinksound': 'ThinkSound: MetaCLIP CC BY-NC 4.0 y licencia separada de Stability para el VAE.',
+                             'prismaudio': 'PrismAudio: investigación/educación; T5Gemma y Stability tienen términos separados.'}.get(engine, f'{label}: pesos CC BY-NC 4.0; Apple CLIP solo investigación científica no comercial.'),
             'elapsed_seconds': round(time.monotonic()-started, 2), 'created_at': datetime.now().isoformat(timespec='seconds')}
     (VIDEOS_OUT_DIR / (dest.stem + '.json')).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf8')
     return meta

@@ -1307,6 +1307,47 @@ def api_clone_voice(req: VoiceCloneReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict()}
 
 
+class FishS2Req(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+    reference_rel: str = Field(default="", max_length=1024)
+    reference_text: str = Field(default="", max_length=2000)
+    authorized: bool = False
+    license_accepted: bool = False
+    install_accepted: bool = False
+
+
+@app.post("/api/tts/fish")
+def api_fish_s2(req: FishS2Req) -> Dict[str, Any]:
+    from studio.engines.fish_s2 import synthesize
+    from studio.engines.voice_clone_reference import MIN_REFERENCE_SECONDS, MAX_REFERENCE_SECONDS, MAX_REFERENCE_BYTES
+    from studio.engines.ffmpeg_utils import probe_media_info
+    if not req.license_accepted or not req.install_accepted:
+        raise HTTPException(status_code=400, detail="Acepta las licencias y autoriza la descarga y preparación de Fish Audio.")
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="Escribe el texto para generar voz.")
+    reference = None
+    if req.reference_rel:
+        if not req.authorized:
+            raise HTTPException(status_code=400, detail="Confirma que tienes permiso para usar esta voz.")
+        if not req.reference_text.strip():
+            raise HTTPException(status_code=400, detail="Fish necesita la transcripción exacta de la muestra.")
+        reference = _resolve_media_rel(req.reference_rel)
+        if not reference or not reference.is_file() or reference.stat().st_size > MAX_REFERENCE_BYTES:
+            raise HTTPException(status_code=400, detail="Selecciona un audio de referencia válido de hasta 50 MiB.")
+        try:
+            info = probe_media_info(reference)
+            seconds = info.get("duration_seconds") or 0
+            if not info.get("has_audio") or info.get("has_video") or not MIN_REFERENCE_SECONDS <= seconds <= MAX_REFERENCE_SECONDS:
+                raise ValueError("La muestra debe ser audio sin vídeo de 3 a 15 segundos.")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif req.reference_text.strip():
+        raise HTTPException(status_code=400, detail="La transcripción requiere una muestra de voz.")
+    job = job_manager.submit(kind="tts", title="Fish S2-Pro · voz local experimental",
+        fn=lambda j: synthesize(text=req.text, reference_path=reference, reference_text=req.reference_text, job=j))
+    return {"ok": True, "job": job.to_dict()}
+
+
 @app.post("/api/tts/generate")
 def api_generate_tts(req: TTSGenReq) -> Dict[str, Any]:
     if not req.text.strip():
@@ -1640,7 +1681,7 @@ def api_community_motion(req: MotionTransferReq) -> Dict[str, Any]:
 
 
 class MMAudioReq(BaseModel):
-    engine: Literal['mmaudio', 'controlfoley'] = 'mmaudio'
+    engine: Literal['mmaudio', 'controlfoley', 'thinksound', 'prismaudio'] = 'mmaudio'
     video_rel: str = Field(min_length=1, max_length=1024)
     prompt: str = Field(default="", max_length=1000)
     negative: str = Field(default="", max_length=1000)
@@ -1648,13 +1689,19 @@ class MMAudioReq(BaseModel):
     steps: int = Field(default=25, ge=10, le=50)
     replace_audio: bool = False
     research_license_accepted: bool = False
+    model_license_accepted: bool = False
+    prism_license_accepted: bool = False
     install_accepted: bool = False
 
 
 @app.post("/api/community/video-audio")
 def api_community_video_audio(req: MMAudioReq) -> Dict[str, Any]:
     from studio.engines.mmaudio import generate, validate_input
-    if not req.research_license_accepted:
+    if req.engine == 'thinksound' and not req.model_license_accepted:
+        raise HTTPException(status_code=400, detail="Acepta las licencias de ThinkSound, MetaCLIP, Stability y sus componentes.")
+    if req.engine == 'prismaudio' and not req.prism_license_accepted:
+        raise HTTPException(status_code=400, detail="Confirma que cumples los términos de investigación/educación de PrismAudio y aceptas las licencias de sus componentes.")
+    if req.engine in ('mmaudio', 'controlfoley') and not req.research_license_accepted:
         raise HTTPException(status_code=400, detail="Este motor usa CLIP de Apple limitado a investigación científica no comercial; confirma que cumples y aceptas las licencias.")
     if not req.install_accepted:
         raise HTTPException(status_code=400, detail="Autoriza la preparación automática y descarga de los componentes locales.")
