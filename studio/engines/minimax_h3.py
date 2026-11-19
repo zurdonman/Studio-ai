@@ -276,7 +276,7 @@ def generate(model_id: str, *, prompt: str, image: Path | None, end: Path | None
     files_for(model_id)
     if not prompt.strip() or len(prompt) > 3000 or not (256 <= width <= 768 and 256 <= height <= 768) or width % 32 or height % 32 or width * height > 768 * 512:
         raise ValueError('H3_INPUT_INVALID: prompt y resolución (múltiplos de 32, máximo 768×512)')
-    if frames not in (22, 39, 56, 73, 124) or steps not in (4, 8) or not 0 <= seed <= 4294967295:
+    if not (22 <= frames <= 362) or (frames - 5) % 17 or not 4 <= steps <= 50 or not 0 <= seed <= 4294967295:
         raise ValueError('H3_INPUT_INVALID: fotogramas, pasos o semilla no admitidos')
     if end and not image:
         raise ValueError('H3_INPUT_INVALID: un fotograma final requiere uno inicial')
@@ -286,6 +286,7 @@ def generate(model_id: str, *, prompt: str, image: Path | None, end: Path | None
     # The API requires explicit license authorization before submitting this job.
     # Preparation handles missing runtime/weights, existing files and cancellation;
     # it never changes the requested variant or bypasses integrity checks.
+    job.log(f'H3: {model_id}, {width}×{height}, {frames} fotogramas (~{frames / 24:.2f} s a 24 fps), {steps} pasos, offload {"sí" if offload else "no"}.')
     job.log('H3: preparando automáticamente la variante seleccionada si faltan componentes; sigue el progreso en el monitor.')
     binary = _prepare(model_id, job)
     job.check_cancelled()
@@ -344,4 +345,5 @@ def generate(model_id: str, *, prompt: str, image: Path | None, end: Path | None
             'frames': frames, 'steps': steps, 'guidance_scale': 1.0, 'seed': actual_seed, 'offload': offload,
             'elapsed_seconds': round(time.monotonic() - started, 2), 'created_at': datetime.now().isoformat(timespec='seconds')}
     (dest.with_suffix('.json')).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf8')
+    job.log(f'H3: MP4 final de {info["duration_seconds"]:.2f} s con pista de audio detectada; comprueba visualmente y escucha el resultado.')
     return meta

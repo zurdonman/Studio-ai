@@ -48,7 +48,9 @@ def test_h3_api_license_and_inputs_fail_before_job_submission(temp_studio_env, m
     allowed = {**base, 'license_authorized': True, 'download_authorized': True}
     assert client.post('/api/video/h3/generate', json={**allowed, 'end_image_rel':'uploads/last.png'}).status_code == 400
     assert client.post('/api/video/h3/generate', json={**allowed, 'width': 513}).status_code == 400
-    assert client.post('/api/video/h3/generate', json={**allowed, 'frames': 25}).status_code == 422
+    assert client.post('/api/video/h3/generate', json={**allowed, 'frames': 25}).status_code == 400
+    assert client.post('/api/video/h3/generate', json={**allowed, 'frames': 363}).status_code == 422
+    assert client.post('/api/video/h3/generate', json={**allowed, 'steps': 51}).status_code == 422
     assert client.post('/api/video/h3/generate', json={**allowed, 'image_rel':'../../etc/passwd'}).status_code == 400
     assert client.post('/api/video/h3/prepare', json={'model_id':'unknown', 'license_authorized':True}).status_code == 422
     assert not submitted
@@ -56,6 +58,7 @@ def test_h3_api_license_and_inputs_fail_before_job_submission(temp_studio_env, m
     Image.new('RGB', (32, 32), 'red').save(uploads / 'h3_test.png')
     response = client.post('/api/video/h3/generate', json={**allowed, 'image_rel':'uploads/h3_test.png'})
     assert response.status_code == 200 and submitted[-1]['kind'] == 'video'
+    assert client.post('/api/video/h3/generate', json={**allowed, 'frames': 362, 'steps': 20}).status_code == 200
     assert client.post('/api/video/h3/prepare', json={'model_id': base['model_id'], 'license_authorized':True}).status_code == 200
     assert submitted[-1]['dedup_key'] == 'h3-prepare:h3-fl2va-udq2'
 
@@ -84,6 +87,17 @@ def test_generation_prepares_missing_model_and_propagates_setup_errors(temp_stud
     with pytest.raises(ValueError, match='H3_INPUT_INVALID'):
         h3.generate('h3-fl2va-q4', prompt='', image=None, end=None, width=640, height=384, frames=22, steps=4, seed=0, offload=True, job=JobRecord('video', 'test'))
     assert calls == ['h3-fl2va-q4']
+
+
+@pytest.mark.parametrize('frames,steps,valid', [(22, 4, True), (107, 20, True), (124, 50, True), (362, 20, True), (25, 20, False), (379, 20, False), (124, 51, False)])
+def test_frame_grid_and_quality_steps_checked_before_preparation(temp_studio_env, monkeypatch, frames, steps, valid):
+    from studio.engines import minimax_h3 as h3
+    from studio.jobs import JobRecord
+    monkeypatch.setattr(h3, '_prepare', lambda *args: (_ for _ in ()).throw(RuntimeError('reached preparation')))
+    kw = dict(model_id='h3-fl2va-udq2', prompt='test', image=None, end=None, width=640, height=384,
+              frames=frames, steps=steps, seed=42, offload=True, job=JobRecord('video', 'test'))
+    with pytest.raises(RuntimeError if valid else ValueError, match='reached preparation' if valid else 'H3_INPUT_INVALID'):
+        h3.generate.__wrapped__(**kw)
 
 
 @pytest.mark.parametrize('conversion_fails', [False, True])

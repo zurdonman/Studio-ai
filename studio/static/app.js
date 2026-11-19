@@ -2542,6 +2542,20 @@
     const feedback = (text, error = false) => {
       const el = $("h3-feedback"); el.hidden = false; el.className = `vid-steps-note ${error ? "warn" : "ok"}`; el.textContent = text;
     };
+    const durationFrames = () => {
+      const input = $("h3-duration");
+      const seconds = Number(input.value);
+      if (!input.value || !Number.isFinite(seconds) || seconds < 0.9 || seconds > 15) return null;
+      return Math.max(22, 5 + 17 * Math.ceil((seconds * 24 - 5) / 17 - 1e-10));
+    };
+    const updateDuration = () => {
+      const frames = durationFrames();
+      $("h3-duration-note").textContent = frames === null
+        ? "Introduce una duración entre 0,9 y 15 segundos."
+        : `Se solicitarán ${frames} fotogramas: ~${(frames / 24).toFixed(2).replace('.', ',')} s a 24 fps (duración aproximada).`;
+    };
+    $("h3-duration").addEventListener("input", updateDuration);
+    updateDuration();
     for (const [input, select] of [["h3-upload-start", "h3-start"], ["h3-upload-end", "h3-end"]]) {
       $(input).addEventListener("change", async ev => {
         const file = ev.target.files[0]; if (!file) return;
@@ -2562,12 +2576,13 @@
       if (!$("h3-license").checked) return feedback("Confirma que tienes derecho a usar el modelo en tu territorio.", true);
       const data = {model_id:$("h3-model").value, license_authorized:true, prompt:$("h3-prompt").value,
         image_rel:$("h3-start").value || null, end_image_rel:$("h3-end").value || null,
-        width:Number($("h3-width").value), height:Number($("h3-height").value), frames:Number($("h3-frames").value),
+        width:Number($("h3-width").value), height:Number($("h3-height").value), frames:durationFrames(),
         steps:Number($("h3-steps").value), seed:Number($("h3-seed").value), offload:$("h3-offload").checked};
       if (!data.prompt.trim()) return feedback("Escribe la descripción del plano.", true);
+      if (data.frames === null) return feedback("Introduce una duración entre 0,9 y 15 segundos.", true);
       if (data.end_image_rel && !data.image_rel) return feedback("Para usar un fotograma final selecciona también uno inicial.", true);
       const size = data.model_id === "h3-fl2va-q4" ? "~33 GiB" : "~25,1 GiB";
-      if (!confirm(`Si faltan componentes de H3, se descargará un motor precompilado compatible o se compilará, y se descargarán y verificarán archivos (${size} en total, más espacio adicional). ¿Autorizar y generar?`)) return;
+      if (!confirm(`Se solicitarán ${data.frames} fotogramas (~${(data.frames / 24).toFixed(2)} s) y ${data.steps} pasos; mayor duración y pasos consumen más tiempo y memoria. Si faltan componentes de H3, se descargará un motor precompilado compatible o se compilará, y se descargarán y verificarán archivos (${size} en total, más espacio adicional). ¿Autorizar y generar?`)) return;
       data.download_authorized = true;
       try { const result = await api("/api/video/h3/generate", {method:"POST", body:JSON.stringify(data)});
         feedback("En cola. Si H3 no está preparado, se instalará y descargará automáticamente antes de generar. Sigue el monitor; el clip aparecerá en Vídeo."); watchJob(result.job);

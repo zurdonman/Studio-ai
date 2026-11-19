@@ -1036,8 +1036,8 @@ class H3GenerateReq(H3PrepareReq):
     end_image_rel: Optional[str] = None
     width: int = Field(default=640, ge=256, le=768)
     height: int = Field(default=384, ge=256, le=768)
-    frames: Literal[22, 39, 56, 73, 124] = 22
-    steps: Literal[4, 8] = 4
+    frames: int = Field(default=22, ge=22, le=362)
+    steps: int = Field(default=4, ge=4, le=50)
     seed: int = Field(default=0, ge=0, le=4294967295)
     offload: bool = True
 
@@ -1065,6 +1065,8 @@ def api_generate_h3(req: H3GenerateReq) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Describe la escena.")
     if req.width % 32 or req.height % 32 or req.width * req.height > 768 * 512:
         raise HTTPException(status_code=400, detail="H3: dimensiones múltiplos de 32 y área máxima 768×512.")
+    if (req.frames - 5) % 17:
+        raise HTTPException(status_code=400, detail="H3: el número de fotogramas debe seguir la serie 17n+5.")
     if req.end_image_rel and not req.image_rel:
         raise HTTPException(status_code=400, detail="El fotograma final requiere uno inicial.")
     image = _resolve_media_rel(req.image_rel) if req.image_rel else None
