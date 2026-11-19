@@ -872,6 +872,24 @@
             <p>La pintura y propagación sobre vídeo aún no están integradas. Requieren adaptar y auditar nodos, rutas, pesos y licencias; no se anuncia como disponible.</p>
             <button class="btn btn-secondary btn-sm" type="button" id="community-image">Abrir edición de imagen existente</button>
           </details>
+          <details><summary><strong>🔊 Sonido para vídeo · V2A</strong> — MMAudio V2 experimental</summary>
+            <div class="form-stack">
+              <p>Genera efectos y ambiente a partir de un vídeo local, también de Wan. No es doblaje V2S: no garantiza voz inteligible, frases, labios ni sincronización perfecta. El original nunca se modifica.</p>
+              <p>Solo clips de 2–8 segundos, hasta 200 MiB. Se recodifica el vídeo de salida; si el original ya tiene audio, solo se reemplaza en la copia y con autorización. Primera ejecución: preparación automática del entorno y descarga de unos 10 GB de pesos más dependencias y espacio temporal. GPU NVIDIA CUDA con BF16; no validado en L4/G4.</p>
+              <p><strong>Licencias:</strong> pesos MMAudio <a href="https://huggingface.co/hkchengrex/MMAudio/blob/main/README.md" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a>; el CLIP de Apple que necesita está limitado a <a href="https://huggingface.co/apple/DFN5B-CLIP-ViT-H-14-378/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">investigación científica no comercial</a>. Uso personal sin más no basta. El código adaptado EDM2 es <a href="https://github.com/hkchengrex/MMAudio/blob/974010a026c731054592d8f777218bd9d85a6c24/mmaudio/ext/autoencoder/edm2_utils.py" target="_blank" rel="noopener noreferrer">CC BY-NC-SA 4.0</a>; BigVGAN y demás componentes tienen sus propios términos. Si no cumples esa finalidad, no uses esta receta.</p>
+              <label class="field-label" for="v2a-input">Vídeo de la biblioteca o subido</label>
+              <div class="row-gap"><select id="v2a-input" class="flex-1"></select><label class="btn btn-secondary btn-sm file-btn">Subir vídeo<input id="v2a-upload" type="file" accept="video/*" hidden /></label></div>
+              <label class="field-label" for="v2a-prompt">Sonidos deseados (opcional; preferiblemente en inglés)</label><textarea id="v2a-prompt" maxlength="1000" placeholder="Footsteps on gravel, wind in the trees"></textarea>
+              <label class="field-label" for="v2a-negative">Sonidos a evitar (opcional)</label><input id="v2a-negative" maxlength="1000" />
+              <div class="params-grid-2"><div><label class="field-label" for="v2a-steps">Pasos</label><input id="v2a-steps" type="number" min="10" max="50" value="25" /></div><div><label class="field-label" for="v2a-seed">Semilla</label><input id="v2a-seed" type="number" min="0" max="4294967295" value="42" /></div></div>
+              <label class="check-row"><input type="checkbox" id="v2a-replace" /> Si ya existe audio, sustituirlo solo en la copia generada</label>
+              <label class="check-row"><input type="checkbox" id="v2a-license" /> Confirmo que mi uso cumple la finalidad de investigación científica no comercial de Apple y acepto las licencias de los componentes</label>
+              <label class="check-row"><input type="checkbox" id="v2a-install" /> Autorizo la instalación de dependencias y descarga local de los modelos necesarios</label>
+              <button class="btn btn-primary" type="button" id="v2a-run">Generar sonido local (experimental)</button>
+              <p class="muted" id="v2a-feedback" role="status">El progreso, la cancelación y los errores aparecen en el monitor; el resultado se guarda en Vídeo.</p>
+              <video id="v2a-result" class="result-media" controls playsinline hidden></video>
+            </div>
+          </details>
           <details><summary><strong>🎞️ Suavizado · FILM 2x</strong> — experimental</summary>
             <div class="form-stack">
               <p>Receta inspirada en Freefield Smooth: convierte a 24 fps e interpola a 48 fps a velocidad normal; no es cámara lenta. Conserva el audio si existe. Puede introducir artefactos. Sin prueba de inferencia GPU.</p>

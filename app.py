@@ -1639,6 +1639,38 @@ def api_community_motion(req: MotionTransferReq) -> Dict[str, Any]:
     return {"ok": True, "job": job.to_dict(include_logs=True)}
 
 
+class MMAudioReq(BaseModel):
+    video_rel: str = Field(min_length=1, max_length=1024)
+    prompt: str = Field(default="", max_length=1000)
+    negative: str = Field(default="", max_length=1000)
+    seed: int = Field(default=42, ge=0, le=4294967295)
+    steps: int = Field(default=25, ge=10, le=50)
+    replace_audio: bool = False
+    research_license_accepted: bool = False
+    install_accepted: bool = False
+
+
+@app.post("/api/community/video-audio")
+def api_community_video_audio(req: MMAudioReq) -> Dict[str, Any]:
+    from studio.engines.mmaudio import generate, validate_input
+    if not req.research_license_accepted:
+        raise HTTPException(status_code=400, detail="MMAudio usa CLIP de Apple limitado a investigación científica no comercial; confirma que cumples y aceptas las licencias.")
+    if not req.install_accepted:
+        raise HTTPException(status_code=400, detail="Autoriza la preparación automática y descarga de los componentes locales.")
+    path = _resolve_media_rel(req.video_rel)
+    allowed = (UPLOADS_DIR.resolve(), VIDEOS_OUT_DIR.resolve(), MONTAGES_OUT_DIR.resolve())
+    if not path or not path.is_file() or path.parent not in allowed or path.suffix.lower() not in (".mp4", ".mov", ".webm", ".mkv"):
+        raise HTTPException(status_code=400, detail="Selecciona un vídeo de la biblioteca o subido.")
+    try:
+        validate_input(path, req.replace_audio)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    job = job_manager.submit(kind="video", title="MMAudio V2 · Foley local experimental",
+                             fn=lambda j: generate(path, prompt=req.prompt, negative=req.negative,
+                                                   seed=req.seed, steps=req.steps, replace_audio=req.replace_audio, job=j))
+    return {"job": job.to_dict(include_logs=True)}
+
+
 class FilmInterpolationReq(BaseModel):
     video_rel: str = Field(min_length=1, max_length=1024)
 

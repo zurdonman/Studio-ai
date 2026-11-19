@@ -520,6 +520,10 @@
         $("motion-result").hidden = false; $("motion-result").src = res.media_url;
         $("motion-feedback").textContent = "Resultado guardado en la biblioteca de Vídeo.";
       }
+      if (res.model_id === "mmaudio-v2-experimental" && $("v2a-result")) {
+        $("v2a-result").hidden = false; $("v2a-result").src = res.media_url;
+        $("v2a-feedback").textContent = "Copia con sonido guardada en la biblioteca de Vídeo.";
+      }
       if (res.model_id === "freefield-film" && $("community-film-result")) {
         $("community-film-result").hidden = false;
         $("community-film-result").src = res.media_url;
@@ -2175,11 +2179,13 @@
   }
 
   function renderCommunityVideoSelect() {
-    const el = $("community-film-input"); if (!el) return;
     const items = [...state.assets.videos, ...state.assets.montages, ...state.assets.uploads.filter(a => a.type === "video")];
-    const prev = el.value;
-    el.innerHTML = '<option value="">Selecciona un vídeo</option>' + items.map(a => `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
-    if (items.some(a => a.rel_path === prev)) el.value = prev;
+    for (const id of ["community-film-input", "v2a-input"]) {
+      const el = $(id); if (!el) continue;
+      const prev = el.value;
+      el.innerHTML = '<option value="">Selecciona un vídeo</option>' + items.map(a => `<option value="${escapeHtml(a.rel_path)}">${escapeHtml(a.filename)}</option>`).join("");
+      if (items.some(a => a.rel_path === prev)) el.value = prev;
+    }
   }
 
   function renderIdLoraSelects() {
@@ -3081,6 +3087,22 @@
       $("lipsync-media-select")?.scrollIntoView({behavior: "smooth", block: "center"});
     }));
     $("community-image")?.addEventListener("click", () => switchTab("tab-image"));
+    $("v2a-upload")?.addEventListener("change", async e => {
+      const file = e.target.files?.[0]; if (!file) return;
+      try { const uploaded = await uploadFile(file); $("v2a-input").value = uploaded.rel_path; }
+      catch (err) { toast(err.message, "error"); } finally { e.target.value = ""; }
+    });
+    $("v2a-run")?.addEventListener("click", async () => {
+      const video_rel = $("v2a-input").value;
+      if (!video_rel) { toast("Selecciona un vídeo.", "error"); return; }
+      if (!$("v2a-license").checked || !$("v2a-install").checked) { toast("Confirma las licencias y autoriza la preparación local.", "error"); return; }
+      const body = {video_rel, prompt: $("v2a-prompt").value, negative: $("v2a-negative").value,
+        seed: Number($("v2a-seed").value), steps: Number($("v2a-steps").value), replace_audio: $("v2a-replace").checked,
+        research_license_accepted: true, install_accepted: true};
+      try { const res = await api("/api/community/video-audio", {method: "POST", body: JSON.stringify(body)});
+        $("v2a-feedback").textContent = "Trabajo en cola. Sigue la preparación y generación en el monitor."; watchJob(res.job);
+      } catch (err) { toast(err.message, "error"); }
+    });
     $("community-film-upload")?.addEventListener("change", async e => {
       const file = e.target.files?.[0]; if (!file) return;
       try {
