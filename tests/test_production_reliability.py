@@ -1091,7 +1091,7 @@ def test_wan_ti2v_delta_stack_scale_change_unload_and_failure_roll_back(tmp_path
     from safetensors.torch import save_file
     torch, pipe, raw, path = _tiny_wan_mixed_fixture(tmp_path)
     original = {name: param.detach().clone() for name, param in pipe.transformer.named_parameters()}
-    lora = {"id": "test-fast", "name": "Fast test", "category": "lora", "compatible_models": ["base"], "max_steps": 6}
+    lora = {"id": "test-fast", "name": "Fast test", "category": "lora", "lora_target": "video", "compatible_models": ["base"], "max_steps": 6}
     monkeypatch.setattr(engine.catalog_manager, "get_definition", lambda lid: lora if lid == "test-fast" else {"id": "base"})
     monkeypatch.setattr(engine.catalog_manager, "is_downloaded", lambda lid: True)
     monkeypatch.setattr(engine.memory_manager, "prepare_for_adapters", lambda *a, **k: None)
@@ -1120,7 +1120,7 @@ def test_wan_ti2v_restores_deltas_if_offload_fails(tmp_path, monkeypatch):
     from studio.engines import video_engine as engine
     torch, pipe, _, path = _tiny_wan_mixed_fixture(tmp_path)
     original = {name: param.detach().clone() for name, param in pipe.transformer.named_parameters()}
-    lora = {"id": "test-fast", "name": "Fast test", "compatible_models": ["base"], "max_steps": 6}
+    lora = {"id": "test-fast", "name": "Fast test", "category": "lora", "lora_target": "video", "compatible_models": ["base"], "max_steps": 6}
     monkeypatch.setattr(engine.catalog_manager, "get_definition", lambda lid: lora if lid == "test-fast" else {"id": "base"})
     monkeypatch.setattr(engine.catalog_manager, "is_downloaded", lambda lid: True)
     monkeypatch.setattr(engine.memory_manager, "prepare_for_adapters", lambda *a, **k: None)

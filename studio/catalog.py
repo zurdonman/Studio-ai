@@ -2828,6 +2828,51 @@ for _base_id in ("ltx-2.3-full-av", "ltx-2.3-distilled-av", "ltx-2.5-full-av", "
         _art["select_shards_from_index"] = f"{_transformer_subdir}/diffusion_pytorch_model.safetensors.index.json"
     DEFAULT_CATALOG.append(_quant)
 
+# These adapters were previously advertised for Fun 14B merely because they
+# target Wan 14B. Their authors do not establish this specific base/mode or the
+# Studio Diffusers path. Do not present unverified cross-model claims as facts.
+_fun14b_unverified_loras = {
+    "lora-wan21-14b-fusionx-i2v", "lora-wan21-14b-lightx2v-i2v",
+    "lora-wan21-14b-unianimate-char", "lora-wan21-14b-moviigen-cinema",
+    "lora-wan21-14b-detailz", "lora-wan21-14b-snapshot-real",
+}
+for _entry in DEFAULT_CATALOG:
+    if _entry.get("id") in _fun14b_unverified_loras:
+        _entry["compatible_models"] = [m for m in _entry.get("compatible_models", []) if m != "wan21-fun-inp-14b-fp8"]
+    if _entry.get("id") == "wan21-fun-inp-14b-fp8":
+        _entry["badge"] = "14B Fun-InP FP8 · ejecución experimental"
+        _entry["official_spec"]["official_note"] = "Wan 2.1 Fun-InP 14B FP8 · uso en Studio experimental; carga, memoria y velocidad no garantizadas."
+        _entry["description"] = ("Wan 2.1 Fun-InP 14B cuantizado FP8, para imagen inicial o inicial y final. "
+            "Comportamiento y LoRAs en esta integración Diffusers no están validados con GPU. "
+            "Se conservan los archivos en disco y se intenta liberar memoria tras cada generación.")
+        _entry["l4_seconds_hint"] = "Sin tiempos garantizados; depende de parámetros, RAM y VRAM"
+
+# Alibaba PAI reward adapters, converted to the Comfy/original Wan key format
+# by Kijai. These are quality/preference adapters, NOT step distillation.
+# https://huggingface.co/alibaba-pai/Wan2.1-Fun-Reward-LoRAs
+# Loader/FP8 inference has not been verified with the real files or GPU.
+for _size, _model, _gb in (("14b", "wan21-fun-inp-14b-fp8", 1.46),
+                          ("1.3b", "wan21-fun-1.3b-inp", 0.41)):
+    for _reward in ("HPS2.1", "MPS"):
+        _file = f"Wan2.1-Fun-{_size.upper()}-InP-{_reward}_reward_lora_comfy.safetensors"
+        DEFAULT_CATALOG.append({
+            "id": f"lora-wan21-fun-{_size}-{_reward.lower().replace('.', '')}",
+            "name": f"Wan 2.1 Fun {_size.upper()} · {_reward} Reward (calidad, experimental)",
+            "category": "lora", "lora_target": "video", "lora_group": "quality",
+            "stackable_creative": True, "compatible_models": [_model],
+            "default_lora_scale": 0.7 if _size == "14b" or _reward == "MPS" else 0.5,
+            "parent_model": _model, "adapter_name": f"wan21_fun_{_size.replace('.', '_')}_{_reward.lower().replace('.', '')}",
+            "badge": "Calidad · no acelera · prueba GPU pendiente",
+            "description": ("LoRA oficial Alibaba de preferencias para Wan 2.1 Fun InP, convertido por Kijai. "
+                            "No reduce pasos; puede modificar la estética o reducir movimiento y no garantiza mejora. "
+                            "Carga en Studio y FP8 sin probar con pesos reales."),
+            "estimated_gb": _gb, "min_vram_gb": _gb, "recommended_vram_gb": _gb * 2,
+            "engine": "video_lora", "artifacts": [{
+                "role": "lora", "repo_id": "Kijai/Wan2.1-Fun-Reward-LoRAs-comfy",
+                "revision": "931844f165657e216d71c5a4f3ce4b78c3abe02e", "subdir": "reward", "filename": _file, "verify_file": _file,
+            }],
+        })
+
 DEFAULT_CATALOG.extend(EXTRA_IMAGE_MODELS)
 for _definition in DEFAULT_CATALOG:
     if _definition.get("category") == "lora":

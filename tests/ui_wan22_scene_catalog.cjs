@@ -80,6 +80,17 @@ async function until(test, label) {
   await until(() => calls.filter(c=>c.path==='/api/video/wan22-i2v').length===3, 'Wan first last submit');
   fun=JSON.parse(calls.filter(c=>c.path==='/api/video/wan22-i2v')[2].body);
   if(fun.mode!=='flf2v' || fun.quant!=='q4_0' || fun.image_rel!=='uploads/start.png' || fun.end_image_rel!=='uploads/end.png') throw Error('bad first/last request');
+  $('wan22-quant').value='fp8'; $('wan22-quant').dispatchEvent(new w.Event('change'));
+  if ($('wan22-speed').querySelector('[value="lightx2v"]').disabled) throw Error('Fast pair missing for Fun FP8 first/last');
+  $('wan22-speed').value='lightx2v'; $('wan22-speed').dispatchEvent(new w.Event('change'));
+  if ($('wan22-steps').value!=='4' || $('wan22-cfg').value!=='1') throw Error('Fast settings not applied');
+  $('wan22-run').click();
+  await until(() => calls.filter(c=>c.path==='/api/video/wan22-i2v').length===4, 'Wan fast submit');
+  fun=JSON.parse(calls.filter(c=>c.path==='/api/video/wan22-i2v')[3].body);
+  if(fun.speed!=='lightx2v' || fun.steps!==4 || fun.cfg!==1) throw Error('bad fast request');
+  $('wan22-quant').value='q4'; $('wan22-quant').dispatchEvent(new w.Event('change'));
+  if ($('wan22-speed').value!=='none' || $('wan22-steps').value!=='40' || $('wan22-cfg').value!=='3.5') throw Error('Fast settings not reset');
+  $('wan22-quant').value='q4_0';
   $('wan22-recipe').value='i2v'; $('wan22-recipe').dispatchEvent(new w.Event('change'));
   if($('wan22-mode').value!=='i2v' || $('wan22-quant').value!=='q4') throw Error('I2V incompatible choices reset');
   if (errors.length) throw Error(errors.join('; '));

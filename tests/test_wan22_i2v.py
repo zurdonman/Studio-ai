@@ -149,3 +149,21 @@ def test_fun_synthetic_lifecycle(temp_studio_env, monkeypatch, tmp_path, colab_m
         frames=49,steps=40,cfg=3.5,seed=42,job=JobRecord('video','test'))
     assert closed==[True] and result['video_submode']==mode and 'fun' in result['model_id']
     assert (root/result['rel_path']).is_file()
+
+
+def test_fun_fp8_lightx2v_pair_and_strict_recipe():
+    from studio.engines.wan22_i2v import make_graph
+    from studio.engines.wan22_i2v_manifest import recipe_files
+    names = {k:k + '.safetensors' for k in ('high','low','umt5','vae','lora_high','lora_low')}
+    kwargs = dict(quant='fp8', recipe='fun', mode='flf2v', speed='lightx2v', names=names,
+                  image_name='start.png',end_image_name='end.png',prompt='motion',negative='',
+                  width=512,height=320,frames=49,seed=2,steps=4,cfg=1)
+    g=make_graph(**kwargs)
+    assert g['17']['inputs']['model']==['1',0] and g['17']['inputs']['lora_name']==names['lora_high']
+    assert g['18']['inputs']['model']==['2',0] and g['18']['inputs']['lora_name']==names['lora_low']
+    assert g['9']['inputs']['model']==['17',0] and g['10']['inputs']['model']==['18',0]
+    assert g['9']['inputs']['shift']==8 and g['10']['inputs']['shift']==8
+    assert g['11']['inputs']['end_at_step']==2 and g['12']['inputs']['start_at_step']==2
+    assert {x[0] for x in recipe_files('fp8','fun','lightx2v')} >= {'lora_high','lora_low'}
+    for change in ({'quant':'q4'}, {'recipe':'i2v'}, {'mode':'i2v'}, {'steps':5}, {'cfg':2}, {'speed':'bogus'}):
+        with pytest.raises(ValueError): make_graph(**{**kwargs,**change})

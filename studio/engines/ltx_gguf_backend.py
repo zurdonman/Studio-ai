@@ -421,7 +421,8 @@ def _install_resident_plugin(root: Path) -> None:
     destination = root / 'comfy' / 'custom_nodes' / 'StudioResident'
     if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
         raise RuntimeError('GGUF_RESIDENT_PLUGIN_CONFLICT: directorio ajeno, no se modifica')
-    old_versions = {'core.py': {'f00e4157aea663dbf2c0c03beb154263d5352de7bdbd5f958932b45a9234d5db',
+    old_versions = {'core.py': {'4ed20ad1bc24102e7dc47321044a8e6701fcae115d167cc3b66b22394ded50b4',
+                                'f00e4157aea663dbf2c0c03beb154263d5352de7bdbd5f958932b45a9234d5db',
                                 '07682439076a008995ff4a80735f7aef3800fb596fbd820c5f5cadfadf52044e',
                                 '0145c73e2b9ead7dada4cd0b3a625ae8f6202edc88f3c1abe93438670469879a'},
                     '__init__.py': {'9e6d8d11e127ad676cd38441ce303309613e7ef7ee0108281638eeb9d61d323c'}}

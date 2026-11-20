@@ -1093,11 +1093,11 @@
     const compatLoras = state.catalog.filter(
       (m) =>
         m.category === "lora" &&
-        m.lora_target === "video" &&
+        m.lora_target === "video" && m.validation_state !== "candidate" &&
         !m.stackable_creative &&
-        (!Array.isArray(m.compatible_models) || m.compatible_models.includes(modelId)) &&
+        Array.isArray(m.compatible_models) && m.compatible_models.includes(modelId) &&
         (!Array.isArray(m.incompatible_submodes) || !m.incompatible_submodes.includes(curSub))
-    );
+    ).sort((a, b) => modelAlphabetical(a.name, b.name));
 
     if (compatLoras.length === 0) {
       loraBox.hidden = true;
@@ -1264,11 +1264,11 @@
     const creativeLoras = state.catalog.filter(
       (m) =>
         m.category === "lora" &&
-        m.lora_target === "video" &&
+        m.lora_target === "video" && m.validation_state !== "candidate" &&
         Boolean(m.stackable_creative) &&
-        (!Array.isArray(m.compatible_models) || m.compatible_models.includes(modelId)) &&
+        Array.isArray(m.compatible_models) && m.compatible_models.includes(modelId) &&
         (!Array.isArray(m.incompatible_submodes) || !m.incompatible_submodes.includes(curSub))
-    );
+    ).sort((a, b) => modelAlphabetical(a.lora_group || "", b.lora_group || "") || modelAlphabetical(a.name, b.name));
 
     const compatSet = new Set(creativeLoras.map((x) => x.id));
     Object.keys(state.activeVidExtraLoras).forEach((k) => {
@@ -1309,6 +1309,7 @@
                 ${dlBadge}
               </div>
             </div>
+            <span class="muted">${escapeHtml(({character:"Personaje", environment:"Entorno", quality:"Calidad", camera:"Cámara", style:"Estilo"})[l.lora_group] || l.lora_group || "Otros")}</span>
             ${
               isChecked
                 ? `<div class="lri-scale-row">
@@ -3229,12 +3230,21 @@
   // ==================== EVENTOS DE UI ====================
   function bindEvents() {
     bindH3();
+    let wan22SavedSpeedSettings = null;
     function configureWan22() {
       const recipe = $("wan22-recipe").value, mode = $("wan22-mode");
       for (const opt of mode.options) opt.disabled = recipe === "i2v" && opt.value !== "i2v";
       if (recipe === "i2v" && mode.value !== "i2v") mode.value = "i2v";
       for (const opt of $("wan22-quant").options) opt.disabled = recipe === "fun" ? opt.value === "nvfp4" : ["q4_0","q4_1"].includes(opt.value);
       if ($("wan22-quant").selectedOptions[0]?.disabled) $("wan22-quant").value = "q4";
+      const canSpeed = recipe === "fun" && mode.value === "flf2v" && $("wan22-quant").value === "fp8";
+      const speed = $("wan22-speed"), fast = speed.querySelector('option[value="lightx2v"]');
+      fast.hidden = !canSpeed; fast.disabled = !canSpeed;
+      if (!canSpeed && speed.value !== "none") {
+        speed.value = "none";
+        if (wan22SavedSpeedSettings) { $("wan22-steps").value = wan22SavedSpeedSettings.steps; $("wan22-cfg").value = wan22SavedSpeedSettings.cfg; }
+        wan22SavedSpeedSettings = null;
+      }
       $("wan22-image").disabled = mode.value === "t2v";
       $("wan22-upload").disabled = mode.value === "t2v";
       $("wan22-end").disabled = mode.value !== "flf2v";
@@ -3242,6 +3252,16 @@
     }
     $("wan22-recipe")?.addEventListener("change", configureWan22);
     $("wan22-mode")?.addEventListener("change", configureWan22);
+    $("wan22-quant")?.addEventListener("change", configureWan22);
+    $("wan22-speed")?.addEventListener("change", () => {
+      if ($("wan22-speed").value === "lightx2v") {
+        wan22SavedSpeedSettings = {steps:$("wan22-steps").value, cfg:$("wan22-cfg").value};
+        $("wan22-steps").value = 4; $("wan22-cfg").value = 1;
+      } else if (wan22SavedSpeedSettings) {
+        $("wan22-steps").value = wan22SavedSpeedSettings.steps; $("wan22-cfg").value = wan22SavedSpeedSettings.cfg;
+        wan22SavedSpeedSettings = null;
+      }
+    });
     configureWan22();
     for (const [upload, select] of [["wan22-upload","wan22-image"],["wan22-end-upload","wan22-end"]]) {
       $(upload)?.addEventListener("change", async ev => {
@@ -3254,7 +3274,7 @@
       const feedback = $("wan22-feedback");
       if (!$("wan22-install").checked) { feedback.textContent = "Autoriza la preparación local."; return; }
       const mode = $("wan22-mode").value;
-      const body = {recipe:$("wan22-recipe").value, mode, quant:$("wan22-quant").value,
+      const body = {recipe:$("wan22-recipe").value, mode, quant:$("wan22-quant").value, speed:$("wan22-speed").value,
         image_rel:mode === "t2v" ? null : $("wan22-image").value || null,
         end_image_rel:mode === "flf2v" ? $("wan22-end").value || null : null, prompt:$("wan22-prompt").value,
         negative:$("wan22-negative").value, width:Number($("wan22-width").value), height:Number($("wan22-height").value),

@@ -133,3 +133,17 @@ def test_film_graph_keeps_interpolation_loader_only():
              '5':{'class_type':'CreateVideo'}, '6':{'class_type':'SaveVideo'}}
     assert prune_completed(executor, graph) == {'retained_loaders':1, 'total_loaders':1}
     assert set(executor.caches.outputs.cache) == {'key3'}
+
+
+def test_wan22_two_expert_cache_then_reset():
+    executor, graph = fake_executor()
+    graph['2']['class_type'] = 'UnetLoaderGGUF'
+    graph['3']['class_type'] = 'CLIPLoader'
+    graph['4']['class_type'] = 'VAELoader'
+    graph['8'] = {'class_type': 'WanFunInpaintToVideo'}
+    graph['15'] = {'class_type': 'SaveVideo'}
+    assert prune_completed(executor, graph) == {'retained_loaders':4, 'total_loaders':4}
+    assert set(executor.caches.outputs.cache) == {'key1','key2','key3','key4'}
+    executor.caches.outputs.initialized = True
+    assert prune_completed(executor, {'1': {'class_type':'StudioResidentReset'}}) == {'retained_loaders':0, 'total_loaders':0}
+    assert executor.caches.outputs.cache == {}

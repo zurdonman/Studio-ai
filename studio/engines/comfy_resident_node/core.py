@@ -21,6 +21,10 @@ def prune_completed(executor, prompt):
         loaders = {}
     elif classes.get('4') == 'FrameInterpolate' and classes.get('6') == 'SaveVideo':
         loaders = {'3': {'FrameInterpolationModelLoader'}}
+    elif classes.get('8') in ('WanFunInpaintToVideo', 'WanImageToVideo') and classes.get('15') == 'SaveVideo':
+        # Wan A14B uses two separate experts followed by UMT5 and VAE.
+        loaders = {'1': {'UnetLoaderGGUF', 'UNETLoader'}, '2': {'UnetLoaderGGUF', 'UNETLoader'},
+                   '3': {'CLIPLoader'}, '4': {'VAELoader'}}
     elif classes.get('14') in ('WanAnimate2ToVideo', 'WanSCAILToVideo'):
         loaders = {'1': {'StudioWanAnimate2GGUF', 'UnetLoaderGGUF', 'UNETLoader'},
                    '2': {'CLIPLoader'}, '3': {'VAELoader'}, '4': {'CLIPVisionLoader'}}

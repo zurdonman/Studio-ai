@@ -68,3 +68,17 @@ def files_for(quant, recipe='i2v'):
                         for stage,digest in (('high',high),('low',low)))
     else: raise ValueError('WAN22_QUANT_INVALID: variante no disponible para esta receta')
     return (*experts, MOTION_COMMON[0], MOTION_COMMON[2])
+
+
+# Comfy's documented 4-step pair for Wan2.2 Fun InP FP8, high and low
+# matched to their expert. SHA-256 and sizes from the pinned Comfy revision.
+FUN_LIGHTX2V = (
+    ('lora_high', COMFY_REPO, COMFY_REV, 'split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors', 1226977424, 'd176c808d6fc461999b68e321efcb7501b20b8c3797523ed0df14f7d1deff11e'),
+    ('lora_low', COMFY_REPO, COMFY_REV, 'split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors', 1226977424, '024f21de095bc8fad9809ded3e9e49a2e170dcf27075da8145ba7d60d8aab7f9'),
+)
+
+def recipe_files(quant, recipe='i2v', speed='none'):
+    files = files_for(quant, recipe)
+    if speed == 'none': return files
+    if speed == 'lightx2v' and recipe == 'fun' and quant == 'fp8': return (*files, *FUN_LIGHTX2V)
+    raise ValueError('WAN22_LORA_INCOMPATIBLE: LightX2V solo para Fun InP FP8 inicio-final en esta receta.')

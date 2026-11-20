@@ -1,4 +1,5 @@
 import inspect
+import functools
 import json
 import math
 import re
@@ -1279,21 +1280,11 @@ def _sync_video_lora_on_handle(
 
     for idx_l, (lid, custom_sc) in enumerate(requested_pairs):
         ldef = catalog_manager.get_definition(lid)
-        if not ldef:
-            raise ValueError(f"LoRA desconocido: {lid}")
-        compat_models = ldef.get("compatible_models")
-        if compat_models and loaded_model_id and loaded_model_id not in compat_models:
-            if lid != clean_primary:
-                if job is not None:
-                    job.log(
-                        f"Omitiendo LoRA extra «{ldef['name']}» por ser específico de {', '.join(compat_models)} (modelo activo: {loaded_model_id}).",
-                        level="warning",
-                    )
-                continue
-            raise ValueError(
-                f"El LoRA «{ldef['name']}» está diseñado para {', '.join(compat_models)} "
-                f"y no es compatible con «{loaded_model_id}»."
-            )
+        if not ldef or ldef.get("category") != "lora" or ldef.get("lora_target") != "video" or ldef.get("validation_state") == "candidate":
+            raise ValueError(f"LoRA de vídeo no disponible o no revisado: {lid}")
+        compat_models = ldef.get("compatible_models") or []
+        if not loaded_model_id or loaded_model_id not in compat_models:
+            raise ValueError(f"El LoRA «{ldef['name']}» no declara compatibilidad con «{loaded_model_id}».")
         eff_sc = float(custom_sc) if custom_sc is not None else float(ldef.get("default_lora_scale", 1.0))
         ad_name = "vid_speed_lora" if idx_l == 0 and lid == clean_primary else (ldef.get("adapter_name") or f"vid_lora_{idx_l}")
         resolved_specs.append((lid, ad_name, eff_sc, ldef))
@@ -2300,7 +2291,50 @@ def _frames_to_mp4(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _release_video_after_generation(fn: Any) -> Any:
+    """Release the requested video bundle inside the GPU lock, preserving disk files.
+
+    FFmpeg does not use the model slot. Retain an unrelated previously loaded slot
+    when a new request fails before switching models. Reloading costs time and
+    memory reclamation is best-effort, not an OOM guarantee.
+    """
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        job = bound.arguments.get("job")
+        if bound.arguments.get("mode") == "ffmpeg_motion" or bound.arguments.get("model_id") == "ffmpeg-motion-cpu":
+            return fn(*args, **kwargs)
+        try:
+            return fn(*args, **kwargs)
+        except BaseException as exc:
+            # Failed inference tracebacks retain locals including the pipeline.
+            import traceback
+            pending, seen = [exc], set()
+            while pending:
+                err = pending.pop()
+                if err is None or id(err) in seen:
+                    continue
+                seen.add(id(err))
+                traceback.clear_frames(err.__traceback__)
+                pending.extend([err.__cause__, err.__context__])
+            raise
+        finally:
+            slot = memory_manager.get_slot("video")
+            requested = bound.arguments.get("model_id")
+            if slot and (not requested or requested == slot.get("model_id")):
+                model_name = slot.get("model_id", "vídeo")
+                del slot
+                memory_manager.unload_slot("video")
+                if job:
+                    job.log(f"Modelo {model_name}: liberación de memoria solicitada tras generar; archivos en disco conservados. Se volverá a cargar al generar.")
+    return wrapped
+
+
 @serialized_gpu_operation(slots=lambda args: () if args["mode"] == "ffmpeg_motion" or args["model_id"] == "ffmpeg-motion-cpu" else ("video",), managed=True)
+@_release_video_after_generation
 def generate_video_clip(
     mode: str = "ai",  # "ai" | "ffmpeg_motion"
     video_submode: str = "auto",  # "auto" | "t2v" | "i2v" | "flf2v"
@@ -2436,6 +2470,14 @@ def generate_video_clip(
                 "Para transiciones fluidas Frame a Frame (Inicio → Fin) elige arriba «Wan 2.1 VACE 14B Quantized FP8», "
                 "«Wan 2.1 FLF2V 14B 720P Quantized FP8», «LTX-Video 0.9.8 13B Distilled» o «Wan 2.1 VACE 1.3B»."
             )
+
+    requested_loras = [video_lora_id, *(extra_video_lora_ids or [])]
+    for lid in dict.fromkeys(str(x).strip() for x in requested_loras if x and str(x).strip()):
+        ldef = catalog_manager.get_definition(lid)
+        if (not ldef or ldef.get("category") != "lora" or ldef.get("lora_target") != "video"
+            or ldef.get("validation_state") == "candidate" or target_model_id not in (ldef.get("compatible_models") or [])
+            or submode in (ldef.get("incompatible_submodes") or [])):
+            raise ValueError(f"VIDEO_LORA_INCOMPATIBLE: «{lid}» no está disponible para {target_model_id} / {submode}.")
 
     infer_pct_start = 10.0
     if slot is None or slot.get("model_id") != target_model_id:
